@@ -45,6 +45,7 @@ target_include_directories(remoe_host PRIVATE
 target_compile_definitions(remoe_host PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
+    REMOE_VERSION="${PROJECT_VERSION}"
     _WIN32_WINNT=0x0A00)
 
 target_compile_options(remoe_host PRIVATE

@@ -293,6 +293,8 @@ std::uint32_t scaled_dimension(std::uint32_t source, std::uint32_t percent) {
 
 int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
+    std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
+              << remoe::protocol::kVersion << ")\n";
     remoe::WinsockRuntime winsock;
     remoe::DesktopCapture capture(options.output);
 
