@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace remoe {
 
@@ -28,7 +29,7 @@ public:
     [[nodiscard]] SOCKET accept_client(std::string& peer, std::chrono::milliseconds timeout) const;
 
 private:
-    SOCKET listen_socket_ = INVALID_SOCKET;
+    std::vector<SOCKET> listen_sockets_;
 };
 
 class TcpClient {

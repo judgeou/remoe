@@ -56,6 +56,7 @@ target_link_options(remoe_host PRIVATE
 target_link_libraries(remoe_host PRIVATE
     d3d11
     dxgi
+    shell32
     ws2_32
     "${NVENC_SDK_ROOT}/Lib/win/x64/nvencodeapi.lib")
 

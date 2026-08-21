@@ -51,31 +51,39 @@ cmake --build build --config Release
 
 ## 运行
 
-`remoe_host.exe` 内嵌 `requireAdministrator` manifest，启动时始终触发 Windows UAC 管理员授权。
-如果用户拒绝授权，host 不会运行。管理员权限可以减少普通高完整性窗口的交互限制，但 Windows UAC
-安全桌面仍属于隔离桌面，当前版本不能采集或远程操作安全桌面本身。
+`remoe_host.exe` 默认以当前用户权限运行，不会主动弹出 UAC。需要管理员权限时添加 `--admin`，
+程序会使用 Windows `runas` 重新启动自身；如果用户拒绝授权，host 不会运行。管理员权限可以减少
+普通高完整性窗口的交互限制，但 Windows UAC 安全桌面仍属于隔离桌面，当前版本不能采集或远程操作
+安全桌面本身。
 
-仅本机监听（默认且更安全）：
+仅本机监听（默认且更安全，同时监听 `127.0.0.1` 和 `::1`）：
 
 ```powershell
 .\build\Release\remoe_host.exe
 ```
 
+以管理员权限启动：
+
+```powershell
+.\build\Release\remoe_host.exe --admin
+```
+
 允许局域网 client 连接：
 
 ```powershell
-.\build\Release\remoe_host.exe --bind 0.0.0.0 --port 47990 --fps 60 --bitrate 20
+.\build\Release\remoe_host.exe --bind "*" --port 47990 --fps 60 --bitrate 20
 ```
 
 参数：
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `--bind` | `127.0.0.1` | TCP 监听地址；局域网使用 `0.0.0.0` 或 host 的具体地址 |
+| `--bind` | `localhost` | TCP 监听地址；默认同时监听 IPv4/IPv6 loopback。`*`、`0.0.0.0` 或 `::` 表示同时监听 IPv4/IPv6 任意地址；具体 IP 只监听该地址族 |
 | `--port` | `47990` | TCP 端口 |
 | `--output` | `0` | 显示器索引（跨所有 DXGI adapter 顺序编号） |
 | `--fps` | `60` | 目标帧率，1–240 |
 | `--bitrate` | `20` | CBR 目标码率，单位 Mbps |
+| `--admin` | 关闭 | 通过 UAC `runas` 重新启动为管理员进程 |
 
 Windows Defender Firewall 首次运行可能提示放行。只应在可信网络中放行“专用网络”，不要直接暴露到公网。
 
@@ -117,7 +125,7 @@ client 连接后的第一张输入强制为 IDR/key frame，并请求 NVENC 携�
 
 ## 当前限制与安全边界
 
-- 协议目前没有 TLS 或认证。默认仅监听 `127.0.0.1`；若绑定局域网地址，任何可访问该端口的设备都
+- 协议目前没有 TLS 或认证。默认仅监听 `127.0.0.1` 和 `::1`；若绑定局域网地址，任何可访问该端口的设备都
   可能看到桌面画面。后续正式使用前应加入基于 TLS 的加密和配对认证。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。

@@ -35,39 +35,64 @@ TcpServer::TcpServer(const std::string& bind_address, std::uint16_t port) {
 
     addrinfo* addresses = nullptr;
     const auto port_text = std::to_string(port);
-    const char* node = (bind_address == "*" || bind_address == "0.0.0.0") ? nullptr : bind_address.c_str();
+    const bool wildcard = bind_address == "*" || bind_address == "0.0.0.0" || bind_address == "::";
+    const bool loopback = bind_address == "localhost";
+    const char* node = wildcard ? nullptr : (loopback ? "localhost" : bind_address.c_str());
     const int result = getaddrinfo(node, port_text.c_str(), &hints, &addresses);
     if (result != 0) {
         throw std::runtime_error("getaddrinfo failed: " + std::string(gai_strerrorA(result)));
     }
 
     for (auto* address = addresses; address != nullptr; address = address->ai_next) {
+        if (address->ai_family != AF_INET && address->ai_family != AF_INET6) continue;
+        bool family_already_bound = false;
+        for (SOCKET existing : listen_sockets_) {
+            sockaddr_storage bound{};
+            int bound_length = sizeof(bound);
+            if (getsockname(existing, reinterpret_cast<sockaddr*>(&bound), &bound_length) == 0 &&
+                bound.ss_family == address->ai_family) {
+                family_already_bound = true;
+                break;
+            }
+        }
+        if (family_already_bound) continue;
+
         SOCKET candidate = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
         if (candidate == INVALID_SOCKET) continue;
 
         BOOL exclusive = TRUE;
         setsockopt(candidate, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
                    reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
+        if (address->ai_family == AF_INET6) {
+            DWORD ipv6_only = TRUE;
+            setsockopt(candidate, IPPROTO_IPV6, IPV6_V6ONLY,
+                       reinterpret_cast<const char*>(&ipv6_only), sizeof(ipv6_only));
+        }
         if (bind(candidate, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0 &&
             listen(candidate, 1) == 0) {
-            listen_socket_ = candidate;
-            break;
+            listen_sockets_.push_back(candidate);
+            continue;
         }
         closesocket(candidate);
     }
     freeaddrinfo(addresses);
 
-    if (listen_socket_ == INVALID_SOCKET) throw socket_error("bind/listen");
+    if (listen_sockets_.empty()) throw socket_error("bind/listen");
+    if ((wildcard || loopback) && listen_sockets_.size() != 2) {
+        for (SOCKET socket : listen_sockets_) closesocket(socket);
+        listen_sockets_.clear();
+        throw std::runtime_error("failed to bind both IPv4 and IPv6 listening sockets");
+    }
 }
 
 TcpServer::~TcpServer() {
-    if (listen_socket_ != INVALID_SOCKET) closesocket(listen_socket_);
+    for (SOCKET socket : listen_sockets_) closesocket(socket);
 }
 
 SOCKET TcpServer::accept_client(std::string& peer, std::chrono::milliseconds timeout) const {
     fd_set readable;
     FD_ZERO(&readable);
-    FD_SET(listen_socket_, &readable);
+    for (SOCKET socket : listen_sockets_) FD_SET(socket, &readable);
     timeval wait{};
     wait.tv_sec = static_cast<long>(timeout.count() / 1000);
     wait.tv_usec = static_cast<long>((timeout.count() % 1000) * 1000);
@@ -77,7 +102,15 @@ SOCKET TcpServer::accept_client(std::string& peer, std::chrono::milliseconds tim
 
     sockaddr_storage address{};
     int address_length = sizeof(address);
-    SOCKET client = accept(listen_socket_, reinterpret_cast<sockaddr*>(&address), &address_length);
+    SOCKET ready_socket = INVALID_SOCKET;
+    for (SOCKET socket : listen_sockets_) {
+        if (FD_ISSET(socket, &readable)) {
+            ready_socket = socket;
+            break;
+        }
+    }
+    if (ready_socket == INVALID_SOCKET) throw std::runtime_error("select returned without a readable socket");
+    SOCKET client = accept(ready_socket, reinterpret_cast<sockaddr*>(&address), &address_length);
     if (client == INVALID_SOCKET) throw socket_error("accept");
 
     std::array<char, NI_MAXHOST> host{};

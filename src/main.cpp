@@ -5,6 +5,7 @@
 #include "NvEncoder/NvEncoderD3D11.h"
 
 #include <Windows.h>
+#include <shellapi.h>
 
 #include <atomic>
 #include <chrono>
@@ -34,12 +35,106 @@ BOOL WINAPI console_handler(DWORD event) {
 }
 
 struct Options {
-    std::string bind = "127.0.0.1";
+    std::string bind = "localhost";
     std::uint16_t port = 47990;
     std::uint32_t output = 0;
     std::uint32_t fps = 60;
     std::uint32_t bitrate_mbps = 20;
 };
+
+bool is_process_elevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        throw std::runtime_error("OpenProcessToken failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation,
+                                        sizeof(elevation), &size);
+    const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(token);
+    if (!ok) {
+        throw std::runtime_error("GetTokenInformation failed, Win32 error " +
+                                 std::to_string(error));
+    }
+    return elevation.TokenIsElevated != 0;
+}
+
+std::wstring quote_windows_argument(std::wstring_view argument) {
+    if (argument.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(argument);
+    }
+
+    std::wstring quoted(1, L'\"');
+    std::size_t backslashes = 0;
+    for (wchar_t character : argument) {
+        if (character == L'\\') {
+            ++backslashes;
+        } else if (character == L'\"') {
+            quoted.append(backslashes * 2 + 1, L'\\');
+            quoted.push_back(L'\"');
+            backslashes = 0;
+        } else {
+            quoted.append(backslashes, L'\\');
+            backslashes = 0;
+            quoted.push_back(character);
+        }
+    }
+    quoted.append(backslashes * 2, L'\\');
+    quoted.push_back(L'\"');
+    return quoted;
+}
+
+// Returns true in the original process after it successfully launches an elevated child.
+bool relaunch_as_admin_if_requested() {
+    int argument_count = 0;
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    if (!arguments) {
+        throw std::runtime_error("CommandLineToArgvW failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+
+    bool requested = false;
+    std::wstring parameters;
+    for (int i = 1; i < argument_count; ++i) {
+        if (std::wstring_view(arguments[i]) == L"--admin") {
+            requested = true;
+            continue;
+        }
+        if (!parameters.empty()) parameters.push_back(L' ');
+        parameters += quote_windows_argument(arguments[i]);
+    }
+    LocalFree(arguments);
+
+    if (!requested || is_process_elevated()) return false;
+
+    std::vector<wchar_t> executable(32768);
+    const DWORD executable_size = GetModuleFileNameW(nullptr, executable.data(),
+                                                     static_cast<DWORD>(executable.size()));
+    if (executable_size == 0 || executable_size == executable.size()) {
+        throw std::runtime_error("GetModuleFileNameW failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+
+    SHELLEXECUTEINFOW execute{};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execute.lpVerb = L"runas";
+    execute.lpFile = executable.data();
+    execute.lpParameters = parameters.c_str();
+    execute.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&execute)) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_CANCELLED) {
+            throw std::runtime_error("administrator request was cancelled");
+        }
+        throw std::runtime_error("ShellExecuteExW(runas) failed, Win32 error " +
+                                 std::to_string(error));
+    }
+    if (execute.hProcess) CloseHandle(execute.hProcess);
+    return true;
+}
 
 std::uint32_t parse_u32(std::string_view text, std::string_view name, std::uint32_t min,
                         std::uint32_t max) {
@@ -60,11 +155,12 @@ void print_help() {
     std::cout <<
         "remoe_host - Windows desktop AV1/NVENC streaming host\n\n"
         "Usage: remoe_host [options]\n"
-        "  --bind <address>   Listen address (default: 127.0.0.1)\n"
+        "  --bind <address>   Listen address (default: localhost, IPv4 + IPv6)\n"
         "  --port <1-65535>   TCP port (default: 47990)\n"
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --fps <1-240>      Target frame rate (default: 60)\n"
         "  --bitrate <Mbps>   Target bitrate (default: 20)\n"
+        "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
 }
 
@@ -76,6 +172,7 @@ Options parse_options(int argc, char** argv) {
             print_help();
             std::exit(0);
         }
+        if (arg == "--admin") continue; // Consumed by relaunch_as_admin_if_requested().
         if (i + 1 >= argc) throw std::runtime_error("missing value after " + std::string(arg));
         const std::string_view value(argv[++i]);
         if (arg == "--bind") options.bind = value;
@@ -222,6 +319,7 @@ int run(const Options& options) {
 
 int main(int argc, char** argv) {
     try {
+        if (relaunch_as_admin_if_requested()) return 0;
         return run(parse_options(argc, argv));
     } catch (const NVENCException& error) {
         std::cerr << "NVENC error: " << error.what() << " (code " << error.getErrorCode() << ")\n";
