@@ -19,7 +19,21 @@
 
 ## 构建
 
-在 “Developer PowerShell for VS 2022” 中执行：
+推荐在普通 PowerShell 或命令提示符中使用自动构建脚本。它会查找最新安装的 Visual Studio
+（2022 或更新版本）、加载 x64 MSVC 环境，并使用 Ninja Multi-Config 构建。这也适用于 CMake
+尚未提供对应 Visual Studio 生成器的新版 Visual Studio：
+
+```powershell
+.\build.cmd
+# 或构建其他配置
+.\build.cmd Debug
+```
+
+默认生成文件为 `build-local/Release/remoe_host.exe`。脚本要求 Visual Studio 安装了
+“Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
+组件或单独安装的 Ninja 均可。
+
+原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
 
 ```powershell
 cmake -S . -B build -A x64
