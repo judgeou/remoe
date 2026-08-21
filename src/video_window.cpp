@@ -81,7 +81,7 @@ VideoWindow::VideoWindow(std::uint32_t width, std::uint32_t height) {
     if (!window_) throw std::runtime_error("CreateWindowExW failed");
 
     create_device_and_swapchain(width, height);
-    ShowWindow(window_, SW_SHOW);
+    ShowWindow(window_, SW_SHOWMAXIMIZED);
     UpdateWindow(window_);
 }
 
