@@ -3,6 +3,7 @@
 #include <WS2tcpip.h>
 
 #include <array>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -127,7 +128,7 @@ SOCKET TcpServer::accept_client(std::string& peer, std::chrono::milliseconds tim
     BOOL no_delay = TRUE;
     setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&no_delay), sizeof(no_delay));
-    DWORD send_timeout_ms = 2000;
+    DWORD send_timeout_ms = 10000;
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
                reinterpret_cast<const char*>(&send_timeout_ms), sizeof(send_timeout_ms));
     DWORD receive_timeout_ms = 2000;
@@ -150,11 +151,17 @@ TcpClient& TcpClient::operator=(TcpClient&& other) noexcept {
 
 bool TcpClient::send_all(const void* data, std::size_t size) const {
     const auto* bytes = static_cast<const char*>(data);
+    const std::size_t total_size = size;
     while (size > 0) {
         const int chunk = static_cast<int>((std::min)(size,
             static_cast<std::size_t>((std::numeric_limits<int>::max)())));
         const int sent = send(socket_, bytes, chunk, 0);
-        if (sent == SOCKET_ERROR || sent == 0) return false;
+        if (sent == SOCKET_ERROR || sent == 0) {
+            const int error = sent == SOCKET_ERROR ? WSAGetLastError() : 0;
+            std::cerr << "TCP send failed after " << total_size - size << '/'
+                      << total_size << " bytes, WSA error " << error << '\n';
+            return false;
+        }
         bytes += sent;
         size -= static_cast<std::size_t>(sent);
     }

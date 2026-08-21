@@ -251,7 +251,8 @@ void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) 
     init.frameRateNum = settings.fps;
     init.frameRateDen = 1;
     init.enablePTD = 1;
-    init.encodeConfig->gopLength = settings.fps * 2;
+    // A one-second GOP bounds recovery time when a slow client drops stale frames.
+    init.encodeConfig->gopLength = settings.fps;
     init.encodeConfig->frameIntervalP = 1;
     init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
     init.encodeConfig->rcParams.averageBitRate = settings.bitrate_bps;

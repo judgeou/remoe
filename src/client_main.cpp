@@ -6,13 +6,18 @@
 #include <WS2tcpip.h>
 #include <Windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -189,41 +194,142 @@ void validate_stream_header(const remoe::protocol::StreamHeader& header) {
     }
 }
 
-void receive_stream(StreamConnection& connection, remoe::VideoWindow& window,
-                    std::exception_ptr& worker_error) {
-    try {
-        remoe::VplAv1Decoder decoder(window.device(),
-            [&window](ID3D11Texture2D* texture, std::uint32_t width, std::uint32_t height) {
-                window.present(texture, width, height);
-            });
-        std::cout << "Decoder: " << decoder.implementation_name() << '\n';
+struct EncodedFrame {
+    remoe::protocol::FrameHeader header;
+    std::vector<std::uint8_t> payload;
+    bool reset_decoder = false;
+};
 
-        std::vector<std::uint8_t> payload;
+class EncodedFrameQueue {
+public:
+    EncodedFrameQueue(std::size_t max_bytes, std::size_t max_frames)
+        : max_bytes_(max_bytes), max_frames_(max_frames) {}
+
+    bool push(EncodedFrame frame) {
+        std::lock_guard lock(mutex_);
+        if (stopped_) return false;
+
+        const bool key_frame = (frame.header.flags & remoe::protocol::kFrameKey) != 0;
+        if (waiting_for_key_frame_) {
+            if (!key_frame) {
+                ++dropped_frames_;
+                return true;
+            }
+            frame.reset_decoder = true;
+            waiting_for_key_frame_ = false;
+            std::cerr << "Decoder queue recovered at key frame "
+                      << frame.header.frame_number << " after dropping "
+                      << dropped_frames_ << " frames\n";
+            dropped_frames_ = 0;
+        }
+
+        if (!frames_.empty() &&
+            (queued_bytes_ + frame.payload.size() > max_bytes_ ||
+             frames_.size() >= max_frames_)) {
+            dropped_frames_ += frames_.size();
+            frames_.clear();
+            queued_bytes_ = 0;
+            waiting_for_key_frame_ = true;
+            std::cerr << "Decoder queue overflow; dropping old GOP and waiting for a key frame\n";
+            if (!key_frame) {
+                ++dropped_frames_;
+                return true;
+            }
+            frame.reset_decoder = true;
+            waiting_for_key_frame_ = false;
+            dropped_frames_ = 0;
+        }
+
+        queued_bytes_ += frame.payload.size();
+        frames_.push_back(std::move(frame));
+        condition_.notify_one();
+        return true;
+    }
+
+    bool pop(EncodedFrame& frame, const std::atomic_bool& running) {
+        std::unique_lock lock(mutex_);
+        condition_.wait(lock, [&] { return stopped_ || !frames_.empty() || !running; });
+        if (!running || frames_.empty()) return false;
+        frame = std::move(frames_.front());
+        queued_bytes_ -= frame.payload.size();
+        frames_.pop_front();
+        return true;
+    }
+
+    void stop() {
+        std::lock_guard lock(mutex_);
+        stopped_ = true;
+        condition_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<EncodedFrame> frames_;
+    std::size_t queued_bytes_ = 0;
+    std::size_t dropped_frames_ = 0;
+    const std::size_t max_bytes_;
+    const std::size_t max_frames_;
+    bool waiting_for_key_frame_ = false;
+    bool stopped_ = false;
+};
+
+class PipelineState {
+public:
+    void fail(std::exception_ptr error, EncodedFrameQueue& queue,
+              remoe::VideoWindow& window) {
+        {
+            std::lock_guard lock(mutex_);
+            if (!error_) error_ = std::move(error);
+        }
+        queue.stop();
+        window.request_close();
+    }
+
+    void rethrow_if_failed() {
+        std::exception_ptr error;
+        {
+            std::lock_guard lock(mutex_);
+            error = error_;
+        }
+        if (error) std::rethrow_exception(error);
+    }
+
+private:
+    std::mutex mutex_;
+    std::exception_ptr error_;
+};
+
+void receive_frames(StreamConnection& connection, remoe::VideoWindow& window,
+                    EncodedFrameQueue& queue, PipelineState& pipeline) {
+    try {
         auto statistics_epoch = std::chrono::steady_clock::now();
         std::uint64_t video_bytes = 0;
         std::uint64_t network_bytes = 0;
         while (window.running()) {
-            remoe::protocol::FrameHeader header;
-            if (!connection.receive_all(&header, sizeof(header), window.running_flag())) {
+            EncodedFrame frame;
+            if (!connection.receive_all(&frame.header, sizeof(frame.header),
+                                        window.running_flag())) {
                 if (!window.running()) break;
                 throw std::runtime_error("host disconnected");
             }
-            if (header.magic != remoe::protocol::kFrameMagic ||
-                header.version != remoe::protocol::kVersion ||
-                header.header_size != sizeof(header)) {
+            if (frame.header.magic != remoe::protocol::kFrameMagic ||
+                frame.header.version != remoe::protocol::kVersion ||
+                frame.header.header_size != sizeof(frame.header)) {
                 throw std::runtime_error("host sent an incompatible frame header");
             }
             constexpr std::uint32_t max_payload = 64 * 1024 * 1024;
-            if (header.payload_size == 0 || header.payload_size > max_payload) {
+            if (frame.header.payload_size == 0 || frame.header.payload_size > max_payload) {
                 throw std::runtime_error("host sent an invalid AV1 payload size");
             }
-            payload.resize(header.payload_size);
-            if (!connection.receive_all(payload.data(), payload.size(), window.running_flag())) {
+            frame.payload.resize(frame.header.payload_size);
+            if (!connection.receive_all(frame.payload.data(), frame.payload.size(),
+                                        window.running_flag())) {
                 if (!window.running()) break;
                 throw std::runtime_error("host disconnected during an AV1 frame");
             }
-            video_bytes += payload.size();
-            network_bytes += sizeof(header) + payload.size();
+            video_bytes += frame.payload.size();
+            network_bytes += sizeof(frame.header) + frame.payload.size();
             const auto now = std::chrono::steady_clock::now();
             const double elapsed = std::chrono::duration<double>(now - statistics_epoch).count();
             if (elapsed >= 1.0) {
@@ -234,12 +340,39 @@ void receive_stream(StreamConnection& connection, remoe::VideoWindow& window,
                 video_bytes = 0;
                 network_bytes = 0;
             }
-            decoder.submit(payload);
+            if (!queue.push(std::move(frame))) break;
         }
-        decoder.drain();
+        queue.stop();
     } catch (...) {
-        worker_error = std::current_exception();
-        window.request_close();
+        pipeline.fail(std::current_exception(), queue, window);
+    }
+}
+
+void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
+                   PipelineState& pipeline) {
+    try {
+        const auto create_decoder = [&window] {
+            return std::make_unique<remoe::VplAv1Decoder>(window.device(),
+                [&window](ID3D11Texture2D* texture, std::uint32_t width,
+                          std::uint32_t height) {
+                    window.present(texture, width, height);
+                });
+        };
+        auto decoder = create_decoder();
+        std::cout << "Decoder: " << decoder->implementation_name() << '\n';
+
+        EncodedFrame frame;
+        while (queue.pop(frame, *window.running_flag())) {
+            if (frame.reset_decoder) {
+                decoder.reset();
+                decoder = create_decoder();
+                std::cerr << "Decoder reset after dropping stale frames\n";
+            }
+            decoder->submit(frame.payload);
+        }
+        if (window.running()) decoder->drain();
+    } catch (...) {
+        pipeline.fail(std::current_exception(), queue, window);
     }
 }
 
@@ -274,13 +407,26 @@ int run(const Options& options) {
     window.set_input_callback([&connection](const remoe::protocol::InputEvent& event) {
         return connection.send_all(&event, sizeof(event));
     });
-    std::exception_ptr worker_error;
-    std::thread worker(receive_stream, std::ref(connection), std::ref(window),
-                       std::ref(worker_error));
+    constexpr std::size_t minimum_queue_bytes = 8 * 1024 * 1024;
+    constexpr std::size_t maximum_queue_bytes = 64 * 1024 * 1024;
+    const std::size_t two_seconds_of_stream =
+        static_cast<std::size_t>(stream_header.bitrate_bps) / 8 * 2;
+    const std::size_t queue_bytes = (std::clamp)(two_seconds_of_stream,
+                                                 minimum_queue_bytes,
+                                                 maximum_queue_bytes);
+    const std::size_t queue_frames = static_cast<std::size_t>(stream_header.fps_num) * 2;
+    EncodedFrameQueue queue(queue_bytes, queue_frames);
+    PipelineState pipeline;
+    std::thread receiver(receive_frames, std::ref(connection), std::ref(window),
+                         std::ref(queue), std::ref(pipeline));
+    std::thread decoder(decode_frames, std::ref(window), std::ref(queue),
+                        std::ref(pipeline));
     const int result = window.message_loop();
     window.stop();
-    worker.join();
-    if (worker_error) std::rethrow_exception(worker_error);
+    queue.stop();
+    receiver.join();
+    decoder.join();
+    pipeline.rethrow_if_failed();
     return result;
 }
 
