@@ -130,6 +130,9 @@ SOCKET TcpServer::accept_client(std::string& peer, std::chrono::milliseconds tim
     DWORD send_timeout_ms = 2000;
     setsockopt(client, SOL_SOCKET, SO_SNDTIMEO,
                reinterpret_cast<const char*>(&send_timeout_ms), sizeof(send_timeout_ms));
+    DWORD receive_timeout_ms = 2000;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&receive_timeout_ms), sizeof(receive_timeout_ms));
     return client;
 }
 
@@ -154,6 +157,19 @@ bool TcpClient::send_all(const void* data, std::size_t size) const {
         if (sent == SOCKET_ERROR || sent == 0) return false;
         bytes += sent;
         size -= static_cast<std::size_t>(sent);
+    }
+    return true;
+}
+
+bool TcpClient::receive_all(void* data, std::size_t size) const {
+    auto* bytes = static_cast<char*>(data);
+    while (size > 0) {
+        const int chunk = static_cast<int>((std::min)(size,
+            static_cast<std::size_t>((std::numeric_limits<int>::max)())));
+        const int received = recv(socket_, bytes, chunk, 0);
+        if (received == SOCKET_ERROR || received == 0) return false;
+        bytes += received;
+        size -= static_cast<std::size_t>(received);
     }
     return true;
 }

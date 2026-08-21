@@ -38,8 +38,14 @@ struct Options {
     std::string bind = "localhost";
     std::uint16_t port = 47990;
     std::uint32_t output = 0;
+    // Zero means the operator did not configure a server-side limit.
+    std::uint32_t max_fps = 0;
+    std::uint32_t max_bitrate_mbps = 0;
+};
+
+struct StreamSettings {
     std::uint32_t fps = 60;
-    std::uint32_t bitrate_mbps = 20;
+    std::uint32_t bitrate_bps = 20'000'000;
 };
 
 bool is_process_elevated() {
@@ -158,8 +164,9 @@ void print_help() {
         "  --bind <address>   Listen address (default: localhost, IPv4 + IPv6)\n"
         "  --port <1-65535>   TCP port (default: 47990)\n"
         "  --output <index>   Desktop output index (default: 0)\n"
-        "  --fps <1-240>      Target frame rate (default: 60)\n"
-        "  --bitrate <Mbps>   Target bitrate (default: 20)\n"
+        "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
+        "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
+        "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
 }
@@ -178,8 +185,11 @@ Options parse_options(int argc, char** argv) {
         if (arg == "--bind") options.bind = value;
         else if (arg == "--port") options.port = static_cast<std::uint16_t>(parse_u32(value, arg, 1, 65535));
         else if (arg == "--output") options.output = parse_u32(value, arg, 0, 63);
-        else if (arg == "--fps") options.fps = parse_u32(value, arg, 1, 240);
-        else if (arg == "--bitrate") options.bitrate_mbps = parse_u32(value, arg, 1, 1000);
+        else if (arg == "--max-fps" || arg == "--fps") {
+            options.max_fps = parse_u32(value, arg, 1, 240);
+        } else if (arg == "--max-bitrate" || arg == "--bitrate") {
+            options.max_bitrate_mbps = parse_u32(value, arg, 1, 1000);
+        }
         else throw std::runtime_error("unknown option: " + std::string(arg));
     }
     return options;
@@ -228,38 +238,62 @@ bool send_packet(remoe::TcpClient& client, const NvEncOutputFrame& packet,
            client.send_all(av1.data(), av1.size());
 }
 
-void configure_encoder(NvEncoderD3D11& encoder, const Options& options) {
+void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) {
     NV_ENC_INITIALIZE_PARAMS init{NV_ENC_INITIALIZE_PARAMS_VER};
     NV_ENC_CONFIG config{NV_ENC_CONFIG_VER};
     init.encodeConfig = &config;
     encoder.CreateDefaultEncoderParams(&init, NV_ENC_CODEC_AV1_GUID, NV_ENC_PRESET_P1_GUID,
                                        NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
 
-    init.frameRateNum = options.fps;
+    init.frameRateNum = settings.fps;
     init.frameRateDen = 1;
     init.enablePTD = 1;
-    init.encodeConfig->gopLength = options.fps * 2;
+    init.encodeConfig->gopLength = settings.fps * 2;
     init.encodeConfig->frameIntervalP = 1;
     init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-    init.encodeConfig->rcParams.averageBitRate = options.bitrate_mbps * 1'000'000u;
+    init.encodeConfig->rcParams.averageBitRate = settings.bitrate_bps;
     init.encodeConfig->rcParams.maxBitRate = init.encodeConfig->rcParams.averageBitRate;
-    init.encodeConfig->rcParams.vbvBufferSize = init.encodeConfig->rcParams.averageBitRate / options.fps;
+    init.encodeConfig->rcParams.vbvBufferSize = init.encodeConfig->rcParams.averageBitRate / settings.fps;
     init.encodeConfig->rcParams.vbvInitialDelay = init.encodeConfig->rcParams.vbvBufferSize;
     init.encodeConfig->encodeCodecConfig.av1Config.repeatSeqHdr = 1;
     encoder.CreateEncoder(&init);
+}
+
+bool receive_client_settings(remoe::TcpClient& client, const Options& options,
+                             StreamSettings& settings) {
+    remoe::protocol::ClientConfig request;
+    if (!client.receive_all(&request, sizeof(request))) return false;
+    if (request.magic != remoe::protocol::kClientConfigMagic ||
+        request.version != remoe::protocol::kVersion ||
+        request.header_size != sizeof(request) || request.fps_den != 1 ||
+        request.reserved != 0 ||
+        request.fps_num == 0 || request.fps_num > 240 ||
+        (options.max_fps != 0 && request.fps_num > options.max_fps) ||
+        request.bitrate_bps < 1'000'000u ||
+        request.bitrate_bps > 1'000'000'000u ||
+        (options.max_bitrate_mbps != 0 &&
+         request.bitrate_bps > options.max_bitrate_mbps * 1'000'000u)) {
+        return false;
+    }
+    settings.fps = request.fps_num;
+    settings.bitrate_bps = request.bitrate_bps;
+    return true;
 }
 
 int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
     remoe::WinsockRuntime winsock;
     remoe::DesktopCapture capture(options.output);
-    NvEncoderD3D11 encoder(capture.device(), capture.width(), capture.height(),
-                           NV_ENC_BUFFER_FORMAT_ARGB, 0);
-    configure_encoder(encoder, options);
 
     remoe::TcpServer server(options.bind, options.port);
     std::cout << "Display " << options.output << ": " << capture.width() << 'x' << capture.height() << '\n'
-              << "AV1 NVENC: " << options.fps << " fps, " << options.bitrate_mbps << " Mbps\n"
+              << "Client FPS limit: ";
+    if (options.max_fps) std::cout << options.max_fps;
+    else std::cout << "unlimited";
+    std::cout << "\nClient bitrate limit: ";
+    if (options.max_bitrate_mbps) std::cout << options.max_bitrate_mbps << " Mbps";
+    else std::cout << "unlimited";
+    std::cout << '\n'
               << "Listening on " << options.bind << ':' << options.port << " (Ctrl+C to stop)\n";
 
     std::uint64_t frame_number = 0;
@@ -271,17 +305,32 @@ int run(const Options& options) {
         remoe::TcpClient client(accepted);
         std::cout << "Client connected: " << peer << '\n';
 
+        StreamSettings settings;
+        if (!receive_client_settings(client, options, settings)) {
+            std::cout << "Client rejected: invalid or missing protocol v2 stream request\n";
+            continue;
+        }
+
+        NvEncoderD3D11 encoder(capture.device(), capture.width(), capture.height(),
+                               NV_ENC_BUFFER_FORMAT_ARGB, 0);
+        configure_encoder(encoder, settings);
+        std::cout << "Client requested: " << settings.fps << " fps, "
+                  << settings.bitrate_bps / 1'000'000.0 << " Mbps\n";
+
         remoe::protocol::StreamHeader stream_header;
         stream_header.width = capture.width();
         stream_header.height = capture.height();
-        stream_header.fps_num = options.fps;
-        stream_header.bitrate_bps = options.bitrate_mbps * 1'000'000u;
-        if (!client.send_all(&stream_header, sizeof(stream_header))) continue;
+        stream_header.fps_num = settings.fps;
+        stream_header.bitrate_bps = settings.bitrate_bps;
+        if (!client.send_all(&stream_header, sizeof(stream_header))) {
+            encoder.DestroyEncoder();
+            continue;
+        }
 
         bool first_input = true;
         auto next_frame = Clock::now();
         while (g_running && client.connected()) {
-            next_frame += std::chrono::microseconds(1'000'000 / options.fps);
+            next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
             const NvEncInputFrame* input = encoder.GetNextInputFrame();
             auto* texture = static_cast<ID3D11Texture2D*>(input->inputPtr);
             if (!capture.acquire(texture, std::chrono::milliseconds(100))) continue;
@@ -306,12 +355,11 @@ int run(const Options& options) {
             std::this_thread::sleep_until(next_frame);
         }
         client.close();
+        std::vector<NvEncOutputFrame> pending;
+        encoder.EndEncode(pending);
+        encoder.DestroyEncoder();
         std::cout << "Client disconnected\n";
     }
-
-    std::vector<NvEncOutputFrame> pending;
-    encoder.EndEncode(pending);
-    encoder.DestroyEncoder();
     return 0;
 }
 

@@ -1,7 +1,10 @@
-# remoe host
+# remoe
 
 `remoe_host` 是 Windows 桌面视频流 host 原型：使用 Desktop Duplication API 抓取指定显示器，
 通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 TCP 向一个 client 发送码流。
+
+`remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
+回读到 CPU，呈现使用垂直同步和单帧队列，以降低 Intel GPU、CPU 与显示链路的额外功耗。
 
 当前阶段只提供**画面传输**。键鼠控制、音频、剪贴板、文件传输、加密与身份验证均未实现。
 
@@ -13,6 +16,8 @@
 - 支持 AV1 NVENC 的 NVIDIA GPU 和兼容驱动（通常为 Ada Lovelace 或更新架构）
 - NVIDIA Video Codec SDK 13.0.37，默认路径：
   `third_party/NVENC_Video_Codec_SDK_13.0.37`
+- 构建 client 时需要 Intel oneVPL 2.x 源码，默认路径：`third_party/libvpl`
+- 运行 client 时需要支持 AV1 硬件解码的 Intel GPU 和当前 Intel 图形驱动
 
 当前工程固定使用 NVENC API 13.0，以兼容本机驱动 596.49。若替换 SDK，所用 SDK 的 NVENC API
 版本不能高于驱动通过 `NvEncodeAPIGetMaxSupportedVersion` 返回的版本。
@@ -32,6 +37,10 @@
 默认生成文件为 `build-local/Release/remoe_host.exe`。脚本要求 Visual Studio 安装了
 “Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
 组件或单独安装的 Ninja 均可。
+
+当 `third_party/libvpl` 存在时还会生成 `build-local/Release/remoe_client.exe`。如果 oneVPL
+源码不在默认位置，可在手动配置 CMake 时传入 `-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时
+原有的 host-only 构建仍然可用。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
 
@@ -71,7 +80,7 @@ cmake --build build --config Release
 允许局域网 client 连接：
 
 ```powershell
-.\build\Release\remoe_host.exe --bind "*" --port 47990 --fps 60 --bitrate 20
+.\build-local\Release\remoe_host.exe --bind "*" --port 47990
 ```
 
 参数：
@@ -81,24 +90,54 @@ cmake --build build --config Release
 | `--bind` | `localhost` | TCP 监听地址；默认同时监听 IPv4/IPv6 loopback。`*`、`0.0.0.0` 或 `::` 表示同时监听 IPv4/IPv6 任意地址；具体 IP 只监听该地址族 |
 | `--port` | `47990` | TCP 端口 |
 | `--output` | `0` | 显示器索引（跨所有 DXGI adapter 顺序编号） |
-| `--fps` | `60` | 目标帧率，1–240 |
-| `--bitrate` | `20` | CBR 目标码率，单位 Mbps |
+| `--max-fps` | 不限制 | 可选的 client 最大帧率 |
+| `--max-bitrate` | 不限制 | 可选的 client 最大 CBR 码率，单位 Mbps |
 | `--admin` | 关闭 | 通过 UAC `runas` 重新启动为管理员进程 |
+
+兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
+每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
 
 Windows Defender Firewall 首次运行可能提示放行。只应在可信网络中放行“专用网络”，不要直接暴露到公网。
 
-## TCP 协议 v1
+## Client 运行
 
-所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，host 先发送一次
-`StreamHeader`，随后重复发送 `FrameHeader + AV1 payload`。每个 payload 是 NVENC 返回的一次编码输出，
-不是 IVF 容器；client 应将 payload 按顺序提交给 AV1 decoder。
+连接远端 host：
+
+```powershell
+.\build-local\Release\remoe_client.exe --host 10.14.178.25 --port 47990 `
+  --fps 60 --bitrate 20
+```
+
+client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel GPU、驱动或 oneVPL runtime，
+会直接报错而不会回退到软件解码。关闭播放窗口即可断开连接。
+
+`--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000。
+
+## TCP 协议 v2
+
+所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，client 先发送一次
+`ClientConfig`。host 验证并应用请求后发送 `StreamHeader`，随后重复发送
+`FrameHeader + AV1 payload`。每个 payload 是 NVENC 返回的一次编码输出，不是 IVF 容器；client
+应将 payload 按顺序提交给 AV1 decoder。
+
+### ClientConfig（24 bytes）
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `RMCF` |
+| 4 | u16 | version | `2` |
+| 6 | u16 | header_size | `24` |
+| 8 | u32 | fps_num | client 请求的帧率分子 |
+| 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
+| 16 | u32 | bitrate_bps | client 请求的 CBR 码率 |
+| 20 | u32 | reserved | 0 |
 
 ### StreamHeader（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `1` |
+| 4 | u16 | version | `2` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | codec | `AV01` |
 | 12 | u32 | width | 编码宽度 |
@@ -113,7 +152,7 @@ Windows Defender Firewall 首次运行可能提示放行。只应在可信网络
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `FRAM` |
-| 4 | u16 | version | `1` |
+| 4 | u16 | version | `2` |
 | 6 | u16 | header_size | `32` |
 | 8 | u32 | payload_size | 后续 AV1 数据长度 |
 | 12 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
@@ -138,5 +177,8 @@ client 连接后的第一张输入强制为 IDR/key frame，并请求 NVENC 携�
 - `src/main.cpp`：NVENC AV1 配置、采集/编码循环与重连逻辑
 - `src/tcp_server.*`：WinSock TCP server
 - `src/protocol.h`：后续 client 共用的 wire protocol 定义
+- `src/client_main.cpp`：client 网络接收、协议校验与播放线程
+- `src/vpl_decoder.*`：Intel oneVPL AV1 D3D11 硬件解码
+- `src/video_window.*`：D3D11 Video Processor 与 flip-model 窗口呈现
 
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。

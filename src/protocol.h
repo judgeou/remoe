@@ -6,7 +6,8 @@ namespace remoe::protocol {
 
 constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little-endian)
 constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
-constexpr std::uint16_t kVersion = 1;
+constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
+constexpr std::uint16_t kVersion = 2;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 
 enum FrameFlags : std::uint32_t {
@@ -15,6 +16,16 @@ enum FrameFlags : std::uint32_t {
 };
 
 #pragma pack(push, 1)
+struct ClientConfig {
+    std::uint32_t magic = kClientConfigMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(ClientConfig);
+    std::uint32_t fps_num = 60;
+    std::uint32_t fps_den = 1;
+    std::uint32_t bitrate_bps = 20'000'000;
+    std::uint32_t reserved = 0;
+};
+
 struct StreamHeader {
     std::uint32_t magic = kStreamMagic;
     std::uint16_t version = kVersion;
@@ -39,6 +50,7 @@ struct FrameHeader {
 };
 #pragma pack(pop)
 
+static_assert(sizeof(ClientConfig) == 24);
 static_assert(sizeof(StreamHeader) == 36);
 static_assert(sizeof(FrameHeader) == 32);
 

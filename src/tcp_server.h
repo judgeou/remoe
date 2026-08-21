@@ -42,6 +42,7 @@ public:
     TcpClient& operator=(TcpClient&& other) noexcept;
 
     [[nodiscard]] bool send_all(const void* data, std::size_t size) const;
+    [[nodiscard]] bool receive_all(void* data, std::size_t size) const;
     [[nodiscard]] bool connected() const noexcept { return socket_ != INVALID_SOCKET; }
     void close() noexcept;
 
