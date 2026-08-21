@@ -116,16 +116,16 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 显示，不包含 TCP/IP 和链路层包头。
 
 网络接收和 oneVPL 解码在独立线程运行，中间使用约两秒、8–64 MB 的有界队列吸收短暂的 GPU
-解码或 VSync 停顿。若客户端持续跟不上，接收线程会清除旧 GOP，在下一个关键帧重建解码器并
-恢复到最新画面，避免解码反压直接造成 TCP 半帧断线。连续动态画面下 host 约每秒生成一次
-关键帧以限制恢复时间。
+解码或 VSync 停顿。若客户端持续跟不上，接收线程会清除旧 GOP，并请求 host 立即生成关键帧，
+随后重建解码器恢复到最新画面，避免解码反压直接造成 TCP 半帧断线。正常播放使用无限 GOP，
+不会因固定间隔关键帧在低码率下产生周期性的画质波动。
 
 `--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000；
 `--scale` 是 host 编码分辨率相对被捕获显示器的百分比，可选范围为 10–100，默认 100。例如源画面
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## TCP 协议 v4
+## TCP 协议 v5
 
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，client 先发送一次
 `ClientConfig`。host 验证并应用请求后发送 `StreamHeader`，随后在 host→client 方向重复发送
@@ -137,7 +137,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `4` |
+| 4 | u16 | version | `5` |
 | 6 | u16 | header_size | `28` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
@@ -150,7 +150,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `4` |
+| 4 | u16 | version | `5` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | codec | `AV01` |
 | 12 | u32 | width | 编码宽度 |
@@ -165,7 +165,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `FRAM` |
-| 4 | u16 | version | `4` |
+| 4 | u16 | version | `5` |
 | 6 | u16 | header_size | `32` |
 | 8 | u32 | payload_size | 后续 AV1 数据长度 |
 | 12 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
@@ -177,13 +177,16 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `4` |
+| 4 | u16 | version | `5` |
 | 6 | u16 | header_size | `24` |
-| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘 |
+| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
 | 12 | i32 | value1 | 移动 X（0–65535）、滚轮 delta 或 Windows 扫描码 |
 | 16 | i32 | value2 | 移动 Y（0–65535），其余类型为 0 |
 | 20 | u32 | sequence | client 递增事件编号 |
+
+type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必须为 0。host 收到后会在下一张
+捕获画面强制生成携带 sequence header 的 AV1 IDR，用于客户端丢弃积压帧后的快速恢复。
 
 鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频边缘时坐标
 会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。

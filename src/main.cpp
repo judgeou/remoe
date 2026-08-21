@@ -251,14 +251,16 @@ void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) 
     init.frameRateNum = settings.fps;
     init.frameRateDen = 1;
     init.enablePTD = 1;
-    // A one-second GOP bounds recovery time when a slow client drops stale frames.
-    init.encodeConfig->gopLength = settings.fps;
+    // Avoid periodic quality pulses at low bitrates. The client explicitly requests
+    // an IDR if it must discard stale frames.
+    init.encodeConfig->gopLength = NVENC_INFINITE_GOPLENGTH;
     init.encodeConfig->frameIntervalP = 1;
     init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
     init.encodeConfig->rcParams.averageBitRate = settings.bitrate_bps;
     init.encodeConfig->rcParams.maxBitRate = init.encodeConfig->rcParams.averageBitRate;
     init.encodeConfig->rcParams.vbvBufferSize = init.encodeConfig->rcParams.averageBitRate / settings.fps;
     init.encodeConfig->rcParams.vbvInitialDelay = init.encodeConfig->rcParams.vbvBufferSize;
+    init.encodeConfig->encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
     init.encodeConfig->encodeCodecConfig.av1Config.repeatSeqHdr = 1;
     encoder.CreateEncoder(&init);
 }
@@ -396,6 +398,7 @@ void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
 }
 
 void receive_control_events(remoe::TcpClient& client, std::atomic_bool& session_running,
+                            std::atomic_bool& key_frame_requested,
                             const remoe::DesktopCapture& capture) {
     std::unordered_set<std::uint32_t> pressed_keys;
     std::unordered_set<remoe::protocol::InputType> pressed_buttons;
@@ -403,9 +406,15 @@ void receive_control_events(remoe::TcpClient& client, std::atomic_bool& session_
     while (g_running && session_running) {
         remoe::protocol::InputEvent event;
         if (!client.receive_all(&event, sizeof(event), &session_running)) break;
-        if (event.magic != remoe::protocol::kInputMagic ||
-            event.version != remoe::protocol::kVersion ||
-            event.header_size != sizeof(event) ||
+        const bool valid_header = event.magic == remoe::protocol::kInputMagic &&
+            event.version == remoe::protocol::kVersion &&
+            event.header_size == sizeof(event);
+        if (valid_header && event.type == remoe::protocol::InputType::RequestKeyFrame &&
+            event.flags == 0 && event.value1 == 0 && event.value2 == 0) {
+            key_frame_requested = true;
+            continue;
+        }
+        if (!valid_header ||
             !inject_input_event(event, capture.left(), capture.top(), capture.width(),
                                 capture.height(), pressed_keys, pressed_buttons,
                                 injection_warning_shown)) {
@@ -446,7 +455,7 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!receive_client_settings(client, options, settings)) {
-            std::cout << "Client rejected: invalid or missing protocol v4 stream request\n";
+            std::cout << "Client rejected: invalid or missing protocol v5 stream request\n";
             continue;
         }
 
@@ -472,8 +481,10 @@ int run(const Options& options) {
         }
 
         std::atomic_bool session_running{true};
+        std::atomic_bool key_frame_requested{false};
         std::thread control_thread(receive_control_events, std::ref(client),
-                                   std::ref(session_running), std::cref(capture));
+                                   std::ref(session_running), std::ref(key_frame_requested),
+                                   std::cref(capture));
 
         bool first_input = true;
         auto next_frame = Clock::now();
@@ -484,7 +495,7 @@ int run(const Options& options) {
             if (!capture.acquire(texture, std::chrono::milliseconds(100))) continue;
 
             NV_ENC_PIC_PARAMS picture{NV_ENC_PIC_PARAMS_VER};
-            if (first_input) {
+            if (first_input || key_frame_requested.exchange(false)) {
                 picture.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
                 first_input = false;
             }

@@ -8,7 +8,7 @@ constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little
 constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
-constexpr std::uint16_t kVersion = 4;
+constexpr std::uint16_t kVersion = 5;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 
 enum FrameFlags : std::uint32_t {
@@ -26,6 +26,7 @@ enum class InputType : std::uint16_t {
     MouseWheel = 7,
     MouseHorizontalWheel = 8,
     Keyboard = 9,
+    RequestKeyFrame = 10,
 };
 
 enum InputFlags : std::uint16_t {

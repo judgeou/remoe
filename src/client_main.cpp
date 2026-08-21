@@ -164,6 +164,7 @@ public:
     }
 
     bool send_all(const void* data, std::size_t size) {
+        std::lock_guard lock(send_mutex_);
         const char* input = static_cast<const char*>(data);
         while (size > 0) {
             const int chunk = static_cast<int>((std::min)(
@@ -178,6 +179,7 @@ public:
 
 private:
     SOCKET socket_ = INVALID_SOCKET;
+    std::mutex send_mutex_;
 };
 
 void validate_stream_header(const remoe::protocol::StreamHeader& header) {
@@ -202,18 +204,25 @@ struct EncodedFrame {
 
 class EncodedFrameQueue {
 public:
+    enum class PushResult {
+        Queued,
+        Dropped,
+        RequestKeyFrame,
+        Stopped,
+    };
+
     EncodedFrameQueue(std::size_t max_bytes, std::size_t max_frames)
         : max_bytes_(max_bytes), max_frames_(max_frames) {}
 
-    bool push(EncodedFrame frame) {
+    PushResult push(EncodedFrame frame) {
         std::lock_guard lock(mutex_);
-        if (stopped_) return false;
+        if (stopped_) return PushResult::Stopped;
 
         const bool key_frame = (frame.header.flags & remoe::protocol::kFrameKey) != 0;
         if (waiting_for_key_frame_) {
             if (!key_frame) {
                 ++dropped_frames_;
-                return true;
+                return PushResult::Dropped;
             }
             frame.reset_decoder = true;
             waiting_for_key_frame_ = false;
@@ -233,7 +242,7 @@ public:
             std::cerr << "Decoder queue overflow; dropping old GOP and waiting for a key frame\n";
             if (!key_frame) {
                 ++dropped_frames_;
-                return true;
+                return PushResult::RequestKeyFrame;
             }
             frame.reset_decoder = true;
             waiting_for_key_frame_ = false;
@@ -243,7 +252,7 @@ public:
         queued_bytes_ += frame.payload.size();
         frames_.push_back(std::move(frame));
         condition_.notify_one();
-        return true;
+        return PushResult::Queued;
     }
 
     bool pop(EncodedFrame& frame, const std::atomic_bool& running) {
@@ -340,7 +349,16 @@ void receive_frames(StreamConnection& connection, remoe::VideoWindow& window,
                 video_bytes = 0;
                 network_bytes = 0;
             }
-            if (!queue.push(std::move(frame))) break;
+            const auto push_result = queue.push(std::move(frame));
+            if (push_result == EncodedFrameQueue::PushResult::Stopped) break;
+            if (push_result == EncodedFrameQueue::PushResult::RequestKeyFrame) {
+                remoe::protocol::InputEvent request;
+                request.type = remoe::protocol::InputType::RequestKeyFrame;
+                if (!connection.send_all(&request, sizeof(request))) {
+                    throw std::runtime_error("failed to request an AV1 key frame");
+                }
+                std::cerr << "Requested an immediate key frame from the host\n";
+            }
         }
         queue.stop();
     } catch (...) {
@@ -386,7 +404,7 @@ int run(const Options& options) {
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.scale_percent = options.scale_percent;
     if (!connection.send_all(&request, sizeof(request))) {
-        throw std::runtime_error("failed to send the protocol v4 stream request");
+        throw std::runtime_error("failed to send the protocol v5 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;
