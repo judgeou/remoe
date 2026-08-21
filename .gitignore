@@ -1,0 +1,5 @@
+/build/
+/.vs/
+*.user
+*.suo
+/third_party/NVENC_Video_Codec_SDK_13.1.15/
