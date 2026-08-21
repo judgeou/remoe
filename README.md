@@ -105,39 +105,43 @@ Windows Defender Firewall 首次运行可能提示放行。只应在可信网络
 
 ```powershell
 .\build-local\Release\remoe_client.exe --host 10.14.178.25 --port 47990 `
-  --fps 60 --bitrate 20
+  --fps 60 --bitrate 20 --scale 75
 ```
 
 client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel GPU、驱动或 oneVPL runtime，
 会直接报错而不会回退到软件解码。关闭播放窗口即可断开连接。
 
-`--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000。
+`--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000；
+`--scale` 是 host 编码分辨率相对被捕获显示器的百分比，可选范围为 10–100，默认 100。例如源画面
+为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
+`StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## TCP 协议 v2
+## TCP 协议 v3
 
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，client 先发送一次
 `ClientConfig`。host 验证并应用请求后发送 `StreamHeader`，随后重复发送
 `FrameHeader + AV1 payload`。每个 payload 是 NVENC 返回的一次编码输出，不是 IVF 容器；client
 应将 payload 按顺序提交给 AV1 decoder。
 
-### ClientConfig（24 bytes）
+### ClientConfig（28 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `2` |
-| 6 | u16 | header_size | `24` |
+| 4 | u16 | version | `3` |
+| 6 | u16 | header_size | `28` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | client 请求的 CBR 码率 |
-| 20 | u32 | reserved | 0 |
+| 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
+| 24 | u32 | reserved | 0 |
 
 ### StreamHeader（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `2` |
+| 4 | u16 | version | `3` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | codec | `AV01` |
 | 12 | u32 | width | 编码宽度 |
@@ -152,7 +156,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `FRAM` |
-| 4 | u16 | version | `2` |
+| 4 | u16 | version | `3` |
 | 6 | u16 | header_size | `32` |
 | 8 | u32 | payload_size | 后续 AV1 数据长度 |
 | 12 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
@@ -168,7 +172,7 @@ client 连接后的第一张输入强制为 IDR/key frame，并请求 NVENC 携�
   可能看到桌面画面。后续正式使用前应加入基于 TLS 的加密和配对认证。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
-- 当前不缩放，编码分辨率等于所选显示器分辨率；显示模式变化后需要重启 host。
+- client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
 - 使用原始 TCP，拥塞时可能增加延迟；后续可替换为带拥塞控制的传输层。
 
 ## 源码结构

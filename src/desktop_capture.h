@@ -26,6 +26,9 @@ public:
 
 private:
     void create_duplication();
+    void scale_texture(ID3D11Texture2D* source, ID3D11Texture2D* destination,
+                       std::uint32_t source_width, std::uint32_t source_height,
+                       std::uint32_t destination_width, std::uint32_t destination_height);
 
     std::uint32_t output_index_ = 0;
     std::uint32_t width_ = 0;
@@ -35,6 +38,14 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication_;
+    Microsoft::WRL::ComPtr<ID3D11VideoDevice> video_device_;
+    Microsoft::WRL::ComPtr<ID3D11VideoContext> video_context_;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> video_enumerator_;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor> video_processor_;
+    std::uint32_t scaler_source_width_ = 0;
+    std::uint32_t scaler_source_height_ = 0;
+    std::uint32_t scaler_destination_width_ = 0;
+    std::uint32_t scaler_destination_height_ = 0;
 };
 
 } // namespace remoe

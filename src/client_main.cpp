@@ -27,6 +27,7 @@ struct Options {
     std::uint16_t port = 47990;
     std::uint32_t fps = 60;
     std::uint32_t bitrate_mbps = 20;
+    std::uint32_t scale_percent = 100;
 };
 
 std::uint32_t parse_u32(std::string_view text, std::string_view name,
@@ -52,6 +53,7 @@ void print_help() {
         "  --port <1-65535>  TCP port (default: 47990)\n"
         "  --fps <1-240>     Requested frame rate (default: 60)\n"
         "  --bitrate <Mbps>  Requested AV1 bitrate/quality (default: 20)\n"
+        "  --scale <10-100>  Requested encoding resolution percent (default: 100)\n"
         "  --help            Show this help\n";
 }
 
@@ -72,6 +74,8 @@ Options parse_options(int argc, char** argv) {
             options.fps = parse_u32(value, argument, 1, 240);
         } else if (argument == "--bitrate") {
             options.bitrate_mbps = parse_u32(value, argument, 1, 1000);
+        } else if (argument == "--scale") {
+            options.scale_percent = parse_u32(value, argument, 10, 100);
         }
         else throw std::runtime_error("unknown option: " + std::string(argument));
     }
@@ -230,8 +234,9 @@ int run(const Options& options) {
     remoe::protocol::ClientConfig request;
     request.fps_num = options.fps;
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
+    request.scale_percent = options.scale_percent;
     if (!connection.send_all(&request, sizeof(request))) {
-        throw std::runtime_error("failed to send the protocol v2 stream request");
+        throw std::runtime_error("failed to send the protocol v3 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;

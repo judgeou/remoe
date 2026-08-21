@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -46,6 +47,7 @@ struct Options {
 struct StreamSettings {
     std::uint32_t fps = 60;
     std::uint32_t bitrate_bps = 20'000'000;
+    std::uint32_t scale_percent = 100;
 };
 
 bool is_process_elevated() {
@@ -268,6 +270,7 @@ bool receive_client_settings(remoe::TcpClient& client, const Options& options,
         request.header_size != sizeof(request) || request.fps_den != 1 ||
         request.reserved != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
+        request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
         request.bitrate_bps < 1'000'000u ||
         request.bitrate_bps > 1'000'000'000u ||
@@ -277,7 +280,15 @@ bool receive_client_settings(remoe::TcpClient& client, const Options& options,
     }
     settings.fps = request.fps_num;
     settings.bitrate_bps = request.bitrate_bps;
+    settings.scale_percent = request.scale_percent;
     return true;
+}
+
+std::uint32_t scaled_dimension(std::uint32_t source, std::uint32_t percent) {
+    std::uint32_t scaled = static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(source) * percent / 100);
+    scaled = (std::max)(scaled, 2u);
+    return scaled & ~1u;
 }
 
 int run(const Options& options) {
@@ -307,19 +318,24 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!receive_client_settings(client, options, settings)) {
-            std::cout << "Client rejected: invalid or missing protocol v2 stream request\n";
+            std::cout << "Client rejected: invalid or missing protocol v3 stream request\n";
             continue;
         }
 
-        NvEncoderD3D11 encoder(capture.device(), capture.width(), capture.height(),
+        const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
+        const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
+
+        NvEncoderD3D11 encoder(capture.device(), encoded_width, encoded_height,
                                NV_ENC_BUFFER_FORMAT_ARGB, 0);
         configure_encoder(encoder, settings);
         std::cout << "Client requested: " << settings.fps << " fps, "
-                  << settings.bitrate_bps / 1'000'000.0 << " Mbps\n";
+                  << settings.bitrate_bps / 1'000'000.0 << " Mbps, "
+                  << settings.scale_percent << "% resolution (" << encoded_width << 'x'
+                  << encoded_height << ")\n";
 
         remoe::protocol::StreamHeader stream_header;
-        stream_header.width = capture.width();
-        stream_header.height = capture.height();
+        stream_header.width = encoded_width;
+        stream_header.height = encoded_height;
         stream_header.fps_num = settings.fps;
         stream_header.bitrate_bps = settings.bitrate_bps;
         if (!client.send_all(&stream_header, sizeof(stream_header))) {

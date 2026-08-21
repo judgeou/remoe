@@ -44,9 +44,12 @@ DesktopCapture::DesktopCapture(std::uint32_t output_index) : output_index_(outpu
 
     D3D_FEATURE_LEVEL feature_level{};
     check_hr(D3D11CreateDevice(adapter_.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                               D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                               D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                               nullptr, 0,
                                D3D11_SDK_VERSION, &device_, &feature_level, &context_),
              "D3D11CreateDevice");
+    check_hr(device_.As(&video_device_), "Query ID3D11VideoDevice");
+    check_hr(context_.As(&video_context_), "Query ID3D11VideoContext");
 
     DXGI_OUTPUT_DESC output_desc{};
     check_hr(output_->GetDesc(&output_desc), "IDXGIOutput::GetDesc");
@@ -78,8 +81,75 @@ bool DesktopCapture::acquire(ID3D11Texture2D* destination, std::chrono::millisec
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> source;
     check_hr(resource.As(&source), "Query captured ID3D11Texture2D");
-    context_->CopyResource(destination, source.Get());
+    D3D11_TEXTURE2D_DESC source_description{};
+    D3D11_TEXTURE2D_DESC destination_description{};
+    source->GetDesc(&source_description);
+    destination->GetDesc(&destination_description);
+    if (source_description.Width == destination_description.Width &&
+        source_description.Height == destination_description.Height) {
+        context_->CopyResource(destination, source.Get());
+    } else {
+        scale_texture(source.Get(), destination, source_description.Width, source_description.Height,
+                      destination_description.Width, destination_description.Height);
+    }
     return true;
+}
+
+void DesktopCapture::scale_texture(ID3D11Texture2D* source, ID3D11Texture2D* destination,
+                                   std::uint32_t source_width, std::uint32_t source_height,
+                                   std::uint32_t destination_width, std::uint32_t destination_height) {
+    if (!video_processor_ || source_width != scaler_source_width_ ||
+        source_height != scaler_source_height_ ||
+        destination_width != scaler_destination_width_ ||
+        destination_height != scaler_destination_height_) {
+        video_processor_.Reset();
+        video_enumerator_.Reset();
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC description{};
+        description.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        description.InputFrameRate = {60, 1};
+        description.InputWidth = source_width;
+        description.InputHeight = source_height;
+        description.OutputFrameRate = {60, 1};
+        description.OutputWidth = destination_width;
+        description.OutputHeight = destination_height;
+        description.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
+        check_hr(video_device_->CreateVideoProcessorEnumerator(&description, &video_enumerator_),
+                 "CreateVideoProcessorEnumerator(capture scaler)");
+        check_hr(video_device_->CreateVideoProcessor(video_enumerator_.Get(), 0, &video_processor_),
+                 "CreateVideoProcessor(capture scaler)");
+        scaler_source_width_ = source_width;
+        scaler_source_height_ = source_height;
+        scaler_destination_width_ = destination_width;
+        scaler_destination_height_ = destination_height;
+    }
+
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
+    input_description.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorInputView> input_view;
+    check_hr(video_device_->CreateVideoProcessorInputView(source, video_enumerator_.Get(),
+                                                           &input_description, &input_view),
+             "CreateVideoProcessorInputView(capture scaler)");
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_description{};
+    output_description.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorOutputView> output_view;
+    check_hr(video_device_->CreateVideoProcessorOutputView(destination, video_enumerator_.Get(),
+                                                            &output_description, &output_view),
+             "CreateVideoProcessorOutputView(capture scaler)");
+
+    RECT source_rectangle{0, 0, static_cast<LONG>(source_width), static_cast<LONG>(source_height)};
+    RECT destination_rectangle{0, 0, static_cast<LONG>(destination_width),
+                               static_cast<LONG>(destination_height)};
+    video_context_->VideoProcessorSetStreamSourceRect(video_processor_.Get(), 0, TRUE,
+                                                       &source_rectangle);
+    video_context_->VideoProcessorSetStreamDestRect(video_processor_.Get(), 0, TRUE,
+                                                     &destination_rectangle);
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.pInputSurface = input_view.Get();
+    check_hr(video_context_->VideoProcessorBlt(video_processor_.Get(), output_view.Get(), 0, 1,
+                                                &stream),
+             "VideoProcessorBlt(capture scaler)");
 }
 
 } // namespace remoe
