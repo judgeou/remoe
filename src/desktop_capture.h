@@ -20,6 +20,8 @@ public:
     [[nodiscard]] ID3D11DeviceContext* context() const noexcept { return context_.Get(); }
     [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
     [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
+    [[nodiscard]] std::int32_t left() const noexcept { return left_; }
+    [[nodiscard]] std::int32_t top() const noexcept { return top_; }
 
     // Returns true when a new desktop image was acquired, false on timeout.
     bool acquire(ID3D11Texture2D* destination, std::chrono::milliseconds timeout);
@@ -33,6 +35,8 @@ private:
     std::uint32_t output_index_ = 0;
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
+    std::int32_t left_ = 0;
+    std::int32_t top_ = 0;
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter_;
     Microsoft::WRL::ComPtr<IDXGIOutput1> output_;
     Microsoft::WRL::ComPtr<ID3D11Device> device_;

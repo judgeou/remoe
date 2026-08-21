@@ -125,6 +125,8 @@ public:
         DWORD timeout_ms = 250;
         setsockopt(socket_, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+        setsockopt(socket_, SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
     }
 
     ~StreamConnection() {
@@ -197,6 +199,9 @@ void receive_stream(StreamConnection& connection, remoe::VideoWindow& window,
         std::cout << "Decoder: " << decoder.implementation_name() << '\n';
 
         std::vector<std::uint8_t> payload;
+        auto statistics_epoch = std::chrono::steady_clock::now();
+        std::uint64_t video_bytes = 0;
+        std::uint64_t network_bytes = 0;
         while (window.running()) {
             remoe::protocol::FrameHeader header;
             if (!connection.receive_all(&header, sizeof(header), window.running_flag())) {
@@ -217,6 +222,18 @@ void receive_stream(StreamConnection& connection, remoe::VideoWindow& window,
                 if (!window.running()) break;
                 throw std::runtime_error("host disconnected during an AV1 frame");
             }
+            video_bytes += payload.size();
+            network_bytes += sizeof(header) + payload.size();
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed = std::chrono::duration<double>(now - statistics_epoch).count();
+            if (elapsed >= 1.0) {
+                window.update_transfer_statistics(
+                    static_cast<double>(video_bytes) * 8.0 / elapsed / 1'000'000.0,
+                    static_cast<double>(network_bytes) / elapsed / 1'000'000.0);
+                statistics_epoch = now;
+                video_bytes = 0;
+                network_bytes = 0;
+            }
             decoder.submit(payload);
         }
         decoder.drain();
@@ -236,7 +253,7 @@ int run(const Options& options) {
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.scale_percent = options.scale_percent;
     if (!connection.send_all(&request, sizeof(request))) {
-        throw std::runtime_error("failed to send the protocol v3 stream request");
+        throw std::runtime_error("failed to send the protocol v4 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;
@@ -254,6 +271,9 @@ int run(const Options& options) {
               << stream_header.bitrate_bps / 1'000'000.0 << " Mbps\n";
 
     remoe::VideoWindow window(stream_header.width, stream_header.height);
+    window.set_input_callback([&connection](const remoe::protocol::InputEvent& event) {
+        return connection.send_all(&event, sizeof(event));
+    });
     std::exception_ptr worker_error;
     std::thread worker(receive_stream, std::ref(connection), std::ref(window),
                        std::ref(worker_error));

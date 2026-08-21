@@ -6,7 +6,7 @@
 `remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
 回读到 CPU，呈现使用垂直同步和单帧队列，以降低 Intel GPU、CPU 与显示链路的额外功耗。
 
-当前阶段只提供**画面传输**。键鼠控制、音频、剪贴板、文件传输、加密与身份验证均未实现。
+当前版本提供画面传输和窗口内的键鼠远程控制。音频、剪贴板、文件传输、加密与身份验证尚未实现。
 
 ## 环境要求
 
@@ -109,26 +109,30 @@ Windows Defender Firewall 首次运行可能提示放行。只应在可信网络
 ```
 
 client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel GPU、驱动或 oneVPL runtime，
-会直接报错而不会回退到软件解码。关闭播放窗口即可断开连接。
+会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
+窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
+
+窗口标题每秒更新一次实际 AV1 payload 码率和应用层 TCP 接收速度。前者以 Mbps 显示，后者以 MB/s
+显示，不包含 TCP/IP 和链路层包头。
 
 `--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000；
 `--scale` 是 host 编码分辨率相对被捕获显示器的百分比，可选范围为 10–100，默认 100。例如源画面
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## TCP 协议 v3
+## TCP 协议 v4
 
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，client 先发送一次
-`ClientConfig`。host 验证并应用请求后发送 `StreamHeader`，随后重复发送
-`FrameHeader + AV1 payload`。每个 payload 是 NVENC 返回的一次编码输出，不是 IVF 容器；client
-应将 payload 按顺序提交给 AV1 decoder。
+`ClientConfig`。host 验证并应用请求后发送 `StreamHeader`，随后在 host→client 方向重复发送
+`FrameHeader + AV1 payload`，client→host 方向可发送定长 `InputEvent`。每个 payload 是 NVENC
+返回的一次编码输出，不是 IVF 容器；client 应将 payload 按顺序提交给 AV1 decoder。
 
 ### ClientConfig（28 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `3` |
+| 4 | u16 | version | `4` |
 | 6 | u16 | header_size | `28` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
@@ -141,7 +145,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `3` |
+| 4 | u16 | version | `4` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | codec | `AV01` |
 | 12 | u32 | width | 编码宽度 |
@@ -156,12 +160,28 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `FRAM` |
-| 4 | u16 | version | `3` |
+| 4 | u16 | version | `4` |
 | 6 | u16 | header_size | `32` |
 | 8 | u32 | payload_size | 后续 AV1 数据长度 |
 | 12 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
 | 16 | u64 | frame_number | 递增编号 |
 | 24 | u64 | timestamp_us | host 启动后的单调时钟微秒数 |
+
+### InputEvent（24 bytes）
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `INPT` |
+| 4 | u16 | version | `4` |
+| 6 | u16 | header_size | `24` |
+| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘 |
+| 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
+| 12 | i32 | value1 | 移动 X（0–65535）、滚轮 delta 或 Windows 扫描码 |
+| 16 | i32 | value2 | 移动 Y（0–65535），其余类型为 0 |
+| 20 | u32 | sequence | client 递增事件编号 |
+
+鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频边缘时坐标
+会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。
 
 client 连接后的第一张输入强制为 IDR/key frame，并请求 NVENC 携带 sequence header，因而 client 无需
 连接建立前的码流状态。断线后 host 返回监听状态，支持后续 client 重连；同一时刻只服务一个 client。
@@ -169,20 +189,22 @@ client 连接后的第一张输入强制为 IDR/key frame，并请求 NVENC 携�
 ## 当前限制与安全边界
 
 - 协议目前没有 TLS 或认证。默认仅监听 `127.0.0.1` 和 `::1`；若绑定局域网地址，任何可访问该端口的设备都
-  可能看到桌面画面。后续正式使用前应加入基于 TLS 的加密和配对认证。
+  可能看到桌面并注入键鼠操作。只应在可信隔离网络中使用，正式使用前应加入 TLS 和配对认证。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
+- `SendInput` 受 Windows UIPI 限制。控制高完整性应用时 host 通常也需要 `--admin`；即使提升权限，
+  `Ctrl+Alt+Del` 和 UAC 安全桌面仍不能通过普通 `SendInput` 控制。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
 - 使用原始 TCP，拥塞时可能增加延迟；后续可替换为带拥塞控制的传输层。
 
 ## 源码结构
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
-- `src/main.cpp`：NVENC AV1 配置、采集/编码循环与重连逻辑
+- `src/main.cpp`：NVENC AV1 配置、采集/编码循环、键鼠注入与重连逻辑
 - `src/tcp_server.*`：WinSock TCP server
 - `src/protocol.h`：后续 client 共用的 wire protocol 定义
 - `src/client_main.cpp`：client 网络接收、协议校验与播放线程
 - `src/vpl_decoder.*`：Intel oneVPL AV1 D3D11 硬件解码
-- `src/video_window.*`：D3D11 Video Processor 与 flip-model 窗口呈现
+- `src/video_window.*`：D3D11 Video Processor、flip-model 窗口呈现与客户端输入采集
 
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。

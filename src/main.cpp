@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -291,6 +292,130 @@ std::uint32_t scaled_dimension(std::uint32_t source, std::uint32_t percent) {
     return scaled & ~1u;
 }
 
+DWORD mouse_button_flag(remoe::protocol::InputType type, bool release) {
+    using remoe::protocol::InputType;
+    switch (type) {
+    case InputType::MouseLeft: return release ? MOUSEEVENTF_LEFTUP : MOUSEEVENTF_LEFTDOWN;
+    case InputType::MouseRight: return release ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_RIGHTDOWN;
+    case InputType::MouseMiddle: return release ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_MIDDLEDOWN;
+    case InputType::MouseX1:
+    case InputType::MouseX2: return release ? MOUSEEVENTF_XUP : MOUSEEVENTF_XDOWN;
+    default: return 0;
+    }
+}
+
+bool inject_input_event(const remoe::protocol::InputEvent& event,
+                        std::int32_t output_left, std::int32_t output_top,
+                        std::uint32_t output_width, std::uint32_t output_height,
+                        std::unordered_set<std::uint32_t>& pressed_keys,
+                        std::unordered_set<remoe::protocol::InputType>& pressed_buttons,
+                        bool& injection_warning_shown) {
+    using remoe::protocol::InputType;
+    INPUT input{};
+    const bool release = (event.flags & remoe::protocol::kInputRelease) != 0;
+    if (event.type == InputType::MouseMove) {
+        if (event.flags != 0 || event.value1 < 0 || event.value1 > 65535 ||
+            event.value2 < 0 || event.value2 > 65535) return false;
+        const std::int64_t desktop_x = output_left +
+            static_cast<std::int64_t>(event.value1) * (output_width - 1) / 65535;
+        const std::int64_t desktop_y = output_top +
+            static_cast<std::int64_t>(event.value2) * (output_height - 1) / 65535;
+        const int virtual_left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        const int virtual_top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        const int virtual_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        const int virtual_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (virtual_width <= 1 || virtual_height <= 1) return false;
+        input.type = INPUT_MOUSE;
+        input.mi.dx = static_cast<LONG>((desktop_x - virtual_left) * 65535 / (virtual_width - 1));
+        input.mi.dy = static_cast<LONG>((desktop_y - virtual_top) * 65535 / (virtual_height - 1));
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    } else if (event.type >= InputType::MouseLeft && event.type <= InputType::MouseX2) {
+        if ((event.flags & ~remoe::protocol::kInputRelease) != 0) return false;
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = mouse_button_flag(event.type, release);
+        if (event.type == InputType::MouseX1) input.mi.mouseData = XBUTTON1;
+        if (event.type == InputType::MouseX2) input.mi.mouseData = XBUTTON2;
+        if (release) pressed_buttons.erase(event.type);
+        else pressed_buttons.insert(event.type);
+    } else if (event.type == InputType::MouseWheel ||
+               event.type == InputType::MouseHorizontalWheel) {
+        if (event.flags != 0 || event.value1 < -32768 || event.value1 > 32767) return false;
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = event.type == InputType::MouseWheel ? MOUSEEVENTF_WHEEL : MOUSEEVENTF_HWHEEL;
+        input.mi.mouseData = static_cast<DWORD>(event.value1);
+    } else if (event.type == InputType::Keyboard) {
+        if ((event.flags & ~(remoe::protocol::kInputRelease |
+                             remoe::protocol::kInputExtendedKey)) != 0 ||
+            event.value1 <= 0 || event.value1 > 0x1FF) return false;
+        input.type = INPUT_KEYBOARD;
+        input.ki.wScan = static_cast<WORD>(event.value1);
+        input.ki.dwFlags = KEYEVENTF_SCANCODE;
+        if (release) input.ki.dwFlags |= KEYEVENTF_KEYUP;
+        if (event.flags & remoe::protocol::kInputExtendedKey) {
+            input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        const std::uint32_t key = static_cast<std::uint32_t>(event.value1) |
+            ((event.flags & remoe::protocol::kInputExtendedKey) ? 0x10000u : 0u);
+        if (release) pressed_keys.erase(key);
+        else pressed_keys.insert(key);
+    } else {
+        return false;
+    }
+    if (SendInput(1, &input, sizeof(input)) != 1 && !injection_warning_shown) {
+        std::cerr << "Warning: Windows rejected remote input injection; run the host with "
+                     "--admin when controlling elevated applications\n";
+        injection_warning_shown = true;
+    }
+    return true;
+}
+
+void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
+                           std::unordered_set<remoe::protocol::InputType>& pressed_buttons) {
+    std::vector<INPUT> inputs;
+    inputs.reserve(pressed_keys.size() + pressed_buttons.size());
+    for (std::uint32_t key : pressed_keys) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wScan = static_cast<WORD>(key & 0xFFFFu);
+        input.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+        if (key & 0x10000u) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        inputs.push_back(input);
+    }
+    for (auto button : pressed_buttons) {
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = mouse_button_flag(button, true);
+        if (button == remoe::protocol::InputType::MouseX1) input.mi.mouseData = XBUTTON1;
+        if (button == remoe::protocol::InputType::MouseX2) input.mi.mouseData = XBUTTON2;
+        inputs.push_back(input);
+    }
+    if (!inputs.empty()) SendInput(static_cast<UINT>(inputs.size()), inputs.data(), sizeof(INPUT));
+    pressed_keys.clear();
+    pressed_buttons.clear();
+}
+
+void receive_control_events(remoe::TcpClient& client, std::atomic_bool& session_running,
+                            const remoe::DesktopCapture& capture) {
+    std::unordered_set<std::uint32_t> pressed_keys;
+    std::unordered_set<remoe::protocol::InputType> pressed_buttons;
+    bool injection_warning_shown = false;
+    while (g_running && session_running) {
+        remoe::protocol::InputEvent event;
+        if (!client.receive_all(&event, sizeof(event), &session_running)) break;
+        if (event.magic != remoe::protocol::kInputMagic ||
+            event.version != remoe::protocol::kVersion ||
+            event.header_size != sizeof(event) ||
+            !inject_input_event(event, capture.left(), capture.top(), capture.width(),
+                                capture.height(), pressed_keys, pressed_buttons,
+                                injection_warning_shown)) {
+            std::cerr << "Invalid remote input event\n";
+            session_running = false;
+            break;
+        }
+    }
+    release_remote_inputs(pressed_keys, pressed_buttons);
+}
+
 int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
@@ -320,7 +445,7 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!receive_client_settings(client, options, settings)) {
-            std::cout << "Client rejected: invalid or missing protocol v3 stream request\n";
+            std::cout << "Client rejected: invalid or missing protocol v4 stream request\n";
             continue;
         }
 
@@ -345,9 +470,13 @@ int run(const Options& options) {
             continue;
         }
 
+        std::atomic_bool session_running{true};
+        std::thread control_thread(receive_control_events, std::ref(client),
+                                   std::ref(session_running), std::cref(capture));
+
         bool first_input = true;
         auto next_frame = Clock::now();
-        while (g_running && client.connected()) {
+        while (g_running && session_running && client.connected()) {
             next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
             const NvEncInputFrame* input = encoder.GetNextInputFrame();
             auto* texture = static_cast<ID3D11Texture2D*>(input->inputPtr);
@@ -369,9 +498,14 @@ int run(const Options& options) {
                     break;
                 }
             }
-            if (!sent) break;
+            if (!sent) {
+                session_running = false;
+                break;
+            }
             std::this_thread::sleep_until(next_frame);
         }
+        session_running = false;
+        control_thread.join();
         client.close();
         std::vector<NvEncOutputFrame> pending;
         encoder.EndEncode(pending);

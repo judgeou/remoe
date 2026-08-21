@@ -161,13 +161,20 @@ bool TcpClient::send_all(const void* data, std::size_t size) const {
     return true;
 }
 
-bool TcpClient::receive_all(void* data, std::size_t size) const {
+bool TcpClient::receive_all(void* data, std::size_t size,
+                            const std::atomic_bool* running) const {
     auto* bytes = static_cast<char*>(data);
     while (size > 0) {
+        if (running && !*running) return false;
         const int chunk = static_cast<int>((std::min)(size,
             static_cast<std::size_t>((std::numeric_limits<int>::max)())));
         const int received = recv(socket_, bytes, chunk, 0);
-        if (received == SOCKET_ERROR || received == 0) return false;
+        if (received == 0) return false;
+        if (received == SOCKET_ERROR) {
+            const int error = WSAGetLastError();
+            if (running && (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK)) continue;
+            return false;
+        }
         bytes += received;
         size -= static_cast<std::size_t>(received);
     }

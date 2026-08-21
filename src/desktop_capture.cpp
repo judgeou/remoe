@@ -53,6 +53,8 @@ DesktopCapture::DesktopCapture(std::uint32_t output_index) : output_index_(outpu
 
     DXGI_OUTPUT_DESC output_desc{};
     check_hr(output_->GetDesc(&output_desc), "IDXGIOutput::GetDesc");
+    left_ = output_desc.DesktopCoordinates.left;
+    top_ = output_desc.DesktopCoordinates.top;
     width_ = static_cast<std::uint32_t>(output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left);
     height_ = static_cast<std::uint32_t>(output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top);
     create_duplication();

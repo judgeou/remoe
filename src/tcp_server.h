@@ -3,6 +3,7 @@
 #include <WinSock2.h>
 
 #include <chrono>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -42,7 +43,8 @@ public:
     TcpClient& operator=(TcpClient&& other) noexcept;
 
     [[nodiscard]] bool send_all(const void* data, std::size_t size) const;
-    [[nodiscard]] bool receive_all(void* data, std::size_t size) const;
+    [[nodiscard]] bool receive_all(void* data, std::size_t size,
+                                   const std::atomic_bool* running = nullptr) const;
     [[nodiscard]] bool connected() const noexcept { return socket_ != INVALID_SOCKET; }
     void close() noexcept;
 
