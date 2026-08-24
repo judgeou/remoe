@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "video_window.h"
 #include "vpl_decoder.h"
+#include "webrtc_tcp_bootstrap.h"
 
 #include <WinSock2.h>
 #include <WS2tcpip.h>
@@ -143,7 +144,8 @@ public:
     StreamConnection(const StreamConnection&) = delete;
     StreamConnection& operator=(const StreamConnection&) = delete;
 
-    bool receive_all(void* data, std::size_t size, const std::atomic_bool* running = nullptr) {
+    bool receive_all(void* data, std::size_t size, const std::atomic_bool* running = nullptr,
+                     const std::chrono::steady_clock::time_point* deadline = nullptr) {
         char* output = static_cast<char*>(data);
         while (size > 0) {
             if (running && !*running) return false;
@@ -157,7 +159,10 @@ public:
             }
             if (received == 0) return false;
             const int error = WSAGetLastError();
-            if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) continue;
+            if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) {
+                if (deadline && std::chrono::steady_clock::now() >= *deadline) return false;
+                if (deadline || running) continue;
+            }
             return false;
         }
         return true;
@@ -201,6 +206,12 @@ struct EncodedFrame {
     std::vector<std::uint8_t> payload;
     bool reset_decoder = false;
 };
+
+bool send_control_event(remoe::WebRtcTransport& control,
+                        const remoe::protocol::InputEvent& event) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(&event);
+    return control.send_binary(std::span<const std::uint8_t>(bytes, sizeof(event)));
+}
 
 class EncodedFrameQueue {
 public:
@@ -309,7 +320,8 @@ private:
     std::exception_ptr error_;
 };
 
-void receive_frames(StreamConnection& connection, remoe::VideoWindow& window,
+void receive_frames(StreamConnection& connection, remoe::WebRtcTransport& control,
+                    remoe::VideoWindow& window,
                     EncodedFrameQueue& queue, PipelineState& pipeline) {
     try {
         auto statistics_epoch = std::chrono::steady_clock::now();
@@ -354,7 +366,7 @@ void receive_frames(StreamConnection& connection, remoe::VideoWindow& window,
             if (push_result == EncodedFrameQueue::PushResult::RequestKeyFrame) {
                 remoe::protocol::InputEvent request;
                 request.type = remoe::protocol::InputType::RequestKeyFrame;
-                if (!connection.send_all(&request, sizeof(request))) {
+                if (!send_control_event(control, request)) {
                     throw std::runtime_error("failed to request an AV1 key frame");
                 }
                 std::cerr << "Requested an immediate key frame from the host\n";
@@ -404,8 +416,39 @@ int run(const Options& options) {
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.scale_percent = options.scale_percent;
     if (!connection.send_all(&request, sizeof(request))) {
-        throw std::runtime_error("failed to send the protocol v5 stream request");
+        throw std::runtime_error("failed to send the protocol v6 stream request");
     }
+
+    struct ClientControlState {
+        std::mutex mutex;
+        remoe::VideoWindow* window = nullptr;
+    };
+    auto control_state = std::make_shared<ClientControlState>();
+
+    remoe::WebRtcTransport::Callbacks control_callbacks;
+    control_callbacks.on_open = [] {
+        std::cout << "WebRTC control DataChannel connected\n";
+    };
+    control_callbacks.on_closed = [control_state] {
+        std::lock_guard lock(control_state->mutex);
+        if (control_state->window) control_state->window->request_close();
+    };
+    control_callbacks.on_error = [control_state](std::string error) {
+        std::cerr << "WebRTC control error: " << error << '\n';
+        std::lock_guard lock(control_state->mutex);
+        if (control_state->window) control_state->window->request_close();
+    };
+
+    remoe::WebRtcTcpBootstrapIo bootstrap_io;
+    bootstrap_io.send_all = [&](const void* data, std::size_t size) {
+        return connection.send_all(data, size);
+    };
+    bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
+        return connection.receive_all(data, size, nullptr, &deadline);
+    };
+    auto control_channel = remoe::establish_webrtc_over_tcp(
+        remoe::WebRtcTransport::Role::Offerer, std::move(bootstrap_io),
+        std::move(control_callbacks));
 
     remoe::protocol::StreamHeader stream_header;
     if (!connection.receive_all(&stream_header, sizeof(stream_header))) {
@@ -422,8 +465,12 @@ int run(const Options& options) {
               << stream_header.bitrate_bps / 1'000'000.0 << " Mbps\n";
 
     remoe::VideoWindow window(stream_header.width, stream_header.height);
-    window.set_input_callback([&connection](const remoe::protocol::InputEvent& event) {
-        return connection.send_all(&event, sizeof(event));
+    {
+        std::lock_guard lock(control_state->mutex);
+        control_state->window = &window;
+    }
+    window.set_input_callback([&control_channel](const remoe::protocol::InputEvent& event) {
+        return send_control_event(*control_channel, event);
     });
     constexpr std::size_t minimum_queue_bytes = 8 * 1024 * 1024;
     constexpr std::size_t maximum_queue_bytes = 64 * 1024 * 1024;
@@ -435,7 +482,8 @@ int run(const Options& options) {
     const std::size_t queue_frames = static_cast<std::size_t>(stream_header.fps_num) * 2;
     EncodedFrameQueue queue(queue_bytes, queue_frames);
     PipelineState pipeline;
-    std::thread receiver(receive_frames, std::ref(connection), std::ref(window),
+    std::thread receiver(receive_frames, std::ref(connection), std::ref(*control_channel),
+                         std::ref(window),
                          std::ref(queue), std::ref(pipeline));
     std::thread decoder(decode_frames, std::ref(window), std::ref(queue),
                         std::ref(pipeline));
@@ -444,6 +492,11 @@ int run(const Options& options) {
     queue.stop();
     receiver.join();
     decoder.join();
+    control_channel->close();
+    {
+        std::lock_guard lock(control_state->mutex);
+        control_state->window = nullptr;
+    }
     pipeline.rethrow_if_failed();
     return result;
 }

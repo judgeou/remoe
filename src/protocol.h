@@ -8,7 +8,8 @@ constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little
 constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
-constexpr std::uint16_t kVersion = 5;
+constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
+constexpr std::uint16_t kVersion = 6;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 
 enum FrameFlags : std::uint32_t {
@@ -32,6 +33,13 @@ enum class InputType : std::uint16_t {
 enum InputFlags : std::uint16_t {
     kInputRelease = 1u << 0,
     kInputExtendedKey = 1u << 1,
+};
+
+enum class WebRtcSignalType : std::uint16_t {
+    Description = 1,
+    Candidate = 2,
+    Ready = 3,
+    Acknowledged = 4,
 };
 
 #pragma pack(push, 1)
@@ -81,11 +89,24 @@ struct InputEvent {
     std::int32_t value2 = 0;
     std::uint32_t sequence = 0;
 };
+
+// Framing used only during the TCP bootstrap that precedes the video stream.
+// value/metadata contain SDP+type or candidate+mid respectively.
+struct WebRtcSignalHeader {
+    std::uint32_t magic = kWebRtcSignalMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(WebRtcSignalHeader);
+    WebRtcSignalType type = WebRtcSignalType::Description;
+    std::uint16_t reserved = 0;
+    std::uint32_t value_size = 0;
+    std::uint32_t metadata_size = 0;
+};
 #pragma pack(pop)
 
 static_assert(sizeof(ClientConfig) == 28);
 static_assert(sizeof(StreamHeader) == 36);
 static_assert(sizeof(FrameHeader) == 32);
 static_assert(sizeof(InputEvent) == 24);
+static_assert(sizeof(WebRtcSignalHeader) == 20);
 
 } // namespace remoe::protocol

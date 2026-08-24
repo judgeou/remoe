@@ -150,6 +150,7 @@ TcpClient& TcpClient::operator=(TcpClient&& other) noexcept {
 }
 
 bool TcpClient::send_all(const void* data, std::size_t size) const {
+    std::lock_guard lock(send_mutex_);
     const auto* bytes = static_cast<const char*>(data);
     const std::size_t total_size = size;
     while (size > 0) {
@@ -169,7 +170,8 @@ bool TcpClient::send_all(const void* data, std::size_t size) const {
 }
 
 bool TcpClient::receive_all(void* data, std::size_t size,
-                            const std::atomic_bool* running) const {
+                            const std::atomic_bool* running,
+                            const std::chrono::steady_clock::time_point* deadline) const {
     auto* bytes = static_cast<char*>(data);
     while (size > 0) {
         if (running && !*running) return false;
@@ -179,7 +181,13 @@ bool TcpClient::receive_all(void* data, std::size_t size,
         if (received == 0) return false;
         if (received == SOCKET_ERROR) {
             const int error = WSAGetLastError();
-            if (running && (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK)) continue;
+            if (error == WSAETIMEDOUT || error == WSAEWOULDBLOCK) {
+                if (deadline) {
+                    if (std::chrono::steady_clock::now() >= *deadline) return false;
+                    continue;
+                }
+                if (running) continue;
+            }
             return false;
         }
         bytes += received;

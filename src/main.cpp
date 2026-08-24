@@ -1,6 +1,7 @@
 #include "desktop_capture.h"
 #include "protocol.h"
 #include "tcp_server.h"
+#include "webrtc_tcp_bootstrap.h"
 
 #include "NvEncoder/NvEncoderD3D11.h"
 
@@ -12,9 +13,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -397,35 +400,6 @@ void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
     pressed_buttons.clear();
 }
 
-void receive_control_events(remoe::TcpClient& client, std::atomic_bool& session_running,
-                            std::atomic_bool& key_frame_requested,
-                            const remoe::DesktopCapture& capture) {
-    std::unordered_set<std::uint32_t> pressed_keys;
-    std::unordered_set<remoe::protocol::InputType> pressed_buttons;
-    bool injection_warning_shown = false;
-    while (g_running && session_running) {
-        remoe::protocol::InputEvent event;
-        if (!client.receive_all(&event, sizeof(event), &session_running)) break;
-        const bool valid_header = event.magic == remoe::protocol::kInputMagic &&
-            event.version == remoe::protocol::kVersion &&
-            event.header_size == sizeof(event);
-        if (valid_header && event.type == remoe::protocol::InputType::RequestKeyFrame &&
-            event.flags == 0 && event.value1 == 0 && event.value2 == 0) {
-            key_frame_requested = true;
-            continue;
-        }
-        if (!valid_header ||
-            !inject_input_event(event, capture.left(), capture.top(), capture.width(),
-                                capture.height(), pressed_keys, pressed_buttons,
-                                injection_warning_shown)) {
-            std::cerr << "Invalid remote input event\n";
-            session_running = false;
-            break;
-        }
-    }
-    release_remote_inputs(pressed_keys, pressed_buttons);
-}
-
 int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
@@ -455,9 +429,66 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!receive_client_settings(client, options, settings)) {
-            std::cout << "Client rejected: invalid or missing protocol v5 stream request\n";
+            std::cout << "Client rejected: invalid or missing protocol v6 stream request\n";
             continue;
         }
+
+        std::atomic_bool session_running{true};
+        std::atomic_bool key_frame_requested{false};
+        std::mutex input_mutex;
+        std::unordered_set<std::uint32_t> pressed_keys;
+        std::unordered_set<remoe::protocol::InputType> pressed_buttons;
+        bool injection_warning_shown = false;
+
+        remoe::WebRtcTransport::Callbacks control_callbacks;
+        control_callbacks.on_open = [] {
+            std::cout << "WebRTC control DataChannel connected\n";
+        };
+        control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
+            std::lock_guard lock(input_mutex);
+            if (!session_running) return;
+            if (message.size() != sizeof(remoe::protocol::InputEvent)) {
+                std::cerr << "Invalid WebRTC control message size\n";
+                session_running = false;
+                return;
+            }
+
+            remoe::protocol::InputEvent event;
+            std::memcpy(&event, message.data(), sizeof(event));
+            const bool valid_header = event.magic == remoe::protocol::kInputMagic &&
+                event.version == remoe::protocol::kVersion &&
+                event.header_size == sizeof(event);
+            if (valid_header && event.type == remoe::protocol::InputType::RequestKeyFrame &&
+                event.flags == 0 && event.value1 == 0 && event.value2 == 0) {
+                key_frame_requested = true;
+                return;
+            }
+            if (!valid_header ||
+                !inject_input_event(event, capture.left(), capture.top(), capture.width(),
+                                    capture.height(), pressed_keys, pressed_buttons,
+                                    injection_warning_shown)) {
+                std::cerr << "Invalid remote input event over WebRTC\n";
+                session_running = false;
+            }
+        };
+        control_callbacks.on_closed = [&] {
+            session_running = false;
+        };
+        control_callbacks.on_error = [&](std::string error) {
+            std::cerr << "WebRTC control error: " << error << '\n';
+            session_running = false;
+        };
+
+        remoe::WebRtcTcpBootstrapIo bootstrap_io;
+        bootstrap_io.send_all = [&](const void* data, std::size_t size) {
+            return client.send_all(data, size);
+        };
+        bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
+            return client.receive_all(data, size, &session_running, &deadline);
+        };
+        auto control_channel = remoe::establish_webrtc_over_tcp(
+            remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
+            std::move(control_callbacks));
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
@@ -479,12 +510,6 @@ int run(const Options& options) {
             encoder.DestroyEncoder();
             continue;
         }
-
-        std::atomic_bool session_running{true};
-        std::atomic_bool key_frame_requested{false};
-        std::thread control_thread(receive_control_events, std::ref(client),
-                                   std::ref(session_running), std::ref(key_frame_requested),
-                                   std::cref(capture));
 
         bool first_input = true;
         auto next_frame = Clock::now();
@@ -517,7 +542,11 @@ int run(const Options& options) {
             std::this_thread::sleep_until(next_frame);
         }
         session_running = false;
-        control_thread.join();
+        control_channel->close();
+        {
+            std::lock_guard lock(input_mutex);
+            release_remote_inputs(pressed_keys, pressed_buttons);
+        }
         client.close();
         std::vector<NvEncOutputFrame> pending;
         encoder.EndEncode(pending);

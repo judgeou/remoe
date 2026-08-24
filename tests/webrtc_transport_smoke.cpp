@@ -1,0 +1,188 @@
+#include "webrtc_transport.h"
+
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <deque>
+#include <exception>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace {
+
+using namespace std::chrono_literals;
+
+enum class EventKind {
+    Description,
+    Candidate,
+};
+
+struct SignalingEvent {
+    EventKind kind;
+    bool from_offerer;
+    std::string value;
+    std::string metadata;
+};
+
+struct SharedState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<SignalingEvent> signaling_events;
+    bool offerer_open = false;
+    bool answerer_open = false;
+    std::string answerer_text;
+    std::vector<std::uint8_t> offerer_binary;
+    std::vector<std::string> errors;
+};
+
+remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer) {
+    remoe::WebRtcTransport::Callbacks callbacks;
+    callbacks.on_local_description = [&state, offerer](auto description) {
+        {
+            std::lock_guard lock(state.mutex);
+            state.signaling_events.push_back(
+                {EventKind::Description, offerer, std::move(description.sdp),
+                    std::move(description.type)});
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_local_candidate = [&state, offerer](auto candidate) {
+        {
+            std::lock_guard lock(state.mutex);
+            state.signaling_events.push_back(
+                {EventKind::Candidate, offerer, std::move(candidate.candidate),
+                    std::move(candidate.mid)});
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_open = [&state, offerer] {
+        {
+            std::lock_guard lock(state.mutex);
+            (offerer ? state.offerer_open : state.answerer_open) = true;
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_text = [&state, offerer](std::string message) {
+        if (offerer) return;
+        {
+            std::lock_guard lock(state.mutex);
+            state.answerer_text = std::move(message);
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_binary = [&state, offerer](std::vector<std::uint8_t> message) {
+        if (!offerer) return;
+        {
+            std::lock_guard lock(state.mutex);
+            state.offerer_binary = std::move(message);
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_error = [&state, offerer](std::string error) {
+        {
+            std::lock_guard lock(state.mutex);
+            state.errors.push_back(std::string(offerer ? "offerer: " : "answerer: ") + error);
+        }
+        state.changed.notify_all();
+    };
+    return callbacks;
+}
+
+bool pump_until(SharedState& state, remoe::WebRtcTransport& offerer,
+    remoe::WebRtcTransport& answerer, std::chrono::steady_clock::time_point deadline,
+    const auto& complete) {
+    while (std::chrono::steady_clock::now() < deadline) {
+        SignalingEvent event{};
+        bool has_event = false;
+        {
+            std::unique_lock lock(state.mutex);
+            if (complete()) return true;
+            state.changed.wait_for(lock, 50ms,
+                [&] { return !state.signaling_events.empty() || complete(); });
+            if (complete()) return true;
+            if (!state.signaling_events.empty()) {
+                event = std::move(state.signaling_events.front());
+                state.signaling_events.pop_front();
+                has_event = true;
+            }
+        }
+
+        if (!has_event) continue;
+        auto& destination = event.from_offerer ? answerer : offerer;
+        if (event.kind == EventKind::Description) {
+            destination.set_remote_description(event.value, event.metadata);
+        } else {
+            destination.add_remote_candidate(event.value, event.metadata);
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+int main() {
+    try {
+        SharedState state;
+
+        remoe::WebRtcTransport::Configuration answerer_config;
+        answerer_config.role = remoe::WebRtcTransport::Role::Answerer;
+        remoe::WebRtcTransport answerer(answerer_config, callbacks_for(state, false));
+
+        remoe::WebRtcTransport::Configuration offerer_config;
+        offerer_config.role = remoe::WebRtcTransport::Role::Offerer;
+        remoe::WebRtcTransport offerer(offerer_config, callbacks_for(state, true));
+
+        answerer.start();
+        offerer.start();
+
+        const auto open_deadline = std::chrono::steady_clock::now() + 15s;
+        const bool connected = pump_until(state, offerer, answerer, open_deadline, [&] {
+            return state.offerer_open && state.answerer_open;
+        });
+        if (!connected) {
+            std::cerr << "Timed out opening the host-candidate DataChannel\n";
+            return 1;
+        }
+
+        constexpr std::string_view text = "remoe-webrtc-smoke";
+        const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};
+        if (!offerer.send_text(text) || !answerer.send_binary(binary)) {
+            std::cerr << "DataChannel rejected an outbound message\n";
+            return 1;
+        }
+
+        const auto message_deadline = std::chrono::steady_clock::now() + 5s;
+        const bool delivered = pump_until(state, offerer, answerer, message_deadline, [&] {
+            return state.answerer_text == text && state.offerer_binary ==
+                std::vector<std::uint8_t>(binary.begin(), binary.end());
+        });
+        if (!delivered) {
+            std::cerr << "Timed out delivering DataChannel messages\n";
+            return 1;
+        }
+
+        {
+            std::lock_guard lock(state.mutex);
+            if (!state.errors.empty()) {
+                for (const auto& error : state.errors) std::cerr << error << '\n';
+                return 1;
+            }
+        }
+
+        const auto stats = offerer.statistics();
+        if (!stats.local_candidate || !stats.remote_candidate) {
+            std::cerr << "Connected DataChannel has no selected ICE candidate pair\n";
+            return 1;
+        }
+
+        std::cout << "WebRTC transport smoke test passed\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "WebRTC transport smoke test failed: " << error.what() << '\n';
+        return 1;
+    }
+}

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <mutex>
 #include <vector>
 
 namespace remoe {
@@ -44,12 +45,14 @@ public:
 
     [[nodiscard]] bool send_all(const void* data, std::size_t size) const;
     [[nodiscard]] bool receive_all(void* data, std::size_t size,
-                                   const std::atomic_bool* running = nullptr) const;
+                                   const std::atomic_bool* running = nullptr,
+                                   const std::chrono::steady_clock::time_point* deadline = nullptr) const;
     [[nodiscard]] bool connected() const noexcept { return socket_ != INVALID_SOCKET; }
     void close() noexcept;
 
 private:
     SOCKET socket_ = INVALID_SOCKET;
+    mutable std::mutex send_mutex_;
 };
 
 } // namespace remoe

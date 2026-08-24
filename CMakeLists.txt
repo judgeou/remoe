@@ -90,6 +90,20 @@ function(remoe_link_libdatachannel target_name)
         COMMENT "Copying libdatachannel runtime for ${target_name}")
 endfunction()
 
+add_library(remoe_webrtc_transport STATIC
+    src/webrtc_tcp_bootstrap.cpp
+    src/webrtc_tcp_bootstrap.h
+    src/webrtc_transport.cpp
+    src/webrtc_transport.h)
+target_include_directories(remoe_webrtc_transport PUBLIC src)
+target_compile_definitions(remoe_webrtc_transport PRIVATE
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WIN32_WINNT=0x0A00)
+target_compile_options(remoe_webrtc_transport PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel)
+
 set(NVENC_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/NVENC_Video_Codec_SDK_13.0.37"
     CACHE PATH "Path to NVIDIA Video Codec SDK")
 set(NVENC_INTERFACE_DIR "${NVENC_SDK_ROOT}/Interface")
@@ -135,6 +149,7 @@ target_link_options(remoe_host PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/MANIFESTUAC:NO>)
 
 target_link_libraries(remoe_host PRIVATE
+    remoe_webrtc_transport
     d3d11
     dxgi
     shell32
@@ -195,6 +210,7 @@ if(REMOE_BUILD_CLIENT AND EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
     target_compile_options(remoe_client PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     target_link_libraries(remoe_client PRIVATE
+        remoe_webrtc_transport
         remoe_vpl_dispatcher
         d3d11
         dxgi
@@ -204,4 +220,33 @@ if(REMOE_BUILD_CLIENT AND EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
     install(TARGETS remoe_client RUNTIME DESTINATION bin)
 elseif(REMOE_BUILD_CLIENT)
     message(STATUS "Intel oneVPL source not found at ${VPL_ROOT}; building remoe_host only")
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(remoe_webrtc_transport_smoke
+        tests/webrtc_transport_smoke.cpp)
+    target_compile_definitions(remoe_webrtc_transport_smoke PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00)
+    target_compile_options(remoe_webrtc_transport_smoke PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_libraries(remoe_webrtc_transport_smoke PRIVATE remoe_webrtc_transport)
+    remoe_link_libdatachannel(remoe_webrtc_transport_smoke)
+    add_test(NAME webrtc_transport_smoke COMMAND remoe_webrtc_transport_smoke)
+    set_tests_properties(webrtc_transport_smoke PROPERTIES TIMEOUT 30)
+
+    add_executable(remoe_webrtc_tcp_bootstrap_smoke
+        tests/webrtc_tcp_bootstrap_smoke.cpp)
+    target_compile_definitions(remoe_webrtc_tcp_bootstrap_smoke PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00)
+    target_compile_options(remoe_webrtc_tcp_bootstrap_smoke PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_libraries(remoe_webrtc_tcp_bootstrap_smoke PRIVATE remoe_webrtc_transport)
+    remoe_link_libdatachannel(remoe_webrtc_tcp_bootstrap_smoke)
+    add_test(NAME webrtc_tcp_bootstrap_smoke COMMAND remoe_webrtc_tcp_bootstrap_smoke)
+    set_tests_properties(webrtc_tcp_bootstrap_smoke PROPERTIES TIMEOUT 30)
 endif()
