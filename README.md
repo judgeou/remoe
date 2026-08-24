@@ -16,6 +16,9 @@
 - 支持 AV1 NVENC 的 NVIDIA GPU 和兼容驱动（通常为 Ada Lovelace 或更新架构）
 - NVIDIA Video Codec SDK 13.0.37，默认路径：
   `third_party/NVENC_Video_Codec_SDK_13.0.37`
+- libdatachannel 0.24.5 及其固定版本子依赖，默认路径：
+  `third_party/libdatachannel-0.24.5`
+- Mbed TLS 3.6.7 源码，默认路径：`third_party/mbedtls-3.6.7`
 - 构建 client 时需要 Intel oneVPL 2.x 源码，默认路径：`third_party/libvpl`
 - 运行 client 时需要支持 AV1 硬件解码的 Intel GPU 和当前 Intel 图形驱动
 
@@ -34,13 +37,16 @@
 .\build.cmd Debug
 ```
 
-默认生成文件为 `build-local/Release/remoe_host.exe`。脚本要求 Visual Studio 安装了
+默认生成文件为 `build-local/Release/remoe_host.exe` 和同目录的 `datachannel.dll`。脚本要求 Visual Studio 安装了
 “Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
 组件或单独安装的 Ninja 均可。
 
 当 `third_party/libvpl` 存在时还会生成 `build-local/Release/remoe_client.exe`。如果 oneVPL
 源码不在默认位置，可在手动配置 CMake 时传入 `-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时
 原有的 host-only 构建仍然可用。
+
+libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
+媒体传输、DataChannel 和 WebSocket 支持均已启用；当前 TCP 业务路径暂未切换到 WebRTC。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
 
