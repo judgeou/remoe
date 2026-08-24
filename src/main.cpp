@@ -169,12 +169,12 @@ void print_help() {
     std::cout <<
         "remoe_host - Windows desktop AV1/NVENC streaming host\n\n"
         "Usage: remoe_host [options]\n"
-        "  --bind <address>   Listen address (default: localhost, IPv4 + IPv6)\n"
+        "  --bind <address>   Listen address (default: localhost; signal mode: *)\n"
         "  --port <1-65535>   TCP port (default: 47990)\n"
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
         "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
-        "  --signal-url <ws(s)://...> Use WebSocket signaling instead of TCP bootstrap\n"
+        "  --signal-url <ws(s)://...> Use WebSocket signaling and listen on all addresses\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
@@ -201,6 +201,7 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--signal-url") options.signaling_url = value;
         else throw std::runtime_error("unknown option: " + std::string(arg));
     }
+    if (!options.signaling_url.empty()) options.bind = "*";
     return options;
 }
 
@@ -409,6 +410,10 @@ int run(const Options& options) {
               << remoe::protocol::kVersion << ")\n";
     remoe::WinsockRuntime winsock;
     remoe::DesktopCapture capture(options.output);
+    std::string signaling_invite;
+    if (!options.signaling_url.empty()) {
+        signaling_invite = remoe::create_webrtc_signaling_invite(options.signaling_url);
+    }
 
     remoe::TcpServer server(options.bind, options.port);
     std::cout << "Display " << options.output << ": " << capture.width() << 'x' << capture.height() << '\n'
@@ -418,12 +423,20 @@ int run(const Options& options) {
     std::cout << "\nClient bitrate limit: ";
     if (options.max_bitrate_mbps) std::cout << options.max_bitrate_mbps << " Mbps";
     else std::cout << "unlimited";
-    std::cout << '\n'
-              << "Listening on " << options.bind << ':' << options.port << " (Ctrl+C to stop)\n";
+    std::cout << '\n';
+    if (!signaling_invite.empty()) {
+        std::cout << "WebRTC invite URL: " << signaling_invite << '\n';
+    }
+    std::cout << "Listening on " << options.bind << ':' << options.port
+              << " (Ctrl+C to stop)\n" << std::flush;
 
     std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
     while (g_running) {
+        if (!options.signaling_url.empty() && signaling_invite.empty()) {
+            signaling_invite = remoe::create_webrtc_signaling_invite(options.signaling_url);
+            std::cout << "WebRTC invite URL: " << signaling_invite << std::endl;
+        }
         std::string peer;
         SOCKET accepted = server.accept_client(peer, std::chrono::milliseconds(250));
         if (accepted == INVALID_SOCKET) continue;
@@ -495,12 +508,10 @@ int run(const Options& options) {
                 remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
                 std::move(control_callbacks));
         } else {
-            const std::string invite =
-                remoe::create_webrtc_signaling_invite(options.signaling_url);
-            std::cout << "WebRTC invite URL: " << invite << std::endl;
             control_channel = remoe::establish_webrtc_over_websocket(
-                remoe::WebRtcTransport::Role::Answerer, invite,
+                remoe::WebRtcTransport::Role::Answerer, signaling_invite,
                 std::move(control_callbacks));
+            signaling_invite.clear();
         }
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);

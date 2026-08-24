@@ -97,7 +97,7 @@ cmake --build build --config Release
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `--bind` | `localhost` | TCP 监听地址；默认同时监听 IPv4/IPv6 loopback。`*`、`0.0.0.0` 或 `::` 表示同时监听 IPv4/IPv6 任意地址；具体 IP 只监听该地址族 |
+| `--bind` | `localhost` | TCP 监听地址；默认同时监听 IPv4/IPv6 loopback。`*`、`0.0.0.0` 或 `::` 表示同时监听 IPv4/IPv6 任意地址；具体 IP 只监听该地址族。指定 `--signal-url` 时自动使用 `*` |
 | `--port` | `47990` | TCP 端口 |
 | `--output` | `0` | 显示器索引（跨所有 DXGI adapter 顺序编号） |
 | `--max-fps` | 不限制 | 可选的 client 最大帧率 |
@@ -127,7 +127,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 
 ```powershell
 # host
-.\build-local\Release\remoe_host.exe --bind "*" `
+.\build-local\Release\remoe_host.exe `
   --signal-url "wss://signal.example.com/signal"
 
 # host 会打印类似：wss://signal.example.com/signal#0123456789abcdef...
