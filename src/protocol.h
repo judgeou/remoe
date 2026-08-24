@@ -11,6 +11,7 @@ constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint16_t kVersion = 6;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
+constexpr std::uint32_t kClientConfigWebSocketSignaling = 1u << 0;
 
 enum FrameFlags : std::uint32_t {
     kFrameKey = 1u << 0,
@@ -51,7 +52,7 @@ struct ClientConfig {
     std::uint32_t fps_den = 1;
     std::uint32_t bitrate_bps = 20'000'000;
     std::uint32_t scale_percent = 100;
-    std::uint32_t reserved = 0;
+    std::uint32_t flags = 0;
 };
 
 struct StreamHeader {

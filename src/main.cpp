@@ -279,7 +279,9 @@ bool receive_client_settings(remoe::TcpClient& client, const Options& options,
     if (request.magic != remoe::protocol::kClientConfigMagic ||
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
-        request.reserved != 0 ||
+        (request.flags & ~remoe::protocol::kClientConfigWebSocketSignaling) != 0 ||
+        ((request.flags & remoe::protocol::kClientConfigWebSocketSignaling) != 0) !=
+            !options.signaling_url.empty() ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -496,22 +498,31 @@ int run(const Options& options) {
         };
 
         std::unique_ptr<remoe::WebRtcTransport> control_channel;
-        if (options.signaling_url.empty()) {
-            remoe::WebRtcTcpBootstrapIo bootstrap_io;
-            bootstrap_io.send_all = [&](const void* data, std::size_t size) {
-                return client.send_all(data, size);
-            };
-            bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
-                return client.receive_all(data, size, &session_running, &deadline);
-            };
-            control_channel = remoe::establish_webrtc_over_tcp(
-                remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
-                std::move(control_callbacks));
-        } else {
-            control_channel = remoe::establish_webrtc_over_websocket(
-                remoe::WebRtcTransport::Role::Answerer, signaling_invite,
-                std::move(control_callbacks));
-            signaling_invite.clear();
+        try {
+            if (options.signaling_url.empty()) {
+                remoe::WebRtcTcpBootstrapIo bootstrap_io;
+                bootstrap_io.send_all = [&](const void* data, std::size_t size) {
+                    return client.send_all(data, size);
+                };
+                bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
+                    return client.receive_all(data, size, &session_running, &deadline);
+                };
+                control_channel = remoe::establish_webrtc_over_tcp(
+                    remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
+                    std::move(control_callbacks));
+            } else {
+                std::string invite = std::move(signaling_invite);
+                signaling_invite.clear();
+                control_channel = remoe::establish_webrtc_over_websocket(
+                    remoe::WebRtcTransport::Role::Answerer, std::move(invite),
+                    std::move(control_callbacks));
+            }
+        } catch (const std::exception& error) {
+            session_running = false;
+            client.close();
+            std::cerr << "Client WebRTC setup failed: " << error.what()
+                      << "\nClient disconnected; host remains available\n";
+            continue;
         }
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);

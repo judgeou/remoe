@@ -418,6 +418,9 @@ int run(const Options& options) {
     request.fps_num = options.fps;
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.scale_percent = options.scale_percent;
+    if (!options.signaling_url.empty()) {
+        request.flags |= remoe::protocol::kClientConfigWebSocketSignaling;
+    }
     if (!connection.send_all(&request, sizeof(request))) {
         throw std::runtime_error("failed to send the protocol v6 stream request");
     }
