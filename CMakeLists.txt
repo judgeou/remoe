@@ -94,7 +94,9 @@ add_library(remoe_webrtc_transport STATIC
     src/webrtc_tcp_bootstrap.cpp
     src/webrtc_tcp_bootstrap.h
     src/webrtc_transport.cpp
-    src/webrtc_transport.h)
+    src/webrtc_transport.h
+    src/webrtc_websocket_signaling.cpp
+    src/webrtc_websocket_signaling.h)
 target_include_directories(remoe_webrtc_transport PUBLIC src)
 target_compile_definitions(remoe_webrtc_transport PRIVATE
     WIN32_LEAN_AND_MEAN
@@ -102,7 +104,7 @@ target_compile_definitions(remoe_webrtc_transport PRIVATE
     _WIN32_WINNT=0x0A00)
 target_compile_options(remoe_webrtc_transport PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel)
+target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel bcrypt)
 
 set(NVENC_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/NVENC_Video_Codec_SDK_13.0.37"
     CACHE PATH "Path to NVIDIA Video Codec SDK")
@@ -249,4 +251,15 @@ if(BUILD_TESTING)
     remoe_link_libdatachannel(remoe_webrtc_tcp_bootstrap_smoke)
     add_test(NAME webrtc_tcp_bootstrap_smoke COMMAND remoe_webrtc_tcp_bootstrap_smoke)
     set_tests_properties(webrtc_tcp_bootstrap_smoke PROPERTIES TIMEOUT 30)
+
+    add_executable(remoe_webrtc_websocket_signaling_smoke
+        tests/webrtc_websocket_signaling_smoke.cpp)
+    target_compile_definitions(remoe_webrtc_websocket_signaling_smoke PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00)
+    target_compile_options(remoe_webrtc_websocket_signaling_smoke PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_libraries(remoe_webrtc_websocket_signaling_smoke PRIVATE remoe_webrtc_transport)
+    remoe_link_libdatachannel(remoe_webrtc_websocket_signaling_smoke)
 endif()

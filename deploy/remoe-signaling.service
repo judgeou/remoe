@@ -1,0 +1,36 @@
+[Unit]
+Description=remoe WebSocket signaling relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remoe-signal
+Group=remoe-signal
+WorkingDirectory=/opt/remoe/signaling-server
+Environment=NODE_ENV=production
+Environment=REMOE_SIGNAL_HOST=127.0.0.1
+Environment=REMOE_SIGNAL_PORT=8080
+ExecStart=/usr/bin/node /opt/remoe/signaling-server/server.mjs
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=4096
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

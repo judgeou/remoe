@@ -122,6 +122,23 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 
+默认使用视频 TCP 连接完成 WebRTC bootstrap。若要使用独立 WebSocket 信令，host 只需传入信令服务
+基础 URL；启动时会自动生成 128 bit 随机会话 ID，并打印包含该 ID 的一次性邀请 URL：
+
+```powershell
+# host
+.\build-local\Release\remoe_host.exe --bind "*" `
+  --signal-url "wss://signal.example.com/signal"
+
+# host 会打印类似：wss://signal.example.com/signal#0123456789abcdef...
+# 将完整邀请 URL 复制到 client
+.\build-local\Release\remoe_client.exe --host 10.14.178.25 `
+  --signal-url "wss://signal.example.com/signal#0123456789abcdef..."
+```
+
+邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开或复用；后续会由 WebAuthn 授权流程签发
+短期会话。
+
 窗口标题每秒更新一次实际 AV1 payload 码率和应用层 TCP 接收速度。前者以 Mbps 显示，后者以 MB/s
 显示，不包含 TCP/IP 和链路层包头。
 
@@ -240,9 +257,13 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 - `src/tcp_server.*`：WinSock TCP server
 - `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
 - `src/webrtc_tcp_bootstrap.*`：通过现有 TCP 交换 SDP/ICE 的一次性协商层
+- `src/webrtc_websocket_signaling.*`：libdatachannel WebSocket/WSS 信令适配层
 - `src/protocol.h`：host/client 共用的 wire protocol 定义
 - `src/client_main.cpp`：client 网络接收、协议校验与播放线程
 - `src/vpl_decoder.*`：Intel oneVPL AV1 D3D11 硬件解码
 - `src/video_window.*`：D3D11 Video Processor、flip-model 窗口呈现与客户端输入采集
 
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。
+
+`signaling-server/` 是只转发二进制 WebRTC 信令帧的 Node.js 服务；`deploy/` 包含生产用 systemd
+和 Caddy 配置。信令服务不接触 DataChannel 或视频内容。

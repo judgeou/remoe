@@ -2,6 +2,7 @@
 #include "protocol.h"
 #include "tcp_server.h"
 #include "webrtc_tcp_bootstrap.h"
+#include "webrtc_websocket_signaling.h"
 
 #include "NvEncoder/NvEncoderD3D11.h"
 
@@ -46,6 +47,7 @@ struct Options {
     // Zero means the operator did not configure a server-side limit.
     std::uint32_t max_fps = 0;
     std::uint32_t max_bitrate_mbps = 0;
+    std::string signaling_url;
 };
 
 struct StreamSettings {
@@ -172,6 +174,7 @@ void print_help() {
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
         "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
+        "  --signal-url <ws(s)://...> Use WebSocket signaling instead of TCP bootstrap\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
@@ -195,7 +198,7 @@ Options parse_options(int argc, char** argv) {
             options.max_fps = parse_u32(value, arg, 1, 240);
         } else if (arg == "--max-bitrate" || arg == "--bitrate") {
             options.max_bitrate_mbps = parse_u32(value, arg, 1, 1000);
-        }
+        } else if (arg == "--signal-url") options.signaling_url = value;
         else throw std::runtime_error("unknown option: " + std::string(arg));
     }
     return options;
@@ -479,16 +482,26 @@ int run(const Options& options) {
             session_running = false;
         };
 
-        remoe::WebRtcTcpBootstrapIo bootstrap_io;
-        bootstrap_io.send_all = [&](const void* data, std::size_t size) {
-            return client.send_all(data, size);
-        };
-        bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
-            return client.receive_all(data, size, &session_running, &deadline);
-        };
-        auto control_channel = remoe::establish_webrtc_over_tcp(
-            remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
-            std::move(control_callbacks));
+        std::unique_ptr<remoe::WebRtcTransport> control_channel;
+        if (options.signaling_url.empty()) {
+            remoe::WebRtcTcpBootstrapIo bootstrap_io;
+            bootstrap_io.send_all = [&](const void* data, std::size_t size) {
+                return client.send_all(data, size);
+            };
+            bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
+                return client.receive_all(data, size, &session_running, &deadline);
+            };
+            control_channel = remoe::establish_webrtc_over_tcp(
+                remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
+                std::move(control_callbacks));
+        } else {
+            const std::string invite =
+                remoe::create_webrtc_signaling_invite(options.signaling_url);
+            std::cout << "WebRTC invite URL: " << invite << std::endl;
+            control_channel = remoe::establish_webrtc_over_websocket(
+                remoe::WebRtcTransport::Role::Answerer, invite,
+                std::move(control_callbacks));
+        }
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
