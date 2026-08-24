@@ -123,21 +123,21 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 
 默认使用视频 TCP 连接完成 WebRTC bootstrap。若要使用独立 WebSocket 信令，host 只需传入信令服务
-基础 URL；启动时会自动生成 128 bit 随机会话 ID，并打印包含该 ID 的一次性邀请 URL：
+基础 URL；启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包含该 ID 的邀请 URL：
 
 ```powershell
 # host
 .\build-local\Release\remoe_host.exe `
   --signal-url "wss://signal.example.com/signal"
 
-# host 会打印类似：wss://signal.example.com/signal#0123456789abcdef...
+# host 会打印类似：wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT
 # 将完整邀请 URL 复制到 client
 .\build-local\Release\remoe_client.exe --host 10.14.178.25 `
-  --signal-url "wss://signal.example.com/signal#0123456789abcdef..."
+  --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT"
 ```
 
-邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开或复用；后续会由 WebAuthn 授权流程签发
-短期会话。
+邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开；同一 host 进程会保持该 Nano ID 不变，
+后续会由 WebAuthn 授权流程签发短期会话。
 
 窗口标题每秒更新一次实际 AV1 payload 码率和应用层 TCP 接收速度。前者以 Mbps 显示，后者以 MB/s
 显示，不包含 TCP/IP 和链路层包头。
@@ -266,4 +266,5 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。
 
 `signaling-server/` 是只转发二进制 WebRTC 信令帧的 Node.js 服务；`deploy/` 包含生产用 systemd
-和 Caddy 配置。信令服务不接触 DataChannel 或视频内容。
+和 Caddy 配置。信令服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
+[`docs/signaling-server-deployment.md`](docs/signaling-server-deployment.md)。

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { after, before, test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 
 const port = 18080 + Math.floor(Math.random() * 1000);
@@ -65,4 +66,30 @@ test('rejects duplicate roles', async () => {
   const [error] = await once(second, 'error');
   assert.match(error.message, /409/);
   first.close();
+});
+
+test('discards queued signaling when its sender disconnects', async () => {
+  const session = 'reusable_session_1234';
+  const firstHost = connect('host', session);
+  await once(firstHost, 'open');
+  firstHost.send(Buffer.from('stale'));
+  firstHost.close();
+  await once(firstHost, 'close');
+  await delay(20);
+
+  const client = connect('client', session);
+  await once(client, 'open');
+  let received = false;
+  client.once('message', () => { received = true; });
+  await delay(50);
+  assert.equal(received, false);
+
+  const secondHost = connect('host', session);
+  await once(secondHost, 'open');
+  const freshMessage = once(client, 'message');
+  secondHost.send(Buffer.from('fresh'));
+  const [data] = await freshMessage;
+  assert.equal(data.toString(), 'fresh');
+  secondHost.close();
+  client.close();
 });

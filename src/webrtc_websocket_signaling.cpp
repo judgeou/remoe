@@ -219,17 +219,17 @@ std::string create_webrtc_signaling_invite(std::string signaling_url) {
         throw std::invalid_argument("WebRTC signaling base URL must not contain a fragment");
     }
 
-    std::array<UCHAR, 16> random_bytes{};
+    constexpr char alphabet[] = "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    static_assert(sizeof(alphabet) - 1 == 64);
+    std::array<UCHAR, 21> random_bytes{};
     if (BCryptGenRandom(nullptr, random_bytes.data(),
                         static_cast<ULONG>(random_bytes.size()),
                         BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
         throw std::runtime_error("Failed to generate a secure WebRTC session ID");
     }
-    constexpr char hex[] = "0123456789abcdef";
     signaling_url += '#';
     for (const UCHAR byte : random_bytes) {
-        signaling_url += hex[byte >> 4];
-        signaling_url += hex[byte & 0x0f];
+        signaling_url += alphabet[byte & 0x3f];
     }
     return signaling_url;
 }

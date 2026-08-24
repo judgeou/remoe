@@ -8,8 +8,8 @@
 
 namespace remoe {
 
-// Creates a shareable invite URL with a cryptographically random 128-bit
-// session ID in its fragment. The base URL must not already have a fragment.
+// Creates a shareable invite URL with a cryptographically secure 21-character
+// Nano ID in its fragment. The base URL must not already have a fragment.
 std::string create_webrtc_signaling_invite(std::string signaling_url);
 
 // Establishes the same host-candidate-only control channel as the TCP

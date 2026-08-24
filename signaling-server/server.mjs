@@ -78,12 +78,17 @@ function flushPending(session, role, socket) {
   session[bytesName] = 0;
 }
 
+function discardPendingFor(session, destinationRole) {
+  const queueName = destinationRole === 'host' ? 'pendingHost' : 'pendingClient';
+  const bytesName = destinationRole === 'host' ? 'pendingHostBytes' : 'pendingClientBytes';
+  totalPendingBytes -= session[bytesName];
+  session[queueName] = [];
+  session[bytesName] = 0;
+}
+
 function discardPending(session) {
-  totalPendingBytes -= session.pendingHostBytes + session.pendingClientBytes;
-  session.pendingHost = [];
-  session.pendingClient = [];
-  session.pendingHostBytes = 0;
-  session.pendingClientBytes = 0;
+  discardPendingFor(session, 'host');
+  discardPendingFor(session, 'client');
 }
 
 function removeIfEmpty(id, session) {
@@ -152,7 +157,12 @@ websocketServer.on('connection', (socket, request, context) => {
     console.error(`WebSocket error for ${role} session ${id}:`, error.message);
   });
   socket.on('close', () => {
-    if (session[role] === socket) session[role] = null;
+    if (session[role] === socket) {
+      session[role] = null;
+      // Queued messages produced by this connection are no longer valid for
+      // a future peer using the same session ID.
+      discardPendingFor(session, peerRole(role));
+    }
     removeIfEmpty(id, session);
   });
 });

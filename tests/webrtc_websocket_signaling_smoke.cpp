@@ -9,6 +9,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -19,6 +20,13 @@ int main(int argc, char** argv) {
     try {
         const std::string url = argc > 1 ? argv[1] : "ws://127.0.0.1:8080/signal";
         const std::string invite = remoe::create_webrtc_signaling_invite(url);
+        const std::size_t fragment = invite.find('#');
+        constexpr std::string_view nano_id_alphabet =
+            "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        if (fragment == std::string::npos || invite.size() - fragment - 1 != 21 ||
+            invite.find_first_not_of(nano_id_alphabet, fragment + 1) != std::string::npos) {
+            throw std::runtime_error("Generated signaling invite does not contain a valid Nano ID");
+        }
         std::mutex mutex;
         std::condition_variable received;
         std::vector<std::uint8_t> received_message;

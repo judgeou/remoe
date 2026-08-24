@@ -435,10 +435,6 @@ int run(const Options& options) {
     std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
     while (g_running) {
-        if (!options.signaling_url.empty() && signaling_invite.empty()) {
-            signaling_invite = remoe::create_webrtc_signaling_invite(options.signaling_url);
-            std::cout << "WebRTC invite URL: " << signaling_invite << std::endl;
-        }
         std::string peer;
         SOCKET accepted = server.accept_client(peer, std::chrono::milliseconds(250));
         if (accepted == INVALID_SOCKET) continue;
@@ -511,10 +507,8 @@ int run(const Options& options) {
                     remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
                     std::move(control_callbacks));
             } else {
-                std::string invite = std::move(signaling_invite);
-                signaling_invite.clear();
                 control_channel = remoe::establish_webrtc_over_websocket(
-                    remoe::WebRtcTransport::Role::Answerer, std::move(invite),
+                    remoe::WebRtcTransport::Role::Answerer, signaling_invite,
                     std::move(control_callbacks));
             }
         } catch (const std::exception& error) {
