@@ -9,9 +9,11 @@
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
+    "better-sqlite3": "^13.0.3",
     "ws": "8.21.3"
   }
 }

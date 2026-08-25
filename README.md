@@ -87,22 +87,40 @@ cmake --build build --config Release
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `--signal-url` | 必填 | WSS 信令服务基础 URL；host 会生成并打印邀请 URL |
+| `--signal-url` | 必填 | WSS 信令服务基础 URL；host 会注册到账号设备列表 |
 | `--output` | `0` | 显示器索引（跨所有 DXGI adapter 顺序编号） |
 | `--max-fps` | 不限制 | 可选的 client 最大帧率 |
 | `--max-bitrate` | 不限制 | 可选的 client 最大 CBR 码率，单位 Mbps |
 | `--admin` | 关闭 | 通过 UAC `runas` 重新启动为管理员进程 |
+| `--repair` | 关闭 | 在 Host 本机重新生成配对码、转移账号并轮换设备凭证 |
+| `--legacy-invite` | 关闭 | 兼容模式：自动生成并打印匿名邀请 URL |
 
 兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
 每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
 
 WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首次运行可能提示放行。
 
-## Client 运行
+首次运行时 Host 会打印十分钟有效的八字符配对码。在网页创建或登录 passkey 账号，输入配对码和
+设备名称后，Host 会出现在“我的电脑”列表。长期设备凭证使用当前 Windows 用户的 DPAPI 加密，保存到
+`%LOCALAPPDATA%\remoe\host-identity.bin`；后续启动不再配对。凭证丢失、系统重装或需要转移账号时，
+在 Host 本机添加 `--repair` 再配对即可，旧账号会立即失去这台 Host。
 
-使用 host 打印的完整邀请 URL 连接，不需要 `--host` 或 `--port`：
+## 浏览器 Client 运行
+
+打开部署好的 HTTPS 网页，通过 passkey 登录后，在在线 Host 旁点击“连接”。服务器会在内部创建一次
+短期 Nano ID session 并自动分配给 Browser 与 Host，用户不需要复制 Host IP、session 或邀请 URL。
+首次创建账号以及使用恢复码恢复账号时，页面会显示一串只显示一次的轮换恢复码；如果恢复码也丢失，
+仍可接触 Host 后使用 `--repair` 绑定到新账号。
+
+## 原生 Client 兼容模式
+
+原生 client 暂时继续支持匿名邀请 URL，用于兼容和诊断。Host 需显式添加 `--legacy-invite`，然后把
+它打印的 URL 交给 client；两端都不需要 `--host` 或 `--port`：
 
 ```powershell
+.\build-local\Release\remoe_host.exe `
+  --signal-url "wss://signal.example.com/signal" --legacy-invite
+
 .\build-local\Release\remoe_client.exe `
   --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT" `
   --fps 60 --bitrate 20 --scale 75
@@ -112,26 +130,9 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 
-host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID；信令服务器确认 Host session 注册成功后，
-程序才会打印包含该 ID 的邀请 URL：
-
-```powershell
-# host
-.\build-local\Release\remoe_host.exe `
-  --signal-url "wss://signal.example.com/signal"
-
-# host 会打印类似：wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT
-# 将完整邀请 URL 复制到 client
-.\build-local\Release\remoe_client.exe `
-  --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT"
-```
-
-邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开；同一 host 进程会保持该 Nano ID 不变，
-后续会由 WebAuthn 授权流程签发短期会话。
-
-Host 建立 WSS 后会长期等待 Client，不会因 15 秒内无人连接而重建会话；`Ctrl+C` 仍可取消等待。
-Client 只能加入已有且在线的 Host session。错误或已经过期的邀请会立即返回
-`Invite not found or expired`，不会创建空 session 后等待超时。
+账号管理 Host 默认不再打印邀请 URL。网页中的
+“使用临时邀请 URL”折叠入口也只用于兼容测试。错误或过期邀请会立即返回
+`Invite not found or expired`。
 
 WebSocket 信令模式会从信令 URL 自动派生同域名的 `stun:<host>:3478` ICE server，不需要额外参数。
 STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` candidate 时 host/client 会打印确认信息。
@@ -151,7 +152,7 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 
 ## WebRTC 传输协议 v7
 
-仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它复用相同的 WSS invite、STUN-only ICE、
+仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
 双 DataChannel 和 protocol v7，通过 WebCodecs 解码 NVENC AV1，并发送键鼠 `InputEvent`。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
@@ -265,8 +266,10 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 ## 当前限制与安全边界
 
-- 信令使用 WSS，DataChannel 使用 DTLS/SCTP 加密，但邀请 URL 目前仍是 bearer secret，不等同于
-  设备身份认证；正式使用前仍需接入计划中的 WebAuthn/passkey 授权。
+- 网页账号使用 WebAuthn/passkey 与 30 天登录 Cookie；Host 使用 DPAPI 保护的长期 bearer token。
+  该简化模型信任服务器，登录 Cookie 或 Host token 被当前用户上下文中的恶意程序窃取时仍可能被冒用。
+- 恢复码是约 130 bit 熵的单次 bearer secret，服务端只保存哈希；使用后会在新 passkey 注册成功的
+  同一数据库事务中轮换。全部账号凭据丢失时可在 Host 本机重新配对，损失仅为原账号的 Host 列表。
 - 自动配置 STUN，但有意禁用 TURN；对称 NAT、UDP 被封锁等无法直连的网络仍可能连接失败。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
@@ -279,6 +282,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
 - `src/main.cpp`：NVENC AV1 配置、采集/编码循环、键鼠注入与重连逻辑
+- `src/host_identity.*`：Host 长期设备凭证的 Windows DPAPI 持久化
 - `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
 - `src/webrtc_tcp_bootstrap.*`：信令帧编解码与协商状态机（同时供 WSS adapter 和测试复用）
 - `src/webrtc_websocket_signaling.*`：libdatachannel WebSocket/WSS 信令适配层
@@ -289,6 +293,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。
 
-`signaling-server/` 是只转发二进制 WebRTC 信令帧的 Node.js 服务；`deploy/` 包含生产用 systemd、
-Caddy 和 coturn STUN-only 配置。信令与 STUN 服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
+`signaling-server/` 是使用 SQLite 保存 passkey、网页登录和 Host 列表的 Node.js 服务，同时只转发
+WebRTC SDP/ICE 二进制帧；`deploy/` 包含生产用 systemd、Caddy 和 coturn STUN-only 配置。信令与
+STUN 服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
 [`docs/signaling-server-deployment.md`](docs/signaling-server-deployment.md)。

@@ -7,17 +7,21 @@ Wants=network-online.target
 Type=simple
 User=remoe-signal
 Group=remoe-signal
-WorkingDirectory=/opt/remoe/signaling-server
+WorkingDirectory=/opt/remoe/signaling-server/current
 Environment=NODE_ENV=production
 Environment=REMOE_SIGNAL_HOST=127.0.0.1
 Environment=REMOE_SIGNAL_PORT=8080
-ExecStart=/usr/bin/node /opt/remoe/signaling-server/server.mjs
+Environment=REMOE_DATABASE_PATH=/var/lib/remoe/remoe.db
+# Set REMOE_RP_ID and REMOE_ORIGIN in a systemd override for the public domain.
+ExecStart=/usr/bin/node /opt/remoe/signaling-server/current/server.mjs
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=10s
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
+StateDirectory=remoe
+StateDirectoryMode=0700
 ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true

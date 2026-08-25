@@ -3,26 +3,38 @@
 本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的网页验证客户端、WSS 信令中继和 STUN-only 服务。示例域名
 统一使用 `signal.example.com`，部署时替换为自己的域名。
 
-信令服务器只转发 SDP/ICE bootstrap 的二进制帧，不承载 DataChannel 业务数据。STUN 由同机 coturn
-单独提供，TURN 禁用。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
+服务使用 SQLite 保存 passkey 公钥、30 天网页登录、轮换恢复码哈希和 Host 列表；WebRTC 部分仍只
+转发 SDP/ICE bootstrap 的二进制帧，不承载 DataChannel 业务数据。STUN 由同机 coturn 单独提供，
+TURN 禁用。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
 
 ## 前置条件
 
 - 一台具有公网 IPv4 或 IPv6 的 Debian/Ubuntu 服务器。
 - 域名的 A/AAAA 记录已经指向服务器。
 - 云安全组和主机防火墙允许 TCP 80、443；SSH 管理端口也需保持可用。
-- 服务器上的 Node.js 18 或更高版本，用于信令服务。
+- 服务器上的 Node.js 22 或更高版本，用于信令和 WebAuthn 服务。
 - 构建网页的开发机使用 Node.js 22.18 或更高版本。
 
 先安装运行依赖：
 
 ```bash
 sudo apt update
-sudo apt install -y nodejs npm caddy
+sudo apt install -y nodejs npm caddy build-essential python3
 node --version
 ```
 
-如果发行版仓库中的 Node.js 低于 18，请先通过可信的软件源安装受支持版本，再继续部署。
+如果发行版仓库中的 Node.js 低于 22，可以配置 NodeSource 的签名 APT 仓库：
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key |
+  sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main' |
+  sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null
+sudo apt update
+sudo apt install -y nodejs
+node --version
+```
 
 ## 安装信令服务
 
@@ -40,17 +52,23 @@ if ! id -u remoe-signal >/dev/null 2>&1; then
   sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin remoe-signal
 fi
 
-# 安装生产文件。node_modules 由 root 管理，服务账号只有读取权限
-sudo install -d -o root -g root -m 0755 /opt/remoe/signaling-server
+# 安装生产文件。每次更新创建 release，再原子切换 current 软链接
+release_id="$(date -u +%Y%m%d%H%M%S)"
+release_dir="/opt/remoe/signaling-server/releases/$release_id"
+sudo install -d -o root -g root -m 0755 "$release_dir/lib"
 sudo install -o root -g root -m 0644 \
   signaling-server/package.json \
   signaling-server/package-lock.json \
   signaling-server/server.mjs \
-  /opt/remoe/signaling-server/
+  "$release_dir/"
+sudo install -o root -g root -m 0644 signaling-server/lib/*.mjs \
+  "$release_dir/lib/"
 
-cd /opt/remoe/signaling-server
-sudo npm ci --omit=dev --ignore-scripts
-sudo chown -R root:root /opt/remoe/signaling-server
+cd "$release_dir"
+sudo npm ci --omit=dev
+sudo chown -R root:root "$release_dir"
+sudo ln -sfn "releases/$release_id" /opt/remoe/signaling-server/current.next
+sudo mv -Tf /opt/remoe/signaling-server/current.next /opt/remoe/signaling-server/current
 ```
 
 安装并启动 systemd 单元：
@@ -61,6 +79,22 @@ sudo install -o root -g root -m 0644 \
   deploy/remoe-signaling.service \
   /etc/systemd/system/remoe-signaling.service
 sudo systemctl daemon-reload
+
+# WebAuthn 凭据与 RP 域名永久绑定；这里必须填写公开 HTTPS 网页的稳定域名
+sudo systemctl edit remoe-signaling.service
+```
+
+在 override 中填入：
+
+```ini
+[Service]
+Environment=REMOE_RP_ID=signal.example.com
+Environment=REMOE_ORIGIN=https://signal.example.com
+```
+
+然后启动：
+
+```bash
 sudo systemctl enable --now remoe-signaling.service
 sudo systemctl status --no-pager remoe-signaling.service
 curl --fail http://127.0.0.1:8080/healthz
@@ -70,6 +104,8 @@ curl --fail http://127.0.0.1:8080/healthz
 
 - `REMOE_SIGNAL_HOST=127.0.0.1`
 - `REMOE_SIGNAL_PORT=8080`
+- `REMOE_DATABASE_PATH=/var/lib/remoe/remoe.db`
+- `StateDirectory=remoe`，目录权限为 `0700`
 - 内存上限 256 MiB
 - 异常退出后自动重启
 - 通过 systemd 限制文件系统、设备和 Linux capabilities
@@ -105,8 +141,8 @@ sudo systemctl enable caddy
 sudo systemctl status --no-pager caddy
 ```
 
-Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，将 `/signal` 与 `/healthz` 反向代理到
-`127.0.0.1:8080`，并从 `/opt/remoe/web-client/current` 提供网页客户端。
+Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，将 `/api/*`、`/host`、`/signal` 与
+`/healthz` 反向代理到 `127.0.0.1:8080`，并从 `/opt/remoe/web-client/current` 提供网页客户端。
 
 ## 构建和部署网页客户端
 
@@ -177,7 +213,7 @@ curl --fail https://signal.example.com/ | grep 'remoe 网页客户端'
 预期格式：
 
 ```json
-{"status":"ok","sessions":0}
+{"status":"ok","sessions":0,"managedHosts":0}
 ```
 
 在 Windows host 上启动：
@@ -187,32 +223,34 @@ curl --fail https://signal.example.com/ | grep 'remoe 网页客户端'
   --signal-url "wss://signal.example.com/signal"
 ```
 
-信令服务器确认 Host session 注册成功后，host 才会打印包含 21 字符 Nano ID 的邀请 URL。client
-使用完整邀请 URL：
+Host 首次启动会打印类似 `ABCD-EFGH` 的十分钟配对码。打开网页，创建 passkey 账号并保存页面只
+显示一次的恢复码，然后输入 Host 配对码和设备名称。配对成功后 Host 会打印：
 
-```powershell
-.\build-local\Release\remoe_client.exe `
-  --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT"
+```text
+Host paired and credential protected with Windows DPAPI.
+Host is online in the account device list
 ```
 
-client 不需要 host 地址或端口；视频和键鼠均由端到端 WebRTC DataChannel 承载，服务器只看见
-SDP/ICE 信令。应用会从 WSS URL 自动派生同域名的 `stun:signal.example.com:3478`，无需增加 STUN
-命令行参数；成功生成服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
-Host 会保持这一条 WSS 连接等待 Client，不会每 15 秒重连。Windows 程序从系统 `ROOT` 证书库
+浏览器设备列表中点击“连接”即可；服务器内部生成短期 Nano ID 并把 Browser 分配给在线 Host，用户
+看不到 session 或 Host IP。视频和键鼠均由端到端 WebRTC DataChannel 承载，服务器只看见 SDP/ICE
+信令。应用会从 WSS URL 自动派生同域名的 `stun:signal.example.com:3478`；成功生成服务器反射地址后
+会打印 `WebRTC STUN reflexive candidate gathered`。Host 会保持 WSS 等待 Browser。Windows 程序从系统 `ROOT` 证书库
 向 Mbed TLS 提供 CA bundle，因此 WSS 会验证证书链和域名，无效证书会被拒绝。
-服务器不会由 Client 创建 session；错误或已过期的邀请会立即返回 `Invite not found or expired`。
+
+Host 凭证保存在 `%LOCALAPPDATA%\remoe\host-identity.bin` 并由当前 Windows 用户的 DPAPI 保护。
+转移账号或凭证损坏时，在 Host 本机运行相同命令并添加 `--repair`，再把新配对码填入目标账号。旧
+设备 token 会轮换，旧账号随即失去该 Host。
 
 ### 使用网页验证客户端
 
-先启动 Host 并复制它打印的完整 WSS invite。使用最新版 Chrome 或 Edge 打开：
+使用最新版 Chrome 或 Edge 打开：
 
 ```text
 https://signal.example.com/
 ```
 
-把 WSS invite 粘贴到输入框，点击“连接并验证”。也可以把 invite 的 `#` 及其后内容附加到网页
-地址，例如 `https://signal.example.com/#V1StGXR8_Z5jdHi6B-myT`；URL fragment 不会随 HTTP 请求发送到
-服务器。页面成功建立两条 DataChannel、重组 NVENC AV1 并由 WebCodecs 显示第一帧后，会让画面
+通过 passkey 登录，选择在线 Host 并点击“连接”。页面成功建立两条 DataChannel、重组 NVENC AV1
+并由 WebCodecs 显示第一帧后，会让画面
 自动占满网页。点击画面中央的按钮即可通过 Pointer Lock 接管键鼠，按 `Esc` 释放；右上角按钮用于
 断开。页面会按视频与浏览器视口的实际尺寸等比缩放，保证整张远程画面可见，并绘制一个与发送到
 Host 的绝对坐标同步的本地鼠标指针。浏览器要求 Pointer Lock 由一次明确的用户操作触发，因此它
@@ -221,6 +259,9 @@ Host 的绝对坐标同步的本地鼠标指针。浏览器要求 Pointer Lock �
 若页面报告浏览器不支持 AV1 配置，先在 `chrome://gpu` 或 `edge://gpu` 检查硬件视频解码情况。
 WebCodecs 的 codec 支持由浏览器和机器共同决定，页面会在发送 `StreamReady` 前调用
 `VideoDecoder.isConfigSupported()`，不会在已知不支持时启动 Host 视频发送。
+
+“使用临时邀请 URL”折叠入口和原生 client 只用于兼容诊断。需要时给 Host 增加
+`--legacy-invite`，再使用它打印的完整 URL；账号管理模式默认不打印邀请。
 
 ## 更新服务
 
@@ -231,12 +272,16 @@ cd /path/to/remoe/signaling-server
 npm ci
 npm test
 
-sudo install -o root -g root -m 0644 \
-  package.json package-lock.json server.mjs \
-  /opt/remoe/signaling-server/
-cd /opt/remoe/signaling-server
-sudo npm ci --omit=dev --ignore-scripts
-sudo chown -R root:root /opt/remoe/signaling-server
+release_id="$(date -u +%Y%m%d%H%M%S)"
+release_dir="/opt/remoe/signaling-server/releases/$release_id"
+sudo install -d -o root -g root -m 0755 "$release_dir/lib"
+sudo install -o root -g root -m 0644 package.json package-lock.json server.mjs "$release_dir/"
+sudo install -o root -g root -m 0644 lib/*.mjs "$release_dir/lib/"
+cd "$release_dir"
+sudo npm ci --omit=dev
+sudo chown -R root:root "$release_dir"
+sudo ln -sfn "releases/$release_id" /opt/remoe/signaling-server/current.next
+sudo mv -Tf /opt/remoe/signaling-server/current.next /opt/remoe/signaling-server/current
 sudo systemctl restart remoe-signaling.service
 curl --fail http://127.0.0.1:8080/healthz
 ```
@@ -278,15 +323,22 @@ sudo ss -lunp
 - HTTPS 证书申请失败：检查 A/AAAA 记录、TCP 80/443、安全组和主机防火墙。
 - `/healthz` 返回 502：检查 `remoe-signaling.service` 是否正在运行，以及 Node.js 是否监听 8080。
 - STUN 超时：检查 UDP 3478 的 IPv4/IPv6 云安全组、主机防火墙和 coturn 监听状态。
-- 注册响应错误：检查邀请 URL 是否完整、Host 是否仍在线，以及该邀请是否已有 Client 使用。
+- passkey 无法创建：检查网页是否为 HTTPS、`REMOE_RP_ID` 是否等于部署域名，以及
+  `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。
+- 配对码错误：配对码十分钟失效；重新启动未配对 Host，或在已配对 Host 本机使用 `--repair`。
+- Host 显示离线：检查 Host 的 WSS 日志以及 `/host` 是否由 Caddy 反向代理。
 - DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名
   UDP 3478 STUN 地址。禁用 TURN 时跨部分 NAT 仍可能无法直连。
 
 ## 安全边界
 
-- 邀请 URL 当前是 bearer secret，不等同于用户身份认证，不应公开传播。
-- 信令使用 WSS，Caddyfile 默认添加 HSTS、`nosniff` 和 Referrer Policy。
-- 只有已连接的 Host 可以创建 session；Host 断开时 session 立即失效并关闭对应 Client。
+- 日常网页访问使用 WebAuthn/passkey；30 天登录 Cookie 设置为 HttpOnly、SameSite=Strict 和 Secure。
+- 恢复码约有 130 bit 随机熵，服务器只保存 SHA-256 哈希；新 passkey 验证成功后在 SQLite 事务中
+  消费旧码并生成新码。恢复码仍是 bearer secret，不应发送给其他人。
+- Host 长期 token 由 Windows DPAPI 保护，服务器只保存哈希。该简化模型信任服务器，未使用 TPM
+  不可导出密钥或每次连接二次验证。
+- 只有账号所有者能给已在线 Host 创建短期 session；Host 断开时 session 立即失效。
 - 服务限制单 session 和全局排队内存、会话数量及空闲时间，并清除残留信令帧。
 - 不应开放 Node.js 的 8080 端口到公网。
-- WebAuthn/passkey 接入后，应由认证流程签发短期授权，而不是仅依赖邀请 URL。
+- SQLite 位于 `/var/lib/remoe/remoe.db`；应使用 SQLite backup API 或 `VACUUM INTO` 备份，不要只复制
+  正在写入的 WAL 数据库主文件。数据库完全丢失时仍可新建账号并在 Host 本机重新配对。

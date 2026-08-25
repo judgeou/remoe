@@ -123,6 +123,8 @@ endforeach()
 
 add_executable(remoe_host
     src/remoe_host.manifest
+    src/host_identity.cpp
+    src/host_identity.h
     src/main.cpp
     src/desktop_capture.cpp
     src/desktop_capture.h

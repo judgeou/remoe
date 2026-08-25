@@ -1,4 +1,5 @@
 #include "desktop_capture.h"
+#include "host_identity.h"
 #include "protocol.h"
 #include "webrtc_websocket_signaling.h"
 
@@ -46,6 +47,8 @@ struct Options {
     std::uint32_t max_fps = 0;
     std::uint32_t max_bitrate_mbps = 0;
     std::string signaling_url;
+    bool repair = false;
+    bool legacy_invite = false;
 };
 
 struct StreamSettings {
@@ -171,6 +174,8 @@ void print_help() {
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
         "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
         "  --signal-url <ws(s)://...> WebSocket signaling URL (required)\n"
+        "  --repair           Rebind this Host to an account and rotate its credential\n"
+        "  --legacy-invite    Print an anonymous invite for the native client\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
@@ -185,6 +190,14 @@ Options parse_options(int argc, char** argv) {
             std::exit(0);
         }
         if (arg == "--admin") continue; // Consumed by relaunch_as_admin_if_requested().
+        if (arg == "--repair") {
+            options.repair = true;
+            continue;
+        }
+        if (arg == "--legacy-invite") {
+            options.legacy_invite = true;
+            continue;
+        }
         if (i + 1 >= argc) throw std::runtime_error("missing value after " + std::string(arg));
         const std::string_view value(argv[++i]);
         if (arg == "--output") options.output = parse_u32(value, arg, 0, 63);
@@ -197,6 +210,9 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.signaling_url.empty()) {
         throw std::runtime_error("--signal-url is required");
+    }
+    if (options.repair && options.legacy_invite) {
+        throw std::runtime_error("--repair cannot be combined with --legacy-invite");
     }
     return options;
 }
@@ -425,8 +441,33 @@ int run(const Options& options) {
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
               << remoe::protocol::kVersion << ")\n";
     remoe::DesktopCapture capture(options.output);
-    const std::string signaling_invite =
-        remoe::create_webrtc_signaling_invite(options.signaling_url);
+    std::optional<remoe::ManagedHostIdentity> host_identity;
+    std::string signaling_invite;
+    if (options.legacy_invite) {
+        signaling_invite = remoe::create_webrtc_signaling_invite(options.signaling_url);
+    } else {
+        std::optional<remoe::ManagedHostIdentity> saved_identity;
+        try {
+            saved_identity = remoe::load_host_identity();
+        } catch (const std::exception& error) {
+            if (!options.repair) throw;
+            std::cerr << "Ignoring unusable saved Host identity: " << error.what() << '\n';
+        }
+        if (options.repair || !saved_identity) {
+            std::cout << "\nWaiting for account pairing...\n" << std::flush;
+            host_identity = remoe::pair_managed_webrtc_host(
+                options.signaling_url, options.repair ? saved_identity : std::nullopt,
+                [](std::string code) {
+                    std::cout << "Pairing code: " << code
+                              << "\nEnter this code on the remoe web page within 10 minutes.\n"
+                              << std::flush;
+                }, [] { return !g_running.load(); });
+            remoe::save_host_identity(*host_identity);
+            std::cout << "Host paired and credential protected with Windows DPAPI.\n";
+        } else {
+            host_identity = *saved_identity;
+        }
+    }
     std::cout << "Display " << options.output << ": " << capture.width() << 'x' << capture.height() << '\n'
               << "Client FPS limit: ";
     if (options.max_fps) std::cout << options.max_fps;
@@ -439,6 +480,7 @@ int run(const Options& options) {
 
     std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
+    bool first_registration = true;
     bool invite_printed = false;
     while (g_running) {
         std::atomic_bool session_running{true};
@@ -544,18 +586,33 @@ int run(const Options& options) {
 
         std::unique_ptr<remoe::WebRtcTransport> control_channel;
         try {
-            control_channel = remoe::establish_webrtc_over_websocket(
-                remoe::WebRtcTransport::Role::Answerer, signaling_invite,
-                std::move(control_callbacks), (std::chrono::milliseconds::max)(),
-                [] { return !g_running.load(); }, [&] {
+            auto on_registered = [&] {
+                if (options.legacy_invite) {
                     if (!invite_printed) {
                         std::cout << "WebRTC invite URL: " << signaling_invite << '\n';
                         invite_printed = true;
                     } else {
                         std::cout << "Signaling reconnected\n";
                     }
-                    std::cout << "Waiting for client (Ctrl+C to stop)\n" << std::flush;
-                });
+                } else if (first_registration) {
+                    std::cout << "Host is online in the account device list\n";
+                    first_registration = false;
+                } else {
+                    std::cout << "Signaling reconnected\n";
+                }
+                std::cout << "Waiting for client (Ctrl+C to stop)\n" << std::flush;
+            };
+            if (options.legacy_invite) {
+                control_channel = remoe::establish_webrtc_over_websocket(
+                    remoe::WebRtcTransport::Role::Answerer, signaling_invite,
+                    std::move(control_callbacks), (std::chrono::milliseconds::max)(),
+                    [] { return !g_running.load(); }, std::move(on_registered));
+            } else {
+                control_channel = remoe::establish_managed_host_webrtc(
+                    options.signaling_url, *host_identity, std::move(control_callbacks),
+                    (std::chrono::milliseconds::max)(),
+                    [] { return !g_running.load(); }, std::move(on_registered));
+            }
         } catch (const std::exception& error) {
             session_running = false;
             if (!g_running) break;

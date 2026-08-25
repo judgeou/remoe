@@ -7,3 +7,4 @@
 /signaling-server/node_modules/
 /web-client/node_modules/
 /web-client/dist/
+/signaling-server/data/

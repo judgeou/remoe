@@ -1,7 +1,23 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, type CSSProperties } from 'vue';
+import AccountPanel from './components/AccountPanel.vue';
 import ConnectPanel from './components/ConnectPanel.vue';
+import DevicePanel from './components/DevicePanel.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
+import {
+  addPasskey,
+  connectHost as requestHostConnection,
+  createAccount,
+  deleteHost,
+  getAccount,
+  login,
+  logout,
+  pairHost,
+  recoverAccount,
+  renameHost,
+  rotateRecoveryCode,
+  type AccountState,
+} from './api';
 import { RemoteInputController } from './core/input.js';
 import { cursorViewportPosition, fitVideoSize } from './core/layout.js';
 import { RemoeBrowserClient, parseInvite } from './core/remoe-client.js';
@@ -20,6 +36,11 @@ interface CursorPosition {
 }
 
 const viewer = ref<InstanceType<typeof RemoteViewer> | null>(null);
+const account = reactive<AccountState>({ authenticated: false, hosts: [], passkeys: [] });
+const accountLoading = ref(true);
+const accountBusy = ref(false);
+const accountError = ref('');
+const recoveryCode = ref('');
 const invite = ref('');
 const fps = ref(60);
 const bitrate = ref(20);
@@ -38,6 +59,7 @@ const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
 let streamSize: { width: number; height: number } | null = null;
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
+let accountRefreshTimer: number | null = null;
 
 function canvas(): HTMLCanvasElement {
   if (!viewer.value) throw new Error('远程画面尚未挂载');
@@ -93,11 +115,11 @@ function stopSession() {
   running.value = false;
 }
 
-async function connect() {
+async function connect(inviteOverride?: string) {
   try {
     stopSession();
     details.value = '';
-    const parsedInvite = parseInvite(invite.value);
+    const parsedInvite = parseInvite(inviteOverride ?? invite.value);
     running.value = true;
     const nextClient = new RemoeBrowserClient(parsedInvite, {
       fps: fps.value,
@@ -155,6 +177,107 @@ async function connect() {
   }
 }
 
+async function refreshAccount() {
+  try {
+    const next = await getAccount();
+    account.authenticated = next.authenticated;
+    account.hosts = next.hosts;
+    account.passkeys = next.passkeys;
+  } catch (error) {
+    accountError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    accountLoading.value = false;
+  }
+}
+
+async function accountAction(action: () => Promise<void>) {
+  accountBusy.value = true;
+  accountError.value = '';
+  try {
+    await action();
+  } catch (error) {
+    accountError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    accountBusy.value = false;
+  }
+}
+
+function registerAccount() {
+  return accountAction(async () => {
+    const result = await createAccount();
+    recoveryCode.value = result.recoveryCode ?? '';
+    await refreshAccount();
+  });
+}
+
+function loginAccount() {
+  return accountAction(async () => {
+    await login();
+    await refreshAccount();
+  });
+}
+
+function recover(code: string) {
+  return accountAction(async () => {
+    const result = await recoverAccount(code);
+    recoveryCode.value = result.recoveryCode ?? '';
+    await refreshAccount();
+  });
+}
+
+function logoutAccount() {
+  return accountAction(async () => {
+    await logout();
+    recoveryCode.value = '';
+    await refreshAccount();
+  });
+}
+
+function pair(code: string, name: string) {
+  return accountAction(async () => {
+    await pairHost(code, name);
+    await refreshAccount();
+  });
+}
+
+function connectManagedHost(id: string) {
+  return accountAction(async () => {
+    const managedInvite = await requestHostConnection(id);
+    await connect(managedInvite);
+  });
+}
+
+function addAccountPasskey() {
+  return accountAction(async () => {
+    await addPasskey();
+    await refreshAccount();
+  });
+}
+
+function rotateRecovery() {
+  return accountAction(async () => {
+    recoveryCode.value = await rotateRecoveryCode();
+  });
+}
+
+function updateHostName(id: string, name: string) {
+  return accountAction(async () => {
+    await renameHost(id, name);
+    await refreshAccount();
+  });
+}
+
+function removeHost(id: string) {
+  return accountAction(async () => {
+    await deleteHost(id);
+    await refreshAccount();
+  });
+}
+
+async function copyRecoveryCode() {
+  await navigator.clipboard.writeText(recoveryCode.value);
+}
+
 async function captureInput() {
   try {
     await inputController?.capture();
@@ -171,27 +294,74 @@ onMounted(() => {
   }
   window.addEventListener('resize', fitRemoteVideo);
   window.visualViewport?.addEventListener('resize', fitRemoteVideo);
+  void refreshAccount();
+  accountRefreshTimer = window.setInterval(() => {
+    if (account.authenticated && !accountBusy.value && !running.value) void refreshAccount();
+  }, 5_000);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', fitRemoteVideo);
   window.visualViewport?.removeEventListener('resize', fitRemoteVideo);
+  if (accountRefreshTimer !== null) window.clearInterval(accountRefreshTimer);
   stopSession();
 });
 </script>
 
 <template>
   <main>
-    <ConnectPanel
-      v-model:invite="invite"
-      v-model:fps="fps"
-      v-model:bitrate="bitrate"
-      v-model:scale="scale"
-      :running="running"
-      :supported="supported"
-      @connect="connect"
-      @stop="stopSession"
-    />
+    <p v-if="accountLoading" class="loading-state">正在载入账号…</p>
+    <template v-else-if="!account.authenticated">
+      <AccountPanel
+        :busy="accountBusy"
+        :error="accountError"
+        @login="loginAccount"
+        @create="registerAccount"
+        @recover="recover"
+      />
+      <details class="legacy-connect">
+        <summary>使用临时邀请 URL</summary>
+        <ConnectPanel
+          v-model:invite="invite"
+          v-model:fps="fps"
+          v-model:bitrate="bitrate"
+          v-model:scale="scale"
+          compact
+          :running="running"
+          :supported="supported"
+          @connect="connect()"
+          @stop="stopSession"
+        />
+      </details>
+    </template>
+    <template v-else>
+      <aside v-if="recoveryCode" class="recovery-banner">
+        <strong>请保存新的账号恢复码</strong>
+        <code>{{ recoveryCode }}</code>
+        <span>它只显示在当前页面；使用后会自动轮换。即使丢失，也可以在 Host 本机重新配对。</span>
+        <div class="inline-actions">
+          <button class="secondary small" @click="copyRecoveryCode">复制</button>
+          <button class="text-button" @click="recoveryCode = ''">我已保存</button>
+        </div>
+      </aside>
+      <DevicePanel
+        v-model:fps="fps"
+        v-model:bitrate="bitrate"
+        v-model:scale="scale"
+        :hosts="account.hosts"
+        :passkeys="account.passkeys"
+        :busy="accountBusy || running"
+        :error="accountError"
+        @connect="connectManagedHost"
+        @refresh="refreshAccount"
+        @logout="logoutAccount"
+        @pair="pair"
+        @add-passkey="addAccountPasskey"
+        @rotate-recovery="rotateRecovery"
+        @rename="updateHostName"
+        @remove="removeHost"
+      />
+    </template>
     <RemoteViewer
       ref="viewer"
       :frame-visible="frameVisible"

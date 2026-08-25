@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace remoe {
 namespace {
@@ -66,6 +67,15 @@ std::string windows_root_ca_bundle() {
 
 bool valid_session_id(std::string_view value) {
     if (value.size() < 8 || value.size() > 64) return false;
+    return std::ranges::all_of(value, [](char character) {
+        return (character >= 'a' && character <= 'z') ||
+            (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || character == '_' || character == '-';
+    });
+}
+
+bool valid_url_token(std::string_view value, std::size_t minimum = 16) {
+    if (value.size() < minimum || value.size() > 128) return false;
     return std::ranges::all_of(value, [](char character) {
         return (character >= 'a' && character <= 'z') ||
             (character >= 'A' && character <= 'Z') ||
@@ -143,16 +153,33 @@ std::string derive_stun_url(std::string_view signaling_url) {
     return "stun:" + std::string(host) + ":3478";
 }
 
+std::string host_endpoint(std::string signaling_url) {
+    if (signaling_url.find('#') != std::string::npos) {
+        throw std::invalid_argument("Managed Host signaling URL must not contain a fragment");
+    }
+    const std::size_t scheme = signaling_url.find("://");
+    if (scheme == std::string::npos ||
+        (!signaling_url.starts_with("ws://") && !signaling_url.starts_with("wss://"))) {
+        throw std::invalid_argument("WebRTC signaling URL must use ws:// or wss://");
+    }
+    const std::size_t path = signaling_url.find_first_of("/?", scheme + 3);
+    if (path != std::string::npos) signaling_url.resize(path);
+    signaling_url += "/host";
+    return signaling_url;
+}
+
 class WebSocketSignalingStream final
     : public std::enable_shared_from_this<WebSocketSignalingStream> {
 public:
     ~WebSocketSignalingStream() { close(); }
 
     void connect(const std::string& url, std::chrono::milliseconds timeout,
-                 std::function<bool()> stop_requested, bool client_role) {
+                 std::function<bool()> stop_requested, bool client_role,
+                 std::vector<std::string> protocols = {}) {
         rtc::WebSocket::Configuration configuration;
         configuration.connectionTimeout = timeout;
         configuration.maxMessageSize = 1024 * 1024 + 1024;
+        configuration.protocols = std::move(protocols);
         if (url.starts_with("wss://")) {
             static const std::string root_ca_bundle = windows_root_ca_bundle();
             configuration.caCertificatePemFile = root_ca_bundle;
@@ -320,6 +347,10 @@ private:
 
 } // namespace
 
+bool valid_managed_host_identity(const ManagedHostIdentity& identity) noexcept {
+    return valid_url_token(identity.device_id) && valid_url_token(identity.token, 32);
+}
+
 std::string create_webrtc_signaling_invite(std::string signaling_url) {
     if (!signaling_url.starts_with("ws://") && !signaling_url.starts_with("wss://")) {
         throw std::invalid_argument("WebRTC signaling URL must use ws:// or wss://");
@@ -341,6 +372,86 @@ std::string create_webrtc_signaling_invite(std::string signaling_url) {
         signaling_url += alphabet[byte & 0x3f];
     }
     return signaling_url;
+}
+
+ManagedHostIdentity pair_managed_webrtc_host(
+    std::string signaling_url, std::optional<ManagedHostIdentity> current_identity,
+    std::function<void(std::string)> on_pairing_code,
+    std::function<bool()> stop_requested) {
+    if (current_identity && !valid_managed_host_identity(*current_identity)) {
+        throw std::invalid_argument("The existing managed Host identity is invalid");
+    }
+    const std::string endpoint = host_endpoint(std::move(signaling_url));
+    std::string protocol = "remoe-pair.new";
+    if (current_identity) {
+        protocol = "remoe-pair." + current_identity->device_id + '.' + current_identity->token;
+    }
+
+    rtc::WebSocket::Configuration configuration;
+    configuration.connectionTimeout = std::chrono::seconds(15);
+    configuration.maxMessageSize = 4096;
+    configuration.protocols = {std::move(protocol)};
+    if (endpoint.starts_with("wss://")) {
+        static const std::string root_ca_bundle = windows_root_ca_bundle();
+        configuration.caCertificatePemFile = root_ca_bundle;
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::optional<ManagedHostIdentity> result;
+    std::string error;
+    bool closed = false;
+    auto websocket = std::make_shared<rtc::WebSocket>(std::move(configuration));
+    websocket->onMessage(
+        [](rtc::binary) {},
+        [&](std::string message) {
+            if (message.starts_with("pairing:")) {
+                if (on_pairing_code) on_pairing_code(message.substr(8));
+                return;
+            }
+            if (message.starts_with("paired:")) {
+                const std::size_t separator = message.find(':', 7);
+                if (separator != std::string::npos) {
+                    ManagedHostIdentity identity{
+                        message.substr(7, separator - 7), message.substr(separator + 1)};
+                    std::lock_guard lock(mutex);
+                    if (valid_managed_host_identity(identity)) result = std::move(identity);
+                    else error = "Pairing server returned an invalid Host identity";
+                    changed.notify_all();
+                    return;
+                }
+            }
+            std::lock_guard lock(mutex);
+            error = "Pairing server returned an unknown response";
+            changed.notify_all();
+        });
+    websocket->onClosed([&] {
+        std::lock_guard lock(mutex);
+        closed = true;
+        changed.notify_all();
+    });
+    websocket->onError([&](std::string detail) {
+        std::lock_guard lock(mutex);
+        error = std::move(detail);
+        changed.notify_all();
+    });
+    websocket->open(endpoint);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(11);
+    std::unique_lock lock(mutex);
+    while (!result && error.empty() && !closed && std::chrono::steady_clock::now() < deadline) {
+        if (stop_requested && stop_requested()) {
+            error = "Pairing cancelled";
+            break;
+        }
+        changed.wait_for(lock, std::chrono::milliseconds(250));
+    }
+    lock.unlock();
+    websocket->resetCallbacks();
+    websocket->close();
+    if (result) return *result;
+    if (error.empty()) error = closed ? "Pairing connection closed" : "Pairing code expired";
+    throw std::runtime_error(error);
 }
 
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
@@ -366,6 +477,36 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     };
     return establish_webrtc_over_tcp(
         role, std::move(io), std::move(callbacks), timeout, {stun_url}, true);
+}
+
+std::unique_ptr<WebRtcTransport> establish_managed_host_webrtc(
+    std::string signaling_url, const ManagedHostIdentity& identity,
+    WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
+    std::function<bool()> stop_requested, std::function<void()> on_signaling_open) {
+    if (!valid_managed_host_identity(identity)) {
+        throw std::invalid_argument("Managed Host identity is invalid; run with --repair");
+    }
+    const std::string stun_url = derive_stun_url(signaling_url);
+    const std::string endpoint = host_endpoint(std::move(signaling_url));
+    const std::string protocol =
+        "remoe-host." + identity.device_id + '.' + identity.token;
+    auto stream = std::make_shared<WebSocketSignalingStream>();
+    constexpr auto connection_timeout = std::chrono::seconds(15);
+    stream->connect(endpoint, timeout == (std::chrono::milliseconds::max)()
+                                  ? connection_timeout : timeout,
+                    std::move(stop_requested), false, {protocol});
+    if (on_signaling_open) on_signaling_open();
+
+    WebRtcTcpBootstrapIo io;
+    io.send_all = [stream](const void* data, std::size_t size) {
+        return stream->send_all(data, size);
+    };
+    io.receive_all = [stream](void* data, std::size_t size, auto deadline) {
+        return stream->receive_all(data, size, deadline);
+    };
+    return establish_webrtc_over_tcp(
+        WebRtcTransport::Role::Answerer, std::move(io), std::move(callbacks),
+        timeout, {stun_url}, true);
 }
 
 } // namespace remoe
