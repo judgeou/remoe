@@ -1,5 +1,6 @@
 #include "webrtc_websocket_signaling.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -30,8 +31,15 @@ int main(int argc, char** argv) {
         std::mutex mutex;
         std::condition_variable received;
         std::vector<std::uint8_t> received_message;
+        std::atomic_bool host_srflx{false};
+        std::atomic_bool client_srflx{false};
 
         remoe::WebRtcTransport::Callbacks host_callbacks;
+        host_callbacks.on_local_candidate = [&](auto candidate) {
+            if (candidate.candidate.find(" typ srflx") != std::string::npos) {
+                host_srflx = true;
+            }
+        };
         host_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
             {
                 std::lock_guard lock(mutex);
@@ -45,13 +53,23 @@ int main(int argc, char** argv) {
                 remoe::WebRtcTransport::Role::Answerer, invite,
                 std::move(host_callbacks), 15s);
         });
+        remoe::WebRtcTransport::Callbacks client_callbacks;
+        client_callbacks.on_local_candidate = [&](auto candidate) {
+            if (candidate.candidate.find(" typ srflx") != std::string::npos) {
+                client_srflx = true;
+            }
+        };
         auto client_future = std::async(std::launch::async, [&] {
             return remoe::establish_webrtc_over_websocket(
-                remoe::WebRtcTransport::Role::Offerer, invite, {}, 15s);
+                remoe::WebRtcTransport::Role::Offerer, invite,
+                std::move(client_callbacks), 15s);
         });
 
         auto host = host_future.get();
         auto client = client_future.get();
+        if (!host_srflx.load() || !client_srflx.load()) {
+            throw std::runtime_error("STUN did not produce srflx candidates for both peers");
+        }
         const std::vector<std::uint8_t> expected{0x52, 0x4d, 0x4f, 0x45};
         if (!client->send_binary(expected)) {
             throw std::runtime_error("WebRTC DataChannel rejected the smoke message");

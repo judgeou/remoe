@@ -432,6 +432,11 @@ int run(const Options& options) {
     auto control_state = std::make_shared<ClientControlState>();
 
     remoe::WebRtcTransport::Callbacks control_callbacks;
+    control_callbacks.on_local_candidate = [](auto candidate) {
+        if (candidate.candidate.find(" typ srflx ") != std::string::npos) {
+            std::cout << "WebRTC STUN reflexive candidate gathered\n";
+        }
+    };
     control_callbacks.on_open = [] {
         std::cout << "WebRTC control DataChannel connected\n";
     };

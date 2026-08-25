@@ -139,7 +139,8 @@ void validate_signal_header(const protocol::WebRtcSignalHeader& header) {
 
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Role role, WebRtcTcpBootstrapIo io,
-    WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout) {
+    WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
+    std::vector<std::string> ice_servers) {
     if (!io.send_all || !io.receive_all) {
         throw std::invalid_argument("WebRTC TCP bootstrap requires send and receive functions");
     }
@@ -197,6 +198,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
 
     WebRtcTransport::Configuration configuration;
     configuration.role = role;
+    configuration.ice_servers = std::move(ice_servers);
     auto transport = std::make_unique<WebRtcTransport>(
         std::move(configuration), std::move(transport_callbacks));
 

@@ -51,6 +51,8 @@ public:
     struct Configuration {
         Role role = Role::Answerer;
         std::string data_channel_label = "remoe-control";
+        // Only explicit stun: URLs are accepted; TURN is intentionally disabled.
+        std::vector<std::string> ice_servers;
         std::optional<std::string> bind_address;
         std::uint16_t port_range_begin = 1024;
         std::uint16_t port_range_end = 65535;

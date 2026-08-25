@@ -94,8 +94,13 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         std::call_once(logger_once, [] { rtc::InitLogger(rtc::LogLevel::Warning); });
 
         rtc::Configuration rtc_config;
-        // Deliberately leave iceServers empty. This layer currently gathers
-        // host candidates only and contains no STUN or TURN configuration.
+        for (const auto& url : configuration.ice_servers) {
+            rtc::IceServer server(url);
+            if (server.type != rtc::IceServer::Type::Stun || !url.starts_with("stun:")) {
+                throw std::invalid_argument("WebRTC transport accepts STUN servers only");
+            }
+            rtc_config.iceServers.push_back(std::move(server));
+        }
         rtc_config.bindAddress = configuration.bind_address;
         rtc_config.portRangeBegin = configuration.port_range_begin;
         rtc_config.portRangeEnd = configuration.port_range_end;

@@ -1,7 +1,7 @@
 # WebSocket 信令服务器部署
 
-本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的 WSS 信令中继。示例域名统一使用
-`signal.example.com`，部署时替换为自己的域名。
+本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的 WSS 信令中继和 STUN-only 服务。示例域名
+统一使用 `signal.example.com`，部署时替换为自己的域名。
 
 信令服务器只转发 SDP/ICE bootstrap 的二进制帧，不承载视频或 WebRTC DataChannel 数据，
 也不提供 STUN/TURN。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
@@ -107,6 +107,36 @@ sudo systemctl status --no-pager caddy
 Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，并将 `/signal` 与 `/healthz` 反向代理到
 `127.0.0.1:8080`。
 
+## 部署 STUN-only
+
+STUN 使用同一域名的 UDP 3478，但不经过 Caddy。云安全组和主机防火墙必须分别允许 IPv4、IPv6
+入站 UDP 3478；不要开放 TURN relay 端口范围。
+
+安装 coturn 并使用仓库提供的严格 STUN-only 配置：
+
+```bash
+sudo apt update
+sudo apt install -y coturn
+cd /path/to/remoe
+sudo install -o root -g root -m 0644 \
+  deploy/coturn-stun.conf /etc/turnserver.conf
+sudo systemctl enable --now coturn
+sudo systemctl restart coturn
+sudo systemctl status --no-pager coturn
+sudo ss -lunp | grep ':3478'
+```
+
+`deploy/coturn-stun.conf` 只启用 UDP STUN Binding，配置了 `stun-only`，并同时关闭 TCP、TLS 和
+DTLS listener。`stun-only` 会拒绝所有 TURN Allocate，因此该服务不需要 TURN 用户名、密码、
+证书或 relay 端口范围。
+
+更新配置后重启服务并检查日志：
+
+```bash
+sudo systemctl restart coturn
+sudo journalctl -u coturn -n 100 --no-pager
+```
+
 ## 验证部署
 
 公网健康检查应返回 HTTP 200 和 JSON：
@@ -136,7 +166,9 @@ host 会打印包含 21 字符 Nano ID 的邀请 URL。client 使用完整邀请
 ```
 
 目前视频仍通过 host 的 TCP 47990 端口传输，因此 client 仍需要 `--host`，并且该端口必须能从
-client 到达。WSS 只替代 SDP/ICE 信令通道，键鼠控制通过 WebRTC DataChannel 传输。
+client 到达。WSS 只替代 SDP/ICE 信令通道，键鼠控制通过 WebRTC DataChannel 传输。应用会从
+WSS URL 自动派生同域名的 `stun:signal.example.com:3478`，无需增加 STUN 命令行参数；成功生成
+服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
 
 ## 更新服务
 
@@ -164,24 +196,30 @@ curl --fail http://127.0.0.1:8080/healthz
 
 ```bash
 sudo systemctl status --no-pager --full remoe-signaling.service caddy
+sudo systemctl status --no-pager --full coturn
 sudo journalctl -u remoe-signaling.service -n 100 --no-pager
 sudo journalctl -u caddy -n 100 --no-pager
+sudo journalctl -u coturn -n 100 --no-pager
 sudo ss -lntp
+sudo ss -lunp
 ```
 
 正常监听关系应为：
 
 - Node.js：`127.0.0.1:8080`
 - Caddy：公网 TCP 80、443
+- coturn STUN-only：公网 UDP 3478
 - SSH：服务器配置的管理端口
 
 常见问题：
 
 - HTTPS 证书申请失败：检查 A/AAAA 记录、TCP 80/443、安全组和主机防火墙。
 - `/healthz` 返回 502：检查 `remoe-signaling.service` 是否正在运行，以及 Node.js 是否监听 8080。
+- STUN 超时：检查 UDP 3478 的 IPv4/IPv6 云安全组、主机防火墙和 coturn 监听状态。
 - WebSocket 返回 400：邀请 URL 的 Nano ID 或 role 参数无效。
 - WebSocket 返回 409：同一 session 已有相同角色连接；关闭旧进程后重试。
-- DataChannel 超时：当前未配置 STUN/TURN，仅靠 host candidates；跨 NAT 网络不保证能够直连。
+- DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名
+  UDP 3478 STUN 地址。禁用 TURN 时跨部分 NAT 仍可能无法直连。
 
 ## 安全边界
 

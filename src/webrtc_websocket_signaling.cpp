@@ -67,6 +67,41 @@ std::pair<std::string, std::string> split_invite(std::string invite) {
     return {std::move(invite), std::move(session)};
 }
 
+std::string derive_stun_url(std::string_view signaling_url) {
+    constexpr std::string_view ws_scheme = "ws://";
+    constexpr std::string_view wss_scheme = "wss://";
+    std::size_t authority_begin = 0;
+    if (signaling_url.starts_with(wss_scheme)) authority_begin = wss_scheme.size();
+    else if (signaling_url.starts_with(ws_scheme)) authority_begin = ws_scheme.size();
+    else throw std::invalid_argument("WebRTC signaling URL must use ws:// or wss://");
+
+    const std::size_t authority_end = signaling_url.find_first_of("/?#", authority_begin);
+    std::string_view authority = signaling_url.substr(
+        authority_begin, authority_end == std::string_view::npos
+            ? std::string_view::npos : authority_end - authority_begin);
+    if (authority.empty() || authority.find('@') != std::string_view::npos) {
+        throw std::invalid_argument("WebRTC signaling URL has an invalid authority");
+    }
+
+    std::string_view host;
+    if (authority.front() == '[') {
+        const std::size_t closing_bracket = authority.find(']');
+        if (closing_bracket == std::string_view::npos || closing_bracket == 1 ||
+            (closing_bracket + 1 < authority.size() && authority[closing_bracket + 1] != ':')) {
+            throw std::invalid_argument("WebRTC signaling URL has an invalid IPv6 host");
+        }
+        host = authority.substr(0, closing_bracket + 1);
+    } else {
+        const std::size_t port_separator = authority.rfind(':');
+        host = port_separator == std::string_view::npos
+            ? authority : authority.substr(0, port_separator);
+        if (host.empty() || host.find(':') != std::string_view::npos) {
+            throw std::invalid_argument("WebRTC signaling URL has an invalid host");
+        }
+    }
+    return "stun:" + std::string(host) + ":3478";
+}
+
 class WebSocketSignalingStream final
     : public std::enable_shared_from_this<WebSocketSignalingStream> {
 public:
@@ -239,6 +274,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout) {
     auto stream = std::make_shared<WebSocketSignalingStream>();
     auto [signaling_url, session_id] = split_invite(std::move(signaling_invite_url));
+    const std::string stun_url = derive_stun_url(signaling_url);
     const std::string url = make_url(std::move(signaling_url), session_id, role);
     stream->connect(url, timeout);
 
@@ -249,7 +285,8 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     io.receive_all = [stream](void* data, std::size_t size, auto deadline) {
         return stream->receive_all(data, size, deadline);
     };
-    return establish_webrtc_over_tcp(role, std::move(io), std::move(callbacks), timeout);
+    return establish_webrtc_over_tcp(
+        role, std::move(io), std::move(callbacks), timeout, {stun_url});
 }
 
 } // namespace remoe

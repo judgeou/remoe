@@ -139,6 +139,9 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开；同一 host 进程会保持该 Nano ID 不变，
 后续会由 WebAuthn 授权流程签发短期会话。
 
+WebSocket 信令模式会从信令 URL 自动派生同域名的 `stun:<host>:3478` ICE server，不需要额外参数。
+STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` candidate 时 host/client 会打印确认信息。
+
 窗口标题每秒更新一次实际 AV1 payload 码率和应用层 TCP 接收速度。前者以 Mbps 显示，后者以 MB/s
 显示，不包含 TCP/IP 和链路层包头。
 
@@ -265,6 +268,6 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 第三方 NVIDIA 示例封装源码直接从 SDK 路径参与构建，没有复制或修改 SDK 文件。
 
-`signaling-server/` 是只转发二进制 WebRTC 信令帧的 Node.js 服务；`deploy/` 包含生产用 systemd
-和 Caddy 配置。信令服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
+`signaling-server/` 是只转发二进制 WebRTC 信令帧的 Node.js 服务；`deploy/` 包含生产用 systemd、
+Caddy 和 coturn STUN-only 配置。信令与 STUN 服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
 [`docs/signaling-server-deployment.md`](docs/signaling-server-deployment.md)。

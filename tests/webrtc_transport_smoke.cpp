@@ -126,6 +126,18 @@ bool pump_until(SharedState& state, remoe::WebRtcTransport& offerer,
 
 int main() {
     try {
+        bool turn_rejected = false;
+        try {
+            remoe::WebRtcTransport::Configuration forbidden_config;
+            forbidden_config.ice_servers = {"turn:example.invalid:3478"};
+            remoe::WebRtcTransport forbidden_transport(forbidden_config, {});
+        } catch (const std::invalid_argument&) {
+            turn_rejected = true;
+        }
+        if (!turn_rejected) {
+            throw std::runtime_error("WebRTC transport accepted a TURN server");
+        }
+
         SharedState state;
 
         remoe::WebRtcTransport::Configuration answerer_config;
