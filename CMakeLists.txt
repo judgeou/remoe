@@ -66,7 +66,11 @@ set(MBEDTLS_LIBRARIES "mbedtls;mbedx509;mbedcrypto" CACHE STRING "" FORCE)
 # installed Mbed TLS packages rather than add_subdirectory() targets.
 list(PREPEND CMAKE_MODULE_PATH "${LIBDATACHANNEL_ROOT}/deps/libsrtp/cmake")
 
-set(BUILD_SHARED_LIBS ON CACHE BOOL "Build libdatachannel as a DLL" FORCE)
+# Keep libdatachannel's shared-library configuration enabled so its vendored
+# dependency install rules stay disabled, but link only its explicit static
+# target below. Excluding the shared target from ALL prevents datachannel.dll
+# from being built or copied into the application directory.
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Configure libdatachannel shared target" FORCE)
 set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
 set(USE_MBEDTLS ON CACHE BOOL "" FORCE)
 set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
@@ -79,16 +83,8 @@ set(NO_TESTS ON CACHE BOOL "" FORCE)
 set(LIBSRTP_TEST_APPS OFF CACHE BOOL "" FORCE)
 set(LIBSRTP_INSTALL OFF CACHE BOOL "" FORCE)
 set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-add_subdirectory("${LIBDATACHANNEL_ROOT}" third_party/libdatachannel)
-
-function(remoe_link_libdatachannel target_name)
-    target_link_libraries(${target_name} PRIVATE LibDataChannel::LibDataChannel)
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:LibDataChannel::LibDataChannel>
-            $<TARGET_FILE_DIR:${target_name}>
-        COMMENT "Copying libdatachannel runtime for ${target_name}")
-endfunction()
+add_subdirectory("${LIBDATACHANNEL_ROOT}" third_party/libdatachannel EXCLUDE_FROM_ALL)
+set_target_properties(datachannel PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
 add_library(remoe_webrtc_transport STATIC
     src/webrtc_tcp_bootstrap.cpp
@@ -104,7 +100,8 @@ target_compile_definitions(remoe_webrtc_transport PRIVATE
     _WIN32_WINNT=0x0A00)
 target_compile_options(remoe_webrtc_transport PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel bcrypt crypt32)
+target_link_libraries(remoe_webrtc_transport
+    PUBLIC LibDataChannel::LibDataChannelStatic bcrypt crypt32)
 
 set(NVENC_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/NVENC_Video_Codec_SDK_13.0.37"
     CACHE PATH "Path to NVIDIA Video Codec SDK")
@@ -157,8 +154,6 @@ target_link_libraries(remoe_host PRIVATE
     shell32
     ws2_32
     "${NVENC_SDK_ROOT}/Lib/win/x64/nvencodeapi.lib")
-remoe_link_libdatachannel(remoe_host)
-
 install(TARGETS remoe_host RUNTIME DESTINATION bin)
 
 # The client uses Intel oneVPL for AV1 hardware decode. Keep the original host-only
@@ -216,8 +211,6 @@ if(REMOE_BUILD_CLIENT AND EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
         remoe_vpl_dispatcher
         d3d11
         dxgi)
-    remoe_link_libdatachannel(remoe_client)
-
     install(TARGETS remoe_client RUNTIME DESTINATION bin)
 elseif(REMOE_BUILD_CLIENT)
     message(STATUS "Intel oneVPL source not found at ${VPL_ROOT}; building remoe_host only")
@@ -234,7 +227,6 @@ if(BUILD_TESTING)
     target_compile_options(remoe_webrtc_transport_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     target_link_libraries(remoe_webrtc_transport_smoke PRIVATE remoe_webrtc_transport)
-    remoe_link_libdatachannel(remoe_webrtc_transport_smoke)
     add_test(NAME webrtc_transport_smoke COMMAND remoe_webrtc_transport_smoke)
     set_tests_properties(webrtc_transport_smoke PROPERTIES TIMEOUT 30)
 
@@ -247,7 +239,6 @@ if(BUILD_TESTING)
     target_compile_options(remoe_webrtc_tcp_bootstrap_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     target_link_libraries(remoe_webrtc_tcp_bootstrap_smoke PRIVATE remoe_webrtc_transport)
-    remoe_link_libdatachannel(remoe_webrtc_tcp_bootstrap_smoke)
     add_test(NAME webrtc_tcp_bootstrap_smoke COMMAND remoe_webrtc_tcp_bootstrap_smoke)
     set_tests_properties(webrtc_tcp_bootstrap_smoke PROPERTIES TIMEOUT 30)
 
@@ -260,5 +251,4 @@ if(BUILD_TESTING)
     target_compile_options(remoe_webrtc_websocket_signaling_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     target_link_libraries(remoe_webrtc_websocket_signaling_smoke PRIVATE remoe_webrtc_transport)
-    remoe_link_libdatachannel(remoe_webrtc_websocket_signaling_smoke)
 endif()

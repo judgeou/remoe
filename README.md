@@ -38,7 +38,9 @@
 .\build.cmd Debug
 ```
 
-默认生成文件为 `build-local/Release/remoe_host.exe` 和同目录的 `datachannel.dll`。脚本要求 Visual Studio 安装了
+默认生成文件为 `build-local/Release/remoe_host.exe`；启用 oneVPL 客户端时还会生成
+`remoe_client.exe`。libdatachannel 及其加密、SCTP/SRTP 依赖均静态链接，不需要随程序分发
+`datachannel.dll`。脚本要求 Visual Studio 安装了
 “Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
 组件或单独安装的 Ninja 均可。
 
