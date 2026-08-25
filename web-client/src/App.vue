@@ -35,6 +35,13 @@ interface CursorPosition {
   y: number;
 }
 
+interface PerformanceStats {
+  fps: number;
+  bitrateMbps: number;
+  decodeQueueSize: number;
+  lossEvents: number;
+}
+
 const viewer = ref<InstanceType<typeof RemoteViewer> | null>(null);
 const account = reactive<AccountState>({ authenticated: false, hosts: [], passkeys: [] });
 const accountLoading = ref(true);
@@ -55,6 +62,12 @@ const controlActive = ref(false);
 const frameVisible = ref(false);
 const canvasStyle = reactive<CSSProperties>({});
 const cursorStyle = reactive<CSSProperties>({});
+const performanceStats = reactive<PerformanceStats>({
+  fps: 0,
+  bitrateMbps: 0,
+  decodeQueueSize: 0,
+  lossEvents: 0,
+});
 const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
 let streamSize: { width: number; height: number } | null = null;
@@ -105,6 +118,7 @@ function leaveRemoteMode() {
   streamSize = null;
   delete canvasStyle.width;
   delete canvasStyle.height;
+  Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, decodeQueueSize: 0, lossEvents: 0 });
   setRemoteActive(false);
 }
 
@@ -162,6 +176,7 @@ async function connect(inviteOverride?: string) {
         });
         setStatus('画面已连接 · 点击画面接管键鼠');
       },
+      onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
       onError: (error: Error) => {
         leaveRemoteMode();
         setStatus(error.message, true);
@@ -369,6 +384,7 @@ onBeforeUnmount(() => {
       :status-error="statusError"
       :canvas-style="canvasStyle"
       :cursor-style="cursorStyle"
+      :performance-stats="performanceStats"
       @capture="captureInput"
       @stop="stopSession"
     />

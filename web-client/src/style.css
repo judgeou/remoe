@@ -173,10 +173,10 @@ body.remote-active .remote-toolbar {
   z-index: 4;
   top: 12px;
   right: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 7px 8px 7px 12px;
+  display: grid;
+  gap: 8px;
+  min-width: 280px;
+  padding: 7px 8px;
   border: 1px solid rgba(255, 255, 255, .14);
   border-radius: 10px;
   background: rgba(8, 12, 17, .82);
@@ -185,9 +185,28 @@ body.remote-active .remote-toolbar {
   backdrop-filter: blur(10px);
   transition: opacity .2s;
 }
+.remote-toolbar-main { display: flex; align-items: center; gap: 12px; }
+.remote-toolbar-main > #remote-status { flex: 1; }
+.performance-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+.performance-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #49dcaf; }
+.performance-toggle span { margin: 0; font-size: 12px; }
+.performance-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 8px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, .28);
+  font-variant-numeric: tabular-nums;
+}
+.performance-stats div { display: flex; justify-content: space-between; gap: 8px; }
+.performance-stats dt { color: #8492a1; }
+.performance-stats dd { margin: 0; color: #eef3f8; }
 .remote-toolbar button { padding: 7px 10px; background: #303a46; color: #eef3f8; }
 .remote-toolbar .error { color: #ff766f; }
 body.control-active .remote-toolbar { opacity: .15; pointer-events: none; }
+body.control-active .remote-toolbar.show-performance { opacity: .85; }
 body.control-active canvas { cursor: none; }
 body.control-active .remote-cursor { display: block; }
 

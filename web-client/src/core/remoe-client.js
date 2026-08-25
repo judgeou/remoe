@@ -84,6 +84,10 @@ export class RemoeBrowserClient {
   #lastDecodedFrame = -1n;
   #inputSequence = 0;
   #inputReady = false;
+  #statsStartedAt = 0;
+  #statsBytes = 0;
+  #statsFrames = 0;
+  #statsLossEvents = 0;
 
   constructor(invite, settings, events = {}) {
     this.#invite = invite;
@@ -257,6 +261,8 @@ export class RemoeBrowserClient {
     this.#decoder = new VideoDecoder({
       output: (frame) => {
         try {
+          this.#statsFrames += 1;
+          this.#maybeReportStats();
           this.#events.onFrame?.(frame, header);
         } finally {
           frame.close();
@@ -265,6 +271,10 @@ export class RemoeBrowserClient {
       error: (error) => this.#fail(new Error(`AV1 解码失败：${error.message}`)),
     });
     this.#decoder.configure(support.config ?? config);
+    this.#statsStartedAt = performance.now();
+    this.#statsBytes = 0;
+    this.#statsFrames = 0;
+    this.#statsLossEvents = 0;
     this.#events.onStream?.({ ...header, codec });
     this.#control.send(encodeStreamReady());
     this.#inputReady = true;
@@ -273,8 +283,14 @@ export class RemoeBrowserClient {
 
   #handleVideo(value) {
     try {
-      const { frame, lossDetected } = this.#assembler.consume(toBytes(value));
-      if (lossDetected) this.#requestKeyFrame();
+      const bytes = toBytes(value);
+      this.#statsBytes += bytes.byteLength;
+      const { frame, lossDetected } = this.#assembler.consume(bytes);
+      if (lossDetected) {
+        this.#statsLossEvents += 1;
+        this.#requestKeyFrame();
+      }
+      this.#maybeReportStats();
       if (!frame || !this.#decoder || frame.frameNumber <= this.#lastDecodedFrame) return;
       this.#lastDecodedFrame = frame.frameNumber;
       this.#decoder.decode(new EncodedVideoChunk({
@@ -285,6 +301,22 @@ export class RemoeBrowserClient {
     } catch (error) {
       this.#fail(error);
     }
+  }
+
+  #maybeReportStats() {
+    if (!this.#statsStartedAt) return;
+    const now = performance.now();
+    const elapsed = now - this.#statsStartedAt;
+    if (elapsed < 1_000) return;
+    this.#events.onStats?.({
+      fps: this.#statsFrames * 1_000 / elapsed,
+      bitrateMbps: this.#statsBytes * 8 / elapsed / 1_000,
+      decodeQueueSize: this.#decoder?.decodeQueueSize ?? 0,
+      lossEvents: this.#statsLossEvents,
+    });
+    this.#statsStartedAt = now;
+    this.#statsBytes = 0;
+    this.#statsFrames = 0;
   }
 
   #requestKeyFrame() {
