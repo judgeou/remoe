@@ -104,7 +104,7 @@ target_compile_definitions(remoe_webrtc_transport PRIVATE
     _WIN32_WINNT=0x0A00)
 target_compile_options(remoe_webrtc_transport PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel bcrypt)
+target_link_libraries(remoe_webrtc_transport PUBLIC LibDataChannel::LibDataChannel bcrypt crypt32)
 
 set(NVENC_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/NVENC_Video_Codec_SDK_13.0.37"
     CACHE PATH "Path to NVIDIA Video Codec SDK")

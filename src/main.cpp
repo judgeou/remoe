@@ -546,9 +546,11 @@ int run(const Options& options) {
         try {
             control_channel = remoe::establish_webrtc_over_websocket(
                 remoe::WebRtcTransport::Role::Answerer, signaling_invite,
-                std::move(control_callbacks));
+                std::move(control_callbacks), (std::chrono::milliseconds::max)(),
+                [] { return !g_running.load(); });
         } catch (const std::exception& error) {
             session_running = false;
+            if (!g_running) break;
             std::cerr << "Client WebRTC setup failed: " << error.what()
                       << "\nHost remains available\n";
             continue;

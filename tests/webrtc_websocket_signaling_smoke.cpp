@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -27,6 +28,29 @@ int main(int argc, char** argv) {
         if (fragment == std::string::npos || invite.size() - fragment - 1 != 21 ||
             invite.find_first_not_of(nano_id_alphabet, fragment + 1) != std::string::npos) {
             throw std::runtime_error("Generated signaling invite does not contain a valid Nano ID");
+        }
+        if (argc > 2 && std::string_view(argv[2]) == "--idle-host") {
+            std::atomic_bool stop{false};
+            auto idle_host = std::async(std::launch::async, [&] {
+                return remoe::establish_webrtc_over_websocket(
+                    remoe::WebRtcTransport::Role::Answerer, invite, {},
+                    (std::chrono::milliseconds::max)(), [&] { return stop.load(); });
+            });
+            std::this_thread::sleep_for(16s);
+            if (idle_host.wait_for(0s) != std::future_status::timeout) {
+                (void)idle_host.get();
+                throw std::runtime_error("Idle host stopped waiting before a client connected");
+            }
+            stop = true;
+            try {
+                (void)idle_host.get();
+                throw std::runtime_error("Idle host did not honor the stop request");
+            } catch (const std::runtime_error& error) {
+                if (std::string_view(error.what()) ==
+                    "Idle host did not honor the stop request") throw;
+            }
+            std::cout << "Idle WebSocket host remained available beyond 15 seconds\n";
+            return 0;
         }
         std::mutex mutex;
         std::condition_variable received;

@@ -77,7 +77,7 @@ struct BootstrapState {
         const bool sent = io.send_all(&header, sizeof(header)) &&
             (value.empty() || io.send_all(value.data(), value.size())) &&
             (metadata.empty() || io.send_all(metadata.data(), metadata.size()));
-        if (!sent) fail("Failed to send WebRTC bootstrap message over TCP");
+        if (!sent) fail("Failed to send WebRTC bootstrap message over signaling transport");
         return sent;
     }
 
@@ -99,7 +99,7 @@ std::string receive_string(const WebRtcTcpBootstrapIo& io, std::uint32_t size,
                            WebRtcTcpBootstrapIo::Deadline deadline) {
     std::string value(size, '\0');
     if (size != 0 && !io.receive_all(value.data(), value.size(), deadline)) {
-        throw std::runtime_error("TCP connection closed during WebRTC bootstrap payload");
+        throw std::runtime_error("Signaling transport closed during WebRTC bootstrap payload");
     }
     return value;
 }
@@ -209,7 +209,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     auto transport = std::make_unique<WebRtcTransport>(
         std::move(configuration), std::move(transport_callbacks));
 
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto deadline = timeout == (std::chrono::milliseconds::max)()
+        ? std::chrono::steady_clock::time_point::max()
+        : std::chrono::steady_clock::now() + timeout;
     bool remote_description_received = false;
     std::vector<WebRtcTransport::IceCandidate> pending_candidates;
 
@@ -225,7 +227,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
 
             protocol::WebRtcSignalHeader header;
             if (!state->io.receive_all(&header, sizeof(header), deadline)) {
-                throw std::runtime_error("TCP connection closed during WebRTC bootstrap");
+                throw std::runtime_error("Signaling transport closed during WebRTC bootstrap");
             }
             validate_signal_header(header);
             std::string value = receive_string(state->io, header.value_size, deadline);

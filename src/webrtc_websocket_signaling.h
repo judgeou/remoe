@@ -3,6 +3,7 @@
 #include "webrtc_transport.h"
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -19,6 +20,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role,
     std::string signaling_invite_url,
     WebRtcTransport::Callbacks callbacks,
-    std::chrono::milliseconds timeout = std::chrono::seconds(15));
+    std::chrono::milliseconds timeout = std::chrono::seconds(15),
+    std::function<bool()> stop_requested = {});
 
 } // namespace remoe

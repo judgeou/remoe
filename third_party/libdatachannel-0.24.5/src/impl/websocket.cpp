@@ -369,13 +369,9 @@ shared_ptr<TlsTransport> WebSocket::initTlsTransport() {
 				});
 		};
 
+		// remoe supplies a PEM bundle exported from the Windows ROOT stores, so the
+		// Mbed TLS verification path is usable on Windows as well.
 		bool verify = mHostname.has_value() && !config.disableTlsVerification;
-
-#ifdef _WIN32
-		if (std::exchange(verify, false)) {
-			PLOG_WARNING << "TLS certificate verification with root CA is not supported on Windows";
-		}
-#endif
 
 		shared_ptr<TlsTransport> transport;
 		if (verify)

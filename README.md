@@ -47,6 +47,8 @@
 原有的 host-only 构建仍然可用。
 
 libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
+WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed TLS，用于验证服务器证书链及
+域名；证书无效时连接会直接失败，不会退化为跳过验证。
 `src/webrtc_transport.*` 提供 host/client 共用的双 DataChannel 传输封装。可靠有序的 control channel
 承载参数协商和键鼠输入；无序、不重传的 video channel 承载 AV1 分片。SDP/ICE 经 WSS 中继，
 STUN 地址由信令 URL 自动派生，TURN 有意禁用。
@@ -125,6 +127,8 @@ host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包
 
 邀请 URL 是临时 bearer secret，不是完整身份认证，请勿公开；同一 host 进程会保持该 Nano ID 不变，
 后续会由 WebAuthn 授权流程签发短期会话。
+
+Host 建立 WSS 后会长期等待 Client，不会因 15 秒内无人连接而重建会话；`Ctrl+C` 仍可取消等待。
 
 WebSocket 信令模式会从信令 URL 自动派生同域名的 `stun:<host>:3478` ICE server，不需要额外参数。
 STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` candidate 时 host/client 会打印确认信息。

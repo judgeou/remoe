@@ -168,6 +168,8 @@ host 会打印包含 21 字符 Nano ID 的邀请 URL。client 使用完整邀请
 client 不需要 host 地址或端口；视频和键鼠均由端到端 WebRTC DataChannel 承载，服务器只看见
 SDP/ICE 信令。应用会从 WSS URL 自动派生同域名的 `stun:signal.example.com:3478`，无需增加 STUN
 命令行参数；成功生成服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
+Host 会保持这一条 WSS 连接等待 Client，不会每 15 秒重连。Windows 程序从系统 `ROOT` 证书库
+向 Mbed TLS 提供 CA bundle，因此 WSS 会验证证书链和域名，无效证书会被拒绝。
 
 ## 更新服务
 

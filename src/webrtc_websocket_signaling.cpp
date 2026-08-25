@@ -4,6 +4,7 @@
 
 #include <Windows.h>
 #include <bcrypt.h>
+#include <wincrypt.h>
 #include <rtc/rtc.hpp>
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
@@ -22,6 +24,45 @@ namespace remoe {
 namespace {
 
 constexpr std::size_t kMaxBufferedSignalingBytes = 2 * 1024 * 1024;
+
+std::string windows_root_ca_bundle() {
+    std::string bundle;
+    constexpr DWORD locations[] = {
+        CERT_SYSTEM_STORE_CURRENT_USER,
+        CERT_SYSTEM_STORE_LOCAL_MACHINE,
+    };
+    for (const DWORD location : locations) {
+        HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_SYSTEM_W, 0, 0,
+                                         location | CERT_STORE_READONLY_FLAG, L"ROOT");
+        if (!store) continue;
+        PCCERT_CONTEXT certificate = nullptr;
+        while ((certificate = CertEnumCertificatesInStore(store, certificate)) != nullptr) {
+            DWORD output_size = 0;
+            if (!CryptBinaryToStringA(certificate->pbCertEncoded,
+                                      certificate->cbCertEncoded,
+                                      CRYPT_STRING_BASE64HEADER,
+                                      nullptr, &output_size) || output_size == 0) {
+                continue;
+            }
+            const std::size_t offset = bundle.size();
+            bundle.resize(offset + output_size);
+            if (!CryptBinaryToStringA(certificate->pbCertEncoded,
+                                      certificate->cbCertEncoded,
+                                      CRYPT_STRING_BASE64HEADER,
+                                      bundle.data() + offset, &output_size)) {
+                bundle.resize(offset);
+                continue;
+            }
+            // CryptBinaryToString includes a trailing NUL; concatenated PEM does not.
+            bundle.resize(offset + output_size - 1);
+        }
+        CertCloseStore(store, 0);
+    }
+    if (bundle.empty()) {
+        throw std::runtime_error("Windows root CA certificate store is empty");
+    }
+    return bundle;
+}
 
 bool valid_session_id(std::string_view value) {
     if (value.size() < 8 || value.size() > 64) return false;
@@ -107,10 +148,16 @@ class WebSocketSignalingStream final
 public:
     ~WebSocketSignalingStream() { close(); }
 
-    void connect(const std::string& url, std::chrono::milliseconds timeout) {
+    void connect(const std::string& url, std::chrono::milliseconds timeout,
+                 std::function<bool()> stop_requested) {
         rtc::WebSocket::Configuration configuration;
         configuration.connectionTimeout = timeout;
         configuration.maxMessageSize = 1024 * 1024 + 1024;
+        if (url.starts_with("wss://")) {
+            static const std::string root_ca_bundle = windows_root_ca_bundle();
+            configuration.caCertificatePemFile = root_ca_bundle;
+        }
+        stop_requested_ = std::move(stop_requested);
         websocket_ = std::make_shared<rtc::WebSocket>(std::move(configuration));
         const std::weak_ptr<WebSocketSignalingStream> weak_self = weak_from_this();
         websocket_->onOpen([weak_self] {
@@ -178,10 +225,13 @@ public:
         try {
             auto* output = static_cast<std::uint8_t*>(data);
             std::unique_lock lock(mutex_);
-            if (!changed_.wait_until(lock, deadline, [&] {
-                    return incoming_.size() >= size || closed_ || !error_.empty();
-                })) {
-                return false;
+            while (incoming_.size() < size && !closed_ && error_.empty()) {
+                if (stop_requested_ && stop_requested_()) return false;
+                const auto poll_deadline = (std::min)(
+                    deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(250));
+                changed_.wait_until(lock, poll_deadline);
+                if (std::chrono::steady_clock::now() >= deadline &&
+                    incoming_.size() < size) return false;
             }
             if (incoming_.size() < size) return false;
             for (std::size_t index = 0; index < size; ++index) {
@@ -240,6 +290,7 @@ private:
     std::shared_ptr<rtc::WebSocket> websocket_;
     std::deque<std::uint8_t> incoming_;
     std::string error_;
+    std::function<bool()> stop_requested_;
     bool open_ = false;
     bool closed_ = false;
 };
@@ -271,12 +322,16 @@ std::string create_webrtc_signaling_invite(std::string signaling_url) {
 
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role, std::string signaling_invite_url,
-    WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout) {
+    WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
+    std::function<bool()> stop_requested) {
     auto stream = std::make_shared<WebSocketSignalingStream>();
     auto [signaling_url, session_id] = split_invite(std::move(signaling_invite_url));
     const std::string stun_url = derive_stun_url(signaling_url);
     const std::string url = make_url(std::move(signaling_url), session_id, role);
-    stream->connect(url, timeout);
+    constexpr auto connection_timeout = std::chrono::seconds(15);
+    stream->connect(url, timeout == (std::chrono::milliseconds::max)()
+                             ? connection_timeout : timeout,
+                    std::move(stop_requested));
 
     WebRtcTcpBootstrapIo io;
     io.send_all = [stream](const void* data, std::size_t size) {
