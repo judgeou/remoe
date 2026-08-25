@@ -3,8 +3,8 @@
 本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的 WSS 信令中继和 STUN-only 服务。示例域名
 统一使用 `signal.example.com`，部署时替换为自己的域名。
 
-信令服务器只转发 SDP/ICE bootstrap 的二进制帧，不承载视频或 WebRTC DataChannel 数据，
-也不提供 STUN/TURN。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
+信令服务器只转发 SDP/ICE bootstrap 的二进制帧，不承载 DataChannel 业务数据。STUN 由同机 coturn
+单独提供，TURN 禁用。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
 
 ## 前置条件
 
@@ -161,14 +161,13 @@ curl --fail https://signal.example.com/healthz
 host 会打印包含 21 字符 Nano ID 的邀请 URL。client 使用完整邀请 URL：
 
 ```powershell
-.\build-local\Release\remoe_client.exe --host <host-address> `
+.\build-local\Release\remoe_client.exe `
   --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT"
 ```
 
-目前视频仍通过 host 的 TCP 47990 端口传输，因此 client 仍需要 `--host`，并且该端口必须能从
-client 到达。WSS 只替代 SDP/ICE 信令通道，键鼠控制通过 WebRTC DataChannel 传输。应用会从
-WSS URL 自动派生同域名的 `stun:signal.example.com:3478`，无需增加 STUN 命令行参数；成功生成
-服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
+client 不需要 host 地址或端口；视频和键鼠均由端到端 WebRTC DataChannel 承载，服务器只看见
+SDP/ICE 信令。应用会从 WSS URL 自动派生同域名的 `stun:signal.example.com:3478`，无需增加 STUN
+命令行参数；成功生成服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
 
 ## 更新服务
 

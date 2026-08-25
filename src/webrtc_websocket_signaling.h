@@ -12,9 +12,9 @@ namespace remoe {
 // Nano ID in its fragment. The base URL must not already have a fragment.
 std::string create_webrtc_signaling_invite(std::string signaling_url);
 
-// Establishes the same host-candidate-only control channel as the TCP
-// bootstrap, but relays the framed SDP/ICE bytes through a WebSocket server.
-// The WebSocket stays alive for the lifetime of the returned transport.
+// Establishes reliable control and low-latency video DataChannels, relaying
+// only the framed SDP/ICE bootstrap through a WebSocket server. A STUN-only URL
+// is derived from the signaling host; TURN is never configured.
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role,
     std::string signaling_invite_url,

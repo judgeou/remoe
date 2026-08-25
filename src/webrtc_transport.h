@@ -51,6 +51,8 @@ public:
     struct Configuration {
         Role role = Role::Answerer;
         std::string data_channel_label = "remoe-control";
+        bool enable_video_channel = false;
+        std::string video_channel_label = "remoe-video";
         // Only explicit stun: URLs are accepted; TURN is intentionally disabled.
         std::vector<std::string> ice_servers;
         std::optional<std::string> bind_address;
@@ -84,9 +86,11 @@ public:
         std::function<void(IceState)> on_ice_state_changed;
         std::function<void(GatheringState)> on_gathering_state_changed;
         std::function<void()> on_open;
+        std::function<void()> on_video_open;
         std::function<void()> on_closed;
         std::function<void(std::string)> on_text;
         std::function<void(std::vector<std::uint8_t>)> on_binary;
+        std::function<void(std::vector<std::uint8_t>)> on_video_binary;
         std::function<void(std::string)> on_error;
     };
 
@@ -109,6 +113,7 @@ public:
     // internally for SCTP backpressure; that is still considered success.
     [[nodiscard]] bool send_text(std::string_view message) noexcept;
     [[nodiscard]] bool send_binary(std::span<const std::uint8_t> message) noexcept;
+    [[nodiscard]] bool send_video_binary(std::span<const std::uint8_t> message) noexcept;
 
     void close() noexcept;
 
@@ -117,6 +122,7 @@ public:
     [[nodiscard]] IceState ice_state() const noexcept;
     [[nodiscard]] GatheringState gathering_state() const noexcept;
     [[nodiscard]] std::size_t buffered_amount() const noexcept;
+    [[nodiscard]] std::size_t video_buffered_amount() const noexcept;
     [[nodiscard]] Statistics statistics() const;
 
 private:

@@ -226,6 +226,10 @@ libwebrtc 的原生 C++ API 存在变动，部分编码器工厂接口明确处�
 - 将键鼠迁移到 DataChannel；
 - 暂时保留当前 TCP 视频，以便分别定位控制和视频问题。
 
+> 实施状态（协议 v7）：工程最终采用 libdatachannel，并已完成 WSS 信令、STUN-only、键鼠 control
+> DataChannel 和 AV1 video DataChannel；运行时已移除 TCP 视频及 host IP/端口参数。以下阶段 2 内容
+> 保留为最初的 RTP/拥塞控制演进计划。
+
 ### 阶段 2：WebRTC 视频
 
 预估：2～4 周。

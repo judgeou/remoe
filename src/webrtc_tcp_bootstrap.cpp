@@ -140,7 +140,7 @@ void validate_signal_header(const protocol::WebRtcSignalHeader& header) {
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Role role, WebRtcTcpBootstrapIo io,
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
-    std::vector<std::string> ice_servers) {
+    std::vector<std::string> ice_servers, bool enable_video_channel) {
     if (!io.send_all || !io.receive_all) {
         throw std::invalid_argument("WebRTC TCP bootstrap requires send and receive functions");
     }
@@ -183,6 +183,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
         state->progress.notify_all();
         invoke_callback(state->application_callbacks.on_open);
     };
+    transport_callbacks.on_video_open = [state] {
+        invoke_callback(state->application_callbacks.on_video_open);
+    };
     transport_callbacks.on_closed = [state] {
         invoke_callback(state->application_callbacks.on_closed);
     };
@@ -192,6 +195,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     transport_callbacks.on_binary = [state](std::vector<std::uint8_t> value) {
         invoke_callback(state->application_callbacks.on_binary, std::move(value));
     };
+    transport_callbacks.on_video_binary = [state](std::vector<std::uint8_t> value) {
+        invoke_callback(state->application_callbacks.on_video_binary, std::move(value));
+    };
     transport_callbacks.on_error = [state](std::string value) {
         state->fail(std::move(value));
     };
@@ -199,6 +205,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Configuration configuration;
     configuration.role = role;
     configuration.ice_servers = std::move(ice_servers);
+    configuration.enable_video_channel = enable_video_channel;
     auto transport = std::make_unique<WebRtcTransport>(
         std::move(configuration), std::move(transport_callbacks));
 

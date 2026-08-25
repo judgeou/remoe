@@ -34,8 +34,11 @@ struct SharedState {
     std::deque<SignalingEvent> signaling_events;
     bool offerer_open = false;
     bool answerer_open = false;
+    bool offerer_video_open = false;
+    bool answerer_video_open = false;
     std::string answerer_text;
     std::vector<std::uint8_t> offerer_binary;
+    std::vector<std::uint8_t> answerer_video_binary;
     std::vector<std::string> errors;
 };
 
@@ -66,6 +69,13 @@ remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer
         }
         state.changed.notify_all();
     };
+    callbacks.on_video_open = [&state, offerer] {
+        {
+            std::lock_guard lock(state.mutex);
+            (offerer ? state.offerer_video_open : state.answerer_video_open) = true;
+        }
+        state.changed.notify_all();
+    };
     callbacks.on_text = [&state, offerer](std::string message) {
         if (offerer) return;
         {
@@ -79,6 +89,14 @@ remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer
         {
             std::lock_guard lock(state.mutex);
             state.offerer_binary = std::move(message);
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_video_binary = [&state, offerer](std::vector<std::uint8_t> message) {
+        if (offerer) return;
+        {
+            std::lock_guard lock(state.mutex);
+            state.answerer_video_binary = std::move(message);
         }
         state.changed.notify_all();
     };
@@ -142,10 +160,12 @@ int main() {
 
         remoe::WebRtcTransport::Configuration answerer_config;
         answerer_config.role = remoe::WebRtcTransport::Role::Answerer;
+        answerer_config.enable_video_channel = true;
         remoe::WebRtcTransport answerer(answerer_config, callbacks_for(state, false));
 
         remoe::WebRtcTransport::Configuration offerer_config;
         offerer_config.role = remoe::WebRtcTransport::Role::Offerer;
+        offerer_config.enable_video_channel = true;
         remoe::WebRtcTransport offerer(offerer_config, callbacks_for(state, true));
 
         answerer.start();
@@ -153,7 +173,8 @@ int main() {
 
         const auto open_deadline = std::chrono::steady_clock::now() + 15s;
         const bool connected = pump_until(state, offerer, answerer, open_deadline, [&] {
-            return state.offerer_open && state.answerer_open;
+            return state.offerer_open && state.answerer_open &&
+                state.offerer_video_open && state.answerer_video_open;
         });
         if (!connected) {
             std::cerr << "Timed out opening the host-candidate DataChannel\n";
@@ -162,7 +183,12 @@ int main() {
 
         constexpr std::string_view text = "remoe-webrtc-smoke";
         const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};
-        if (!offerer.send_text(text) || !answerer.send_binary(binary)) {
+        std::vector<std::uint8_t> video(16 * 1024 + 36);
+        for (std::size_t index = 0; index < video.size(); ++index) {
+            video[index] = static_cast<std::uint8_t>(index & 0xff);
+        }
+        if (!offerer.send_text(text) || !answerer.send_binary(binary) ||
+            !offerer.send_video_binary(video)) {
             std::cerr << "DataChannel rejected an outbound message\n";
             return 1;
         }
@@ -170,7 +196,8 @@ int main() {
         const auto message_deadline = std::chrono::steady_clock::now() + 5s;
         const bool delivered = pump_until(state, offerer, answerer, message_deadline, [&] {
             return state.answerer_text == text && state.offerer_binary ==
-                std::vector<std::uint8_t>(binary.begin(), binary.end());
+                std::vector<std::uint8_t>(binary.begin(), binary.end()) &&
+                state.answerer_video_binary == video;
         });
         if (!delivered) {
             std::cerr << "Timed out delivering DataChannel messages\n";

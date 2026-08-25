@@ -127,8 +127,6 @@ add_executable(remoe_host
     src/desktop_capture.cpp
     src/desktop_capture.h
     src/protocol.h
-    src/tcp_server.cpp
-    src/tcp_server.h
     "${NVENC_SAMPLE_DIR}/NvEncoder/NvEncoder.cpp"
     "${NVENC_SAMPLE_DIR}/NvEncoder/NvEncoderD3D11.cpp")
 
@@ -215,8 +213,7 @@ if(REMOE_BUILD_CLIENT AND EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
         remoe_webrtc_transport
         remoe_vpl_dispatcher
         d3d11
-        dxgi
-        ws2_32)
+        dxgi)
     remoe_link_libdatachannel(remoe_client)
 
     install(TARGETS remoe_client RUNTIME DESTINATION bin)

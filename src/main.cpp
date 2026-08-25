@@ -1,7 +1,5 @@
 #include "desktop_capture.h"
 #include "protocol.h"
-#include "tcp_server.h"
-#include "webrtc_tcp_bootstrap.h"
 #include "webrtc_websocket_signaling.h"
 
 #include "NvEncoder/NvEncoderD3D11.h"
@@ -12,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -19,6 +18,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -41,8 +41,6 @@ BOOL WINAPI console_handler(DWORD event) {
 }
 
 struct Options {
-    std::string bind = "localhost";
-    std::uint16_t port = 47990;
     std::uint32_t output = 0;
     // Zero means the operator did not configure a server-side limit.
     std::uint32_t max_fps = 0;
@@ -169,12 +167,10 @@ void print_help() {
     std::cout <<
         "remoe_host - Windows desktop AV1/NVENC streaming host\n\n"
         "Usage: remoe_host [options]\n"
-        "  --bind <address>   Listen address (default: localhost; signal mode: *)\n"
-        "  --port <1-65535>   TCP port (default: 47990)\n"
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
         "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
-        "  --signal-url <ws(s)://...> Use WebSocket signaling and listen on all addresses\n"
+        "  --signal-url <ws(s)://...> WebSocket signaling URL (required)\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
@@ -191,9 +187,7 @@ Options parse_options(int argc, char** argv) {
         if (arg == "--admin") continue; // Consumed by relaunch_as_admin_if_requested().
         if (i + 1 >= argc) throw std::runtime_error("missing value after " + std::string(arg));
         const std::string_view value(argv[++i]);
-        if (arg == "--bind") options.bind = value;
-        else if (arg == "--port") options.port = static_cast<std::uint16_t>(parse_u32(value, arg, 1, 65535));
-        else if (arg == "--output") options.output = parse_u32(value, arg, 0, 63);
+        if (arg == "--output") options.output = parse_u32(value, arg, 0, 63);
         else if (arg == "--max-fps" || arg == "--fps") {
             options.max_fps = parse_u32(value, arg, 1, 240);
         } else if (arg == "--max-bitrate" || arg == "--bitrate") {
@@ -201,7 +195,9 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--signal-url") options.signaling_url = value;
         else throw std::runtime_error("unknown option: " + std::string(arg));
     }
-    if (!options.signaling_url.empty()) options.bind = "*";
+    if (options.signaling_url.empty()) {
+        throw std::runtime_error("--signal-url is required");
+    }
     return options;
 }
 
@@ -235,17 +231,39 @@ std::span<const std::uint8_t> unwrap_av1_ivf(const std::vector<std::uint8_t>& pa
     return {packet.data() + offset, frame_size};
 }
 
-bool send_packet(remoe::TcpClient& client, const NvEncOutputFrame& packet,
-                 std::uint64_t frame_number, std::uint64_t timestamp_us) {
+enum class VideoSendResult { Sent, Dropped, Failed };
+
+VideoSendResult send_packet(remoe::WebRtcTransport& transport,
+                            const NvEncOutputFrame& packet,
+                            std::uint64_t frame_number, std::uint64_t timestamp_us) {
     const auto av1 = unwrap_av1_ivf(packet.frame);
-    if (av1.size() > (std::numeric_limits<std::uint32_t>::max)()) return false;
-    remoe::protocol::FrameHeader header;
-    header.payload_size = static_cast<std::uint32_t>(av1.size());
+    if (av1.empty() || av1.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        return VideoSendResult::Failed;
+    }
+    constexpr std::size_t max_buffered_video = 4 * 1024 * 1024;
+    if (transport.video_buffered_amount() > max_buffered_video) {
+        return VideoSendResult::Dropped;
+    }
+
+    remoe::protocol::VideoChunkHeader header;
+    header.frame_size = static_cast<std::uint32_t>(av1.size());
     header.frame_number = frame_number;
     header.timestamp_us = timestamp_us;
     if (is_key_picture(packet.pictureType)) header.flags |= remoe::protocol::kFrameKey;
-    return client.send_all(&header, sizeof(header)) &&
-           client.send_all(av1.data(), av1.size());
+    std::vector<std::uint8_t> message(sizeof(header) + remoe::protocol::kVideoChunkPayloadSize);
+    for (std::size_t offset = 0; offset < av1.size();
+         offset += remoe::protocol::kVideoChunkPayloadSize) {
+        const std::size_t chunk_size = (std::min)(
+            remoe::protocol::kVideoChunkPayloadSize, av1.size() - offset);
+        header.chunk_offset = static_cast<std::uint32_t>(offset);
+        std::memcpy(message.data(), &header, sizeof(header));
+        std::memcpy(message.data() + sizeof(header), av1.data() + offset, chunk_size);
+        if (!transport.send_video_binary(
+                std::span<const std::uint8_t>(message.data(), sizeof(header) + chunk_size))) {
+            return VideoSendResult::Failed;
+        }
+    }
+    return VideoSendResult::Sent;
 }
 
 void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) {
@@ -272,16 +290,12 @@ void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) 
     encoder.CreateEncoder(&init);
 }
 
-bool receive_client_settings(remoe::TcpClient& client, const Options& options,
-                             StreamSettings& settings) {
-    remoe::protocol::ClientConfig request;
-    if (!client.receive_all(&request, sizeof(request))) return false;
+bool validate_client_settings(const remoe::protocol::ClientConfig& request,
+                              const Options& options, StreamSettings& settings) {
     if (request.magic != remoe::protocol::kClientConfigMagic ||
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
-        (request.flags & ~remoe::protocol::kClientConfigWebSocketSignaling) != 0 ||
-        ((request.flags & remoe::protocol::kClientConfigWebSocketSignaling) != 0) !=
-            !options.signaling_url.empty() ||
+        request.flags != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -410,14 +424,9 @@ int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
               << remoe::protocol::kVersion << ")\n";
-    remoe::WinsockRuntime winsock;
     remoe::DesktopCapture capture(options.output);
-    std::string signaling_invite;
-    if (!options.signaling_url.empty()) {
-        signaling_invite = remoe::create_webrtc_signaling_invite(options.signaling_url);
-    }
-
-    remoe::TcpServer server(options.bind, options.port);
+    const std::string signaling_invite =
+        remoe::create_webrtc_signaling_invite(options.signaling_url);
     std::cout << "Display " << options.output << ": " << capture.width() << 'x' << capture.height() << '\n'
               << "Client FPS limit: ";
     if (options.max_fps) std::cout << options.max_fps;
@@ -426,33 +435,26 @@ int run(const Options& options) {
     if (options.max_bitrate_mbps) std::cout << options.max_bitrate_mbps << " Mbps";
     else std::cout << "unlimited";
     std::cout << '\n';
-    if (!signaling_invite.empty()) {
-        std::cout << "WebRTC invite URL: " << signaling_invite << '\n';
-    }
-    std::cout << "Listening on " << options.bind << ':' << options.port
-              << " (Ctrl+C to stop)\n" << std::flush;
+    std::cout << "\nWebRTC invite URL: " << signaling_invite
+              << "\nWaiting for client (Ctrl+C to stop)\n" << std::flush;
 
     std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
     while (g_running) {
-        std::string peer;
-        SOCKET accepted = server.accept_client(peer, std::chrono::milliseconds(250));
-        if (accepted == INVALID_SOCKET) continue;
-        remoe::TcpClient client(accepted);
-        std::cout << "Client connected: " << peer << '\n';
-
-        StreamSettings settings;
-        if (!receive_client_settings(client, options, settings)) {
-            std::cout << "Client rejected: invalid or missing protocol v6 stream request\n";
-            continue;
-        }
-
         std::atomic_bool session_running{true};
         std::atomic_bool key_frame_requested{false};
         std::mutex input_mutex;
         std::unordered_set<std::uint32_t> pressed_keys;
         std::unordered_set<remoe::protocol::InputType> pressed_buttons;
         bool injection_warning_shown = false;
+
+        struct SessionHandshake {
+            std::mutex mutex;
+            std::condition_variable changed;
+            std::optional<remoe::protocol::ClientConfig> request;
+            bool video_open = false;
+            bool client_ready = false;
+        } handshake;
 
         remoe::WebRtcTransport::Callbacks control_callbacks;
         control_callbacks.on_local_candidate = [](auto candidate) {
@@ -463,12 +465,51 @@ int run(const Options& options) {
         control_callbacks.on_open = [] {
             std::cout << "WebRTC control DataChannel connected\n";
         };
+        control_callbacks.on_video_open = [&] {
+            {
+                std::lock_guard lock(handshake.mutex);
+                handshake.video_open = true;
+            }
+            handshake.changed.notify_all();
+            std::cout << "WebRTC video DataChannel connected\n";
+        };
         control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
             std::lock_guard lock(input_mutex);
             if (!session_running) return;
+            if (message.size() == sizeof(remoe::protocol::ClientConfig)) {
+                remoe::protocol::ClientConfig request;
+                std::memcpy(&request, message.data(), sizeof(request));
+                if (request.magic == remoe::protocol::kClientConfigMagic) {
+                    {
+                        std::lock_guard handshake_lock(handshake.mutex);
+                        if (handshake.request) {
+                            session_running = false;
+                        } else {
+                            handshake.request = request;
+                        }
+                    }
+                    handshake.changed.notify_all();
+                    return;
+                }
+            }
+            if (message.size() == sizeof(remoe::protocol::StreamReady)) {
+                remoe::protocol::StreamReady ready;
+                std::memcpy(&ready, message.data(), sizeof(ready));
+                if (ready.magic == remoe::protocol::kStreamReadyMagic &&
+                    ready.version == remoe::protocol::kVersion &&
+                    ready.header_size == sizeof(ready)) {
+                    {
+                        std::lock_guard handshake_lock(handshake.mutex);
+                        handshake.client_ready = true;
+                    }
+                    handshake.changed.notify_all();
+                    return;
+                }
+            }
             if (message.size() != sizeof(remoe::protocol::InputEvent)) {
                 std::cerr << "Invalid WebRTC control message size\n";
                 session_running = false;
+                handshake.changed.notify_all();
                 return;
             }
 
@@ -488,39 +529,49 @@ int run(const Options& options) {
                                     injection_warning_shown)) {
                 std::cerr << "Invalid remote input event over WebRTC\n";
                 session_running = false;
+                handshake.changed.notify_all();
             }
         };
         control_callbacks.on_closed = [&] {
             session_running = false;
+            handshake.changed.notify_all();
         };
         control_callbacks.on_error = [&](std::string error) {
             std::cerr << "WebRTC control error: " << error << '\n';
             session_running = false;
+            handshake.changed.notify_all();
         };
 
         std::unique_ptr<remoe::WebRtcTransport> control_channel;
         try {
-            if (options.signaling_url.empty()) {
-                remoe::WebRtcTcpBootstrapIo bootstrap_io;
-                bootstrap_io.send_all = [&](const void* data, std::size_t size) {
-                    return client.send_all(data, size);
-                };
-                bootstrap_io.receive_all = [&](void* data, std::size_t size, auto deadline) {
-                    return client.receive_all(data, size, &session_running, &deadline);
-                };
-                control_channel = remoe::establish_webrtc_over_tcp(
-                    remoe::WebRtcTransport::Role::Answerer, std::move(bootstrap_io),
-                    std::move(control_callbacks));
-            } else {
-                control_channel = remoe::establish_webrtc_over_websocket(
-                    remoe::WebRtcTransport::Role::Answerer, signaling_invite,
-                    std::move(control_callbacks));
-            }
+            control_channel = remoe::establish_webrtc_over_websocket(
+                remoe::WebRtcTransport::Role::Answerer, signaling_invite,
+                std::move(control_callbacks));
         } catch (const std::exception& error) {
             session_running = false;
-            client.close();
             std::cerr << "Client WebRTC setup failed: " << error.what()
-                      << "\nClient disconnected; host remains available\n";
+                      << "\nHost remains available\n";
+            continue;
+        }
+
+        remoe::protocol::ClientConfig request;
+        {
+            std::unique_lock lock(handshake.mutex);
+            while (g_running && session_running &&
+                   !(handshake.request.has_value() && handshake.video_open)) {
+                handshake.changed.wait_for(lock, std::chrono::milliseconds(250));
+            }
+            if (!g_running || !session_running) {
+                control_channel->close();
+                continue;
+            }
+            request = *handshake.request;
+        }
+
+        StreamSettings settings;
+        if (!validate_client_settings(request, options, settings)) {
+            std::cerr << "Client rejected: invalid protocol v7 stream request\n";
+            control_channel->close();
             continue;
         }
 
@@ -540,14 +591,27 @@ int run(const Options& options) {
         stream_header.height = encoded_height;
         stream_header.fps_num = settings.fps;
         stream_header.bitrate_bps = settings.bitrate_bps;
-        if (!client.send_all(&stream_header, sizeof(stream_header))) {
+        if (!control_channel->send_binary(std::span<const std::uint8_t>(
+                reinterpret_cast<const std::uint8_t*>(&stream_header), sizeof(stream_header)))) {
             encoder.DestroyEncoder();
+            continue;
+        }
+
+        {
+            std::unique_lock lock(handshake.mutex);
+            while (g_running && session_running && !handshake.client_ready) {
+                handshake.changed.wait_for(lock, std::chrono::milliseconds(250));
+            }
+        }
+        if (!g_running || !session_running) {
+            encoder.DestroyEncoder();
+            control_channel->close();
             continue;
         }
 
         bool first_input = true;
         auto next_frame = Clock::now();
-        while (g_running && session_running && client.connected()) {
+        while (g_running && session_running && control_channel->is_open()) {
             next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
             const NvEncInputFrame* input = encoder.GetNextInputFrame();
             auto* texture = static_cast<ID3D11Texture2D*>(input->inputPtr);
@@ -562,14 +626,18 @@ int run(const Options& options) {
             std::vector<NvEncOutputFrame> packets;
             encoder.EncodeFrame(packets, &picture);
             const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count();
-            bool sent = true;
+            bool failed = false;
             for (const auto& packet : packets) {
-                if (!send_packet(client, packet, frame_number++, static_cast<std::uint64_t>(timestamp))) {
-                    sent = false;
+                const auto result = send_packet(*control_channel, packet, frame_number++,
+                                                static_cast<std::uint64_t>(timestamp));
+                if (result == VideoSendResult::Dropped) {
+                    key_frame_requested = true;
+                } else if (result == VideoSendResult::Failed) {
+                    failed = true;
                     break;
                 }
             }
-            if (!sent) {
+            if (failed) {
                 session_running = false;
                 break;
             }
@@ -581,7 +649,6 @@ int run(const Options& options) {
             std::lock_guard lock(input_mutex);
             release_remote_inputs(pressed_keys, pressed_buttons);
         }
-        client.close();
         std::vector<NvEncOutputFrame> pending;
         encoder.EndEncode(pending);
         encoder.DestroyEncoder();

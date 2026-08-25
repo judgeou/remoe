@@ -286,7 +286,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
         return stream->receive_all(data, size, deadline);
     };
     return establish_webrtc_over_tcp(
-        role, std::move(io), std::move(callbacks), timeout, {stun_url});
+        role, std::move(io), std::move(callbacks), timeout, {stun_url}, true);
 }
 
 } // namespace remoe

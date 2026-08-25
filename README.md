@@ -1,13 +1,13 @@
 # remoe
 
 `remoe_host` 是 Windows 桌面视频流 host 原型：使用 Desktop Duplication API 抓取指定显示器，
-通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 TCP 向一个 client 发送码流。键鼠控制与关键帧请求
-通过 WebRTC DataChannel 发送。
+通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 WebRTC 向一个 client 发送码流。视频、键鼠控制和
+关键帧请求均使用 DataChannel，不需要知道或开放 host IP/端口。
 
 `remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
 回读到 CPU，呈现使用垂直同步和单帧队列，以降低 Intel GPU、CPU 与显示链路的额外功耗。
 
-当前版本提供画面传输和窗口内的键鼠远程控制。音频、剪贴板、文件传输、加密与身份验证尚未实现。
+当前版本提供加密的画面传输和窗口内键鼠远程控制。音频、剪贴板、文件传输与身份验证尚未实现。
 
 ## 环境要求
 
@@ -47,10 +47,9 @@
 原有的 host-only 构建仍然可用。
 
 libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
-`src/webrtc_transport.*` 提供 host/client 共用的 DataChannel 传输封装。当前配置有意不设置
-ICE server，只收集 host candidates；应用层通过回调自行转交 SDP 和 ICE candidate，后续可在
-不修改传输层的情况下接入正式信令。
-当前使用已有 TCP 连接在视频开始前交换 SDP/ICE，不需要独立信令服务器；视频仍使用 TCP。
+`src/webrtc_transport.*` 提供 host/client 共用的双 DataChannel 传输封装。可靠有序的 control channel
+承载参数协商和键鼠输入；无序、不重传的 video channel 承载 AV1 分片。SDP/ICE 经 WSS 中继，
+STUN 地址由信令 URL 自动派生，TURN 有意禁用。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
 
@@ -75,30 +74,18 @@ cmake --build build --config Release
 普通高完整性窗口的交互限制，但 Windows UAC 安全桌面仍属于隔离桌面，当前版本不能采集或远程操作
 安全桌面本身。
 
-仅本机监听（默认且更安全，同时监听 `127.0.0.1` 和 `::1`）：
+启动 host（信令 URL 必填）：
 
 ```powershell
-.\build\Release\remoe_host.exe
-```
-
-以管理员权限启动：
-
-```powershell
-.\build\Release\remoe_host.exe --admin
-```
-
-允许局域网 client 连接：
-
-```powershell
-.\build-local\Release\remoe_host.exe --bind "*" --port 47990
+.\build-local\Release\remoe_host.exe `
+  --signal-url "wss://signal.example.com/signal"
 ```
 
 参数：
 
 | 参数 | 默认值 | 含义 |
 |---|---:|---|
-| `--bind` | `localhost` | TCP 监听地址；默认同时监听 IPv4/IPv6 loopback。`*`、`0.0.0.0` 或 `::` 表示同时监听 IPv4/IPv6 任意地址；具体 IP 只监听该地址族。指定 `--signal-url` 时自动使用 `*` |
-| `--port` | `47990` | TCP 端口 |
+| `--signal-url` | 必填 | WSS 信令服务基础 URL；host 会生成并打印邀请 URL |
 | `--output` | `0` | 显示器索引（跨所有 DXGI adapter 顺序编号） |
 | `--max-fps` | 不限制 | 可选的 client 最大帧率 |
 | `--max-bitrate` | 不限制 | 可选的 client 最大 CBR 码率，单位 Mbps |
@@ -107,14 +94,15 @@ cmake --build build --config Release
 兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
 每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
 
-Windows Defender Firewall 首次运行可能提示放行。只应在可信网络中放行“专用网络”，不要直接暴露到公网。
+WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首次运行可能提示放行。
 
 ## Client 运行
 
-连接远端 host：
+使用 host 打印的完整邀请 URL 连接，不需要 `--host` 或 `--port`：
 
 ```powershell
-.\build-local\Release\remoe_client.exe --host 10.14.178.25 --port 47990 `
+.\build-local\Release\remoe_client.exe `
+  --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT" `
   --fps 60 --bitrate 20 --scale 75
 ```
 
@@ -122,8 +110,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 
-默认使用视频 TCP 连接完成 WebRTC bootstrap。若要使用独立 WebSocket 信令，host 只需传入信令服务
-基础 URL；启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包含该 ID 的邀请 URL：
+host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包含该 ID 的邀请 URL：
 
 ```powershell
 # host
@@ -132,7 +119,7 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 
 # host 会打印类似：wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT
 # 将完整邀请 URL 复制到 client
-.\build-local\Release\remoe_client.exe --host 10.14.178.25 `
+.\build-local\Release\remoe_client.exe `
   --signal-url "wss://signal.example.com/signal#V1StGXR8_Z5jdHi6B-myT"
 ```
 
@@ -142,12 +129,12 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 WebSocket 信令模式会从信令 URL 自动派生同域名的 `stun:<host>:3478` ICE server，不需要额外参数。
 STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` candidate 时 host/client 会打印确认信息。
 
-窗口标题每秒更新一次实际 AV1 payload 码率和应用层 TCP 接收速度。前者以 Mbps 显示，后者以 MB/s
-显示，不包含 TCP/IP 和链路层包头。
+窗口标题每秒更新一次实际 AV1 payload 码率和应用层 WebRTC 接收速度。前者以 Mbps 显示，后者以
+MB/s 显示，不包含 UDP/IP 和链路层包头。
 
 网络接收和 oneVPL 解码在独立线程运行，中间使用约两秒、8–64 MB 的有界队列吸收短暂的 GPU
 解码或 VSync 停顿。若客户端持续跟不上，接收线程会清除旧 GOP，并请求 host 立即生成关键帧，
-随后重建解码器恢复到最新画面，避免解码反压直接造成 TCP 半帧断线。正常播放使用无限 GOP，
+随后重建解码器恢复到最新画面。正常播放使用无限 GOP，
 不会因固定间隔关键帧在低码率下产生周期性的画质波动。
 
 `--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000；
@@ -155,33 +142,32 @@ STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` cand
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## 混合传输协议 v6
+## WebRTC 传输协议 v7
 
-所有整数都是 **little-endian**，结构紧密排列（无 padding）。连接建立后，client 先发送一次
-`ClientConfig`。双方随后通过该 TCP 连接交换 `WebRtcSignalHeader` 及 SDP/ICE payload，直到
-DataChannel 打开。host 再发送 `StreamHeader`，随后在 host→client 方向重复发送
-`FrameHeader + AV1 payload`。定长 `InputEvent` 只通过 WebRTC DataChannel 发送，不再写入 TCP。
-每个视频 payload 是 NVENC 返回的一次编码输出，不是 IVF 容器；client 应将其按顺序提交给 AV1 decoder。
+所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
+PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
+依次承载 `ClientConfig`、`StreamHeader`、`StreamReady` 和 `InputEvent`。无序、不重传的
+`remoe-video` DataChannel 承载 `VideoChunkHeader + AV1 chunk`。
 
 ### ClientConfig（28 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `6` |
+| 4 | u16 | version | `7` |
 | 6 | u16 | header_size | `28` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | client 请求的 CBR 码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | reserved | 0 |
+| 24 | u32 | flags | 当前必须为 0 |
 
 ### StreamHeader（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `6` |
+| 4 | u16 | version | `7` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | codec | `AV01` |
 | 12 | u32 | width | 编码宽度 |
@@ -191,24 +177,38 @@ DataChannel 打开。host 再发送 `StreamHeader`，随后在 host→client 方
 | 28 | u32 | bitrate_bps | 目标码率 |
 | 32 | u32 | reserved | 0 |
 
-### FrameHeader（32 bytes）
+### StreamReady（8 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
-| 0 | u32 | magic | `FRAM` |
-| 4 | u16 | version | `6` |
-| 6 | u16 | header_size | `32` |
-| 8 | u32 | payload_size | 后续 AV1 数据长度 |
-| 12 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
-| 16 | u64 | frame_number | 递增编号 |
-| 24 | u64 | timestamp_us | host 启动后的单调时钟微秒数 |
+| 0 | u32 | magic | `SRDY` |
+| 4 | u16 | version | `7` |
+| 6 | u16 | header_size | `8` |
+
+client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
+
+### VideoChunkHeader（36 bytes）
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `VCHK` |
+| 4 | u16 | version | `7` |
+| 6 | u16 | header_size | `36` |
+| 8 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
+| 12 | u64 | frame_number | 递增帧编号 |
+| 20 | u64 | timestamp_us | host 启动后的单调时钟微秒数 |
+| 28 | u32 | frame_size | 完整 AV1 帧长度 |
+| 32 | u32 | chunk_offset | 此分片在帧内的字节偏移 |
+
+每条 video DataChannel 消息最多携带 16 KiB AV1 数据。client 按帧号和偏移重组，丢弃长期不完整的帧
+并请求新关键帧。AV1 数据是 NVENC 的一次编码输出，不是 IVF 容器。
 
 ### InputEvent（24 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `6` |
+| 4 | u16 | version | `7` |
 | 6 | u16 | header_size | `24` |
 | 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
@@ -224,7 +224,7 @@ type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `WRMS` |
-| 4 | u16 | version | `6` |
+| 4 | u16 | version | `7` |
 | 6 | u16 | header_size | `20` |
 | 8 | u16 | type | 1=SDP；2=ICE candidate；3=DataChannel ready；4=完成确认 |
 | 10 | u16 | reserved | 0 |
@@ -232,7 +232,7 @@ type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必�
 | 16 | u32 | metadata_size | value 后的 metadata 长度 |
 
 type 1 的 value/metadata 分别是 SDP 和 `offer`/`answer`；type 2 分别是 candidate 和 `mid`；
-type 3/4 不带 payload。双方完成确认后不会再在 TCP 中发送信令帧。
+type 3/4 不带 payload。双方完成确认后，WSS 不再参与业务数据传输。
 
 鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频边缘时坐标
 会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。
@@ -242,27 +242,25 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 ## 当前限制与安全边界
 
-- TCP 视频与临时信令目前没有 TLS 或认证；DataChannel 自身使用 DTLS/SCTP 加密。默认仅监听
-  `127.0.0.1` 和 `::1`；若绑定局域网地址，任何可访问该端口的设备仍可能看到桌面并参与协商。
-  只应在可信隔离网络中使用，正式使用前应加入 TLS 和配对认证。
-- 当前没有配置 STUN/TURN，只适用于双方 host candidates 可以直接互通的本机、局域网或已有路由环境。
+- 信令使用 WSS，DataChannel 使用 DTLS/SCTP 加密，但邀请 URL 目前仍是 bearer secret，不等同于
+  设备身份认证；正式使用前仍需接入计划中的 WebAuthn/passkey 授权。
+- 自动配置 STUN，但有意禁用 TURN；对称 NAT、UDP 被封锁等无法直连的网络仍可能连接失败。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
 - `SendInput` 受 Windows UIPI 限制。控制高完整性应用时 host 通常也需要 `--admin`；即使提升权限，
   `Ctrl+Alt+Del` 和 UAC 安全桌面仍不能通过普通 `SendInput` 控制。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
-- 视频仍使用原始 TCP，拥塞时可能增加画面延迟；控制输入已迁移到 WebRTC DataChannel。
+- video DataChannel 使用无序、不重传策略，拥塞或丢包时会跳过旧帧并请求关键帧；当前没有自适应码率。
 
 ## 源码结构
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
 - `src/main.cpp`：NVENC AV1 配置、采集/编码循环、键鼠注入与重连逻辑
-- `src/tcp_server.*`：WinSock TCP server
 - `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
-- `src/webrtc_tcp_bootstrap.*`：通过现有 TCP 交换 SDP/ICE 的一次性协商层
+- `src/webrtc_tcp_bootstrap.*`：信令帧编解码与协商状态机（同时供 WSS adapter 和测试复用）
 - `src/webrtc_websocket_signaling.*`：libdatachannel WebSocket/WSS 信令适配层
 - `src/protocol.h`：host/client 共用的 wire protocol 定义
-- `src/client_main.cpp`：client 网络接收、协议校验与播放线程
+- `src/client_main.cpp`：client WebRTC 分片重组、协议校验与播放线程
 - `src/vpl_decoder.*`：Intel oneVPL AV1 D3D11 硬件解码
 - `src/video_window.*`：D3D11 Video Processor、flip-model 窗口呈现与客户端输入采集
 

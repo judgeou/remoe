@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace remoe::protocol {
@@ -9,9 +10,11 @@ constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
-constexpr std::uint16_t kVersion = 6;
+constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
+constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
+constexpr std::uint16_t kVersion = 7;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
-constexpr std::uint32_t kClientConfigWebSocketSignaling = 1u << 0;
+constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
 
 enum FrameFlags : std::uint32_t {
     kFrameKey = 1u << 0,
@@ -68,6 +71,12 @@ struct StreamHeader {
     std::uint32_t reserved = 0;
 };
 
+struct StreamReady {
+    std::uint32_t magic = kStreamReadyMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(StreamReady);
+};
+
 struct FrameHeader {
     std::uint32_t magic = kFrameMagic;
     std::uint16_t version = kVersion;
@@ -76,6 +85,19 @@ struct FrameHeader {
     std::uint32_t flags = 0;
     std::uint64_t frame_number = 0;
     std::uint64_t timestamp_us = 0;
+};
+
+// One unordered, non-retransmitted video DataChannel message. A frame is split
+// into fixed-size chunks so it stays below the negotiated SCTP message limit.
+struct VideoChunkHeader {
+    std::uint32_t magic = kVideoChunkMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(VideoChunkHeader);
+    std::uint32_t flags = 0;
+    std::uint64_t frame_number = 0;
+    std::uint64_t timestamp_us = 0;
+    std::uint32_t frame_size = 0;
+    std::uint32_t chunk_offset = 0;
 };
 
 // Client-to-host input message. MouseMove values are normalized to 0..65535.
@@ -106,7 +128,9 @@ struct WebRtcSignalHeader {
 
 static_assert(sizeof(ClientConfig) == 28);
 static_assert(sizeof(StreamHeader) == 36);
+static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(FrameHeader) == 32);
+static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(InputEvent) == 24);
 static_assert(sizeof(WebRtcSignalHeader) == 20);
 
