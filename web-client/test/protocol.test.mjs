@@ -11,7 +11,7 @@ import {
   encodeSignal,
 } from '../src/core/protocol.js';
 import { parseInvite } from '../src/core/remoe-client.js';
-import { windowsScanCode } from '../src/core/input.js';
+import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
 test('encodes protocol v7 client settings as little-endian packed bytes', () => {
@@ -99,6 +99,71 @@ test('encodes keyboard input and maps extended Windows scan codes', () => {
   assert.equal(view.getUint16(10, true), 3);
   assert.equal(view.getInt32(12, true), 0x4b);
   assert.equal(view.getUint32(20, true), 17);
+});
+
+test('maps touch gestures and virtual text to the existing input protocol', () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const fakeDocument = new EventTarget();
+  fakeDocument.pointerLockElement = null;
+  fakeDocument.hidden = false;
+  fakeDocument.exitPointerLock = () => {};
+  const fakeWindow = new EventTarget();
+  const canvas = new EventTarget();
+  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 50 });
+  canvas.setPointerCapture = () => {};
+  canvas.requestPointerLock = async () => {};
+  globalThis.document = fakeDocument;
+  globalThis.window = fakeWindow;
+
+  const inputs = [];
+  const controller = new RemoteInputController(canvas, (event) => {
+    inputs.push(event);
+    return true;
+  });
+  const pointer = (type, id, x, y) => {
+    const event = new Event(type, { cancelable: true });
+    Object.defineProperties(event, {
+      pointerId: { value: id }, pointerType: { value: 'touch' },
+      clientX: { value: x }, clientY: { value: y },
+    });
+    canvas.dispatchEvent(event);
+  };
+
+  try {
+    controller.setTouchMode('trackpad');
+    pointer('pointerdown', 1, 10, 10);
+    pointer('pointermove', 1, 35, 10);
+    pointer('pointerup', 1, 35, 10);
+    assert.ok(inputs.some((event) => event.type === 1 && event.value1 > 32768));
+
+    inputs.length = 0;
+    pointer('pointerdown', 2, 20, 20);
+    pointer('pointerup', 2, 20, 20);
+    assert.deepEqual(inputs.slice(-2).map(({ type, flags = 0 }) => ({ type, flags })), [
+      { type: 2, flags: 0 }, { type: 2, flags: 1 },
+    ]);
+
+    inputs.length = 0;
+    assert.deepEqual(controller.sendText('A?中'), ['中']);
+    assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x2a));
+    assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x1e));
+    assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x35));
+
+    inputs.length = 0;
+    controller.setTouchMode('direct');
+    pointer('pointerdown', 3, 50, 25);
+    pointer('pointermove', 3, 75, 25);
+    pointer('pointerup', 3, 75, 25);
+    assert.deepEqual(inputs[0], { type: 1, value1: 32768, value2: 32768 });
+    assert.deepEqual(inputs[1], { type: 2, flags: 0 });
+    assert.ok(inputs.some((event) => event.type === 1 && event.value1 === 49151));
+    assert.deepEqual(inputs.at(-1), { type: 2, flags: 1 });
+  } finally {
+    controller.dispose();
+    globalThis.document = originalDocument;
+    globalThis.window = originalWindow;
+  }
 });
 
 test('fits the whole remote frame inside differently shaped browser viewports', () => {

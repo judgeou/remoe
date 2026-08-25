@@ -42,6 +42,10 @@ interface PerformanceStats {
   lossEvents: number;
 }
 
+type LockableScreenOrientation = ScreenOrientation & {
+  lock?: (orientation: 'landscape') => Promise<void>;
+};
+
 const viewer = ref<InstanceType<typeof RemoteViewer> | null>(null);
 const account = reactive<AccountState>({ authenticated: false, hosts: [], passkeys: [] });
 const accountLoading = ref(true);
@@ -68,8 +72,15 @@ const performanceStats = reactive<PerformanceStats>({
   decodeQueueSize: 0,
   lossEvents: 0,
 });
+const touchPreferred = ref(false);
+const touchMode = ref<'trackpad' | 'direct'>('trackpad');
+const activeModifiers = ref<string[]>([]);
+const fullscreenActive = ref(false);
+const orientationLocked = ref(false);
+const wakeLockEnabled = ref(false);
 const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
+let wakeLockSentinel: WakeLockSentinel | null = null;
 let streamSize: { width: number; height: number } | null = null;
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
@@ -99,11 +110,13 @@ function positionRemoteCursor(position: CursorPosition = cursorPosition) {
 
 function fitRemoteVideo() {
   if (!streamSize || !remoteActive.value) return;
+  const viewportWidth = window.visualViewport?.width ?? document.documentElement.clientWidth;
+  const viewportHeight = window.visualViewport?.height ?? document.documentElement.clientHeight;
   const fitted = fitVideoSize(
     streamSize.width,
     streamSize.height,
-    document.documentElement.clientWidth,
-    document.documentElement.clientHeight,
+    viewportWidth,
+    viewportHeight,
   );
   canvasStyle.width = `${fitted.width}px`;
   canvasStyle.height = `${fitted.height}px`;
@@ -114,12 +127,140 @@ function leaveRemoteMode() {
   inputController?.dispose();
   inputController = null;
   controlActive.value = false;
+  activeModifiers.value = [];
   frameVisible.value = false;
   streamSize = null;
   delete canvasStyle.width;
   delete canvasStyle.height;
   Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, decodeQueueSize: 0, lossEvents: 0 });
+  document.body.classList.remove('touch-control-active');
+  releaseMobileDisplayFeatures();
   setRemoteActive(false);
+}
+
+function setInputActive(active: boolean) {
+  controlActive.value = active;
+  document.body.classList.toggle('control-active', active);
+  const touchActive = active && inputController?.touchMode !== null;
+  document.body.classList.toggle('touch-control-active', touchActive);
+  setStatus(active
+    ? (touchActive ? '正在触控远程桌面' : '正在控制远程桌面 · 按 Esc 释放键鼠')
+    : (touchPreferred.value
+      ? '画面已连接 · 点击画面开始触控'
+      : '画面已连接 · 点击画面接管键鼠'));
+}
+
+function selectTouchMode(mode: 'trackpad' | 'direct') {
+  touchMode.value = mode;
+  inputController?.setTouchMode(mode);
+  if (inputController) setInputActive(true);
+}
+
+function sendVirtualKey(code: string) {
+  inputController?.tapKey(code);
+}
+
+function toggleVirtualModifier(code: string) {
+  const active = activeModifiers.value.includes(code);
+  inputController?.setModifier(code, !active);
+  activeModifiers.value = active
+    ? activeModifiers.value.filter((value) => value !== code)
+    : [...activeModifiers.value, code];
+}
+
+function sendVirtualMouse(button: 'left' | 'right') {
+  inputController?.tapMouseButton(button);
+}
+
+function sendTextInput(text: string) {
+  const unsupported = inputController?.sendText(text) ?? [];
+  if (unsupported.length > 0) {
+    setStatus('移动软键盘目前仅支持英文、数字和常用符号', true);
+  }
+}
+
+async function enterFullscreen() {
+  if (document.fullscreenElement) return;
+  await viewer.value?.getElement().requestFullscreen({ navigationUI: 'hide' });
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await enterFullscreen();
+  } catch (error) {
+    setStatus(`无法切换全屏：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+function unlockOrientation() {
+  const orientation = screen.orientation as LockableScreenOrientation;
+  orientation.unlock();
+  orientationLocked.value = false;
+}
+
+async function toggleOrientation() {
+  try {
+    if (orientationLocked.value) {
+      unlockOrientation();
+      return;
+    }
+    const orientation = screen.orientation as LockableScreenOrientation;
+    if (!orientation.lock) throw new Error('当前浏览器不支持锁定屏幕方向');
+    await enterFullscreen();
+    await orientation.lock('landscape');
+    orientationLocked.value = true;
+  } catch (error) {
+    setStatus(`无法锁定横屏：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+async function requestWakeLock() {
+  const wakeLock = navigator.wakeLock;
+  if (!wakeLock) throw new Error('当前浏览器不支持屏幕常亮');
+  wakeLockSentinel = await wakeLock.request('screen');
+  wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; }, { once: true });
+}
+
+async function toggleWakeLock() {
+  try {
+    wakeLockEnabled.value = !wakeLockEnabled.value;
+    if (wakeLockEnabled.value) await requestWakeLock();
+    else {
+      await wakeLockSentinel?.release();
+      wakeLockSentinel = null;
+    }
+  } catch (error) {
+    wakeLockEnabled.value = false;
+    setStatus(`无法保持屏幕常亮：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+function releaseMobileDisplayFeatures() {
+  wakeLockEnabled.value = false;
+  void wakeLockSentinel?.release();
+  wakeLockSentinel = null;
+  unlockOrientation();
+  if (document.fullscreenElement === viewer.value?.getElement()) void document.exitFullscreen();
+}
+
+function handleFullscreenChange() {
+  fullscreenActive.value = document.fullscreenElement === viewer.value?.getElement();
+  if (!fullscreenActive.value && orientationLocked.value) unlockOrientation();
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) activeModifiers.value = [];
+  if (!document.hidden && wakeLockEnabled.value && !wakeLockSentinel) {
+    void requestWakeLock().catch((error) => {
+      wakeLockEnabled.value = false;
+      setStatus(`无法恢复屏幕常亮：${error instanceof Error ? error.message : String(error)}`, true);
+    });
+  }
+}
+
+function handleWindowBlur() {
+  activeModifiers.value = [];
 }
 
 function stopSession() {
@@ -165,16 +306,14 @@ async function connect(inviteOverride?: string) {
             (input: { type: number; flags?: number; value1?: number; value2?: number }) =>
               client.value?.sendInput(input) ?? false,
             (active: boolean) => {
-              controlActive.value = active;
-              document.body.classList.toggle('control-active', active);
-              setStatus(active
-                ? '正在控制远程桌面 · 按 Esc 释放键鼠'
-                : '画面已连接 · 点击画面接管键鼠');
+              setInputActive(active);
             },
             (position: CursorPosition) => positionRemoteCursor(position),
           );
         });
-        setStatus('画面已连接 · 点击画面接管键鼠');
+        setStatus(touchPreferred.value
+          ? '画面已连接 · 点击画面开始触控'
+          : '画面已连接 · 点击画面接管键鼠');
       },
       onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
       onError: (error: Error) => {
@@ -294,7 +433,8 @@ async function copyRecoveryCode() {
 
 async function captureInput() {
   try {
-    await inputController?.capture();
+    if (touchPreferred.value) selectTouchMode(touchMode.value);
+    else await inputController?.capture();
   } catch (error) {
     setStatus(`无法锁定鼠标：${error instanceof Error ? error.message : String(error)}`, true);
   }
@@ -308,6 +448,10 @@ onMounted(() => {
   }
   window.addEventListener('resize', fitRemoteVideo);
   window.visualViewport?.addEventListener('resize', fitRemoteVideo);
+  document.addEventListener('fullscreenchange', handleFullscreenChange);
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  window.addEventListener('blur', handleWindowBlur);
+  touchPreferred.value = navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches;
   void refreshAccount();
   accountRefreshTimer = window.setInterval(() => {
     if (account.authenticated && !accountBusy.value && !running.value) void refreshAccount();
@@ -317,6 +461,9 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', fitRemoteVideo);
   window.visualViewport?.removeEventListener('resize', fitRemoteVideo);
+  document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+  window.removeEventListener('blur', handleWindowBlur);
   if (accountRefreshTimer !== null) window.clearInterval(accountRefreshTimer);
   stopSession();
 });
@@ -385,8 +532,22 @@ onBeforeUnmount(() => {
       :canvas-style="canvasStyle"
       :cursor-style="cursorStyle"
       :performance-stats="performanceStats"
+      :touch-preferred="touchPreferred"
+      :touch-mode="touchMode"
+      :active-modifiers="activeModifiers"
+      :fullscreen-active="fullscreenActive"
+      :orientation-locked="orientationLocked"
+      :wake-lock-enabled="wakeLockEnabled"
       @capture="captureInput"
       @stop="stopSession"
+      @touch-mode="selectTouchMode"
+      @virtual-key="sendVirtualKey"
+      @virtual-modifier="toggleVirtualModifier"
+      @virtual-mouse="sendVirtualMouse"
+      @text-input="sendTextInput"
+      @fullscreen="toggleFullscreen"
+      @orientation="toggleOrientation"
+      @wake-lock="toggleWakeLock"
     />
     <div v-if="status || details" class="telemetry">
       <strong id="status" :class="{ error: statusError }">{{ status }}</strong>

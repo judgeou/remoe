@@ -6,12 +6,24 @@
   <title>remoe layout fixture</title>
   <link rel="stylesheet" href="../src/style.css">
 </head>
-<body class="remote-active control-active">
+<body class="remote-active control-active touch-control-active">
   <main>
     <section class="viewer">
       <canvas id="video" width="2560" height="1440"></canvas>
       <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
-      <div class="remote-toolbar"><span>fixture</span><button>断开</button></div>
+      <div class="remote-toolbar">
+        <div class="remote-toolbar-main">
+          <span id="remote-status">正在触控远程桌面</span>
+          <label class="performance-toggle"><input type="checkbox"><span>性能</span></label>
+          <button>断开</button>
+        </div>
+        <div class="mobile-controls">
+          <div class="mobile-quick-actions">
+            <div class="touch-mode-switch"><button class="active">触控板</button><button>直触</button></div>
+            <button>键盘</button><button>更多</button><button>隐藏</button><button class="mobile-stop">断开</button>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
   <script type="module">

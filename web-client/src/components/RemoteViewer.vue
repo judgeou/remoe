@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, type CSSProperties } from 'vue';
+import { nextTick, ref, type CSSProperties } from 'vue';
 
 interface PerformanceStats {
   fps: number;
@@ -16,47 +16,218 @@ defineProps<{
   canvasStyle: CSSProperties;
   cursorStyle: CSSProperties;
   performanceStats: PerformanceStats;
+  touchPreferred: boolean;
+  touchMode: 'trackpad' | 'direct';
+  activeModifiers: string[];
+  fullscreenActive: boolean;
+  orientationLocked: boolean;
+  wakeLockEnabled: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   capture: [];
   stop: [];
+  touchMode: [mode: 'trackpad' | 'direct'];
+  virtualKey: [code: string];
+  virtualModifier: [code: string];
+  virtualMouse: [button: 'left' | 'right'];
+  textInput: [text: string];
+  fullscreen: [];
+  orientation: [];
+  wakeLock: [];
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
+const viewerElement = ref<HTMLElement | null>(null);
+const mobileInput = ref<HTMLInputElement | null>(null);
 const showPerformance = ref(false);
+const showMobileKeyboard = ref(false);
+const showMobilePanel = ref(false);
+const mobileToolbarHidden = ref(false);
+
+const modifierKeys = [
+  { code: 'ControlLeft', label: 'Ctrl' },
+  { code: 'AltLeft', label: 'Alt' },
+  { code: 'ShiftLeft', label: 'Shift' },
+  { code: 'MetaLeft', label: 'Win' },
+];
+
+const functionKeys = [
+  { code: 'Escape', label: 'Esc' },
+  { code: 'Tab', label: 'Tab' },
+  { code: 'Backspace', label: '⌫' },
+  { code: 'Enter', label: 'Enter' },
+  { code: 'ArrowLeft', label: '←' },
+  { code: 'ArrowUp', label: '↑' },
+  { code: 'ArrowDown', label: '↓' },
+  { code: 'ArrowRight', label: '→' },
+];
+
+function toggleMobileKeyboard() {
+  showMobileKeyboard.value = !showMobileKeyboard.value;
+  if (showMobileKeyboard.value) {
+    showMobilePanel.value = false;
+    void nextTick(() => mobileInput.value?.focus());
+  }
+}
+
+function toggleMobilePanel() {
+  showMobilePanel.value = !showMobilePanel.value;
+  if (showMobilePanel.value) {
+    showMobileKeyboard.value = false;
+    mobileInput.value?.blur();
+  }
+}
+
+function hideMobileToolbar() {
+  showMobileKeyboard.value = false;
+  showMobilePanel.value = false;
+  mobileInput.value?.blur();
+  mobileToolbarHidden.value = true;
+}
+
+function handleBeforeInput(event: InputEvent) {
+  event.preventDefault();
+  if (event.inputType.startsWith('delete')) {
+    emit('virtualKey', 'Backspace');
+  } else if (event.data) {
+    emit('textInput', event.data);
+  }
+}
+
+function handleMobileKeyDown(event: KeyboardEvent) {
+  event.stopPropagation();
+  if (event.key === 'Enter' || event.key === 'Backspace') {
+    event.preventDefault();
+    emit('virtualKey', event.key);
+  }
+}
+
+function clearMobileInput(event: Event) {
+  (event.target as HTMLInputElement).value = '';
+}
 
 defineExpose({
   getCanvas: () => {
     if (!canvas.value) throw new Error('视频 Canvas 尚未挂载');
     return canvas.value;
   },
+  getElement: () => {
+    if (!viewerElement.value) throw new Error('远程画面容器尚未挂载');
+    return viewerElement.value;
+  },
 });
 </script>
 
 <template>
-  <section v-show="frameVisible" class="viewer" aria-live="polite">
+  <section v-show="frameVisible" ref="viewerElement" class="viewer" aria-live="polite">
     <canvas id="video" ref="canvas" :style="canvasStyle"></canvas>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
     <div v-if="frameVisible && !controlActive" id="control-gate" class="control-gate">
-      <button id="capture-input" type="button" @click="$emit('capture')">点击画面接管键鼠</button>
-      <span>按 Esc 随时释放</span>
+      <button id="capture-input" type="button" @click="emit('capture')">
+        {{ touchPreferred ? '点击画面开始触控' : '点击画面接管键鼠' }}
+      </button>
+      <span>{{ touchPreferred ? '可在工具栏切换触控方式' : '按 Esc 随时释放' }}</span>
     </div>
-    <div class="remote-toolbar" :class="{ 'show-performance': showPerformance }">
-      <div class="remote-toolbar-main">
+    <div
+      class="remote-toolbar"
+      :class="{ 'show-performance': showPerformance, 'mobile-toolbar-hidden': mobileToolbarHidden }"
+    >
+      <button
+        v-if="mobileToolbarHidden"
+        type="button"
+        class="mobile-toolbar-handle"
+        aria-label="展开远程控制工具栏"
+        @click="mobileToolbarHidden = false"
+      >控制</button>
+      <div v-show="!mobileToolbarHidden" class="remote-toolbar-main">
         <span id="remote-status" :class="{ error: statusError }">{{ status }}</span>
         <label class="performance-toggle">
           <input v-model="showPerformance" type="checkbox">
           <span>性能</span>
         </label>
-        <button id="remote-stop" type="button" @click="$emit('stop')">断开</button>
+        <button id="remote-stop" type="button" @click="emit('stop')">断开</button>
       </div>
-      <dl v-if="showPerformance" class="performance-stats">
+      <dl v-if="showPerformance && !mobileToolbarHidden" class="performance-stats">
         <div><dt>解码 FPS</dt><dd>{{ performanceStats.fps.toFixed(1) }}</dd></div>
         <div><dt>接收码率</dt><dd>{{ performanceStats.bitrateMbps.toFixed(1) }} Mbps</dd></div>
         <div><dt>解码队列</dt><dd>{{ performanceStats.decodeQueueSize }}</dd></div>
         <div><dt>丢帧事件</dt><dd>{{ performanceStats.lossEvents }}</dd></div>
       </dl>
+      <div v-show="!mobileToolbarHidden" class="mobile-controls" :class="{ expanded: showMobilePanel || showMobileKeyboard }">
+        <div class="mobile-quick-actions">
+          <div class="touch-mode-switch" role="group" aria-label="触控方式">
+            <button
+              type="button"
+              :class="{ active: touchMode === 'trackpad' }"
+              @click="emit('touchMode', 'trackpad')"
+            >触控板</button>
+            <button
+              type="button"
+              :class="{ active: touchMode === 'direct' }"
+              @click="emit('touchMode', 'direct')"
+            >直触</button>
+          </div>
+          <button
+            type="button"
+            :class="{ active: showMobileKeyboard }"
+            @click="toggleMobileKeyboard"
+          >键盘</button>
+          <button type="button" :class="{ active: showMobilePanel }" @click="toggleMobilePanel">更多</button>
+          <button type="button" @click="hideMobileToolbar">隐藏</button>
+          <button type="button" class="mobile-stop" @click="emit('stop')">断开</button>
+        </div>
+        <div v-show="showMobilePanel" class="mobile-panel">
+          <p class="touch-help">
+            {{ touchMode === 'trackpad'
+              ? '单指移动/点击 · 双击拖动 · 双指滚动/右键'
+              : '点击定位 · 按住拖动；可用键盘面板中的右键按钮' }}
+          </p>
+          <div class="mobile-display-actions">
+          <button type="button" @click="emit('fullscreen')">{{ fullscreenActive ? '退出全屏' : '全屏' }}</button>
+          <button type="button" :class="{ active: orientationLocked }" @click="emit('orientation')">横屏</button>
+          <button type="button" :class="{ active: wakeLockEnabled }" @click="emit('wakeLock')">常亮</button>
+            <button type="button" :class="{ active: showPerformance }" @click="showPerformance = !showPerformance">性能</button>
+          </div>
+        </div>
+        <div v-show="showMobileKeyboard" class="mobile-keyboard">
+          <input
+            ref="mobileInput"
+            type="text"
+            inputmode="text"
+            enterkeyhint="enter"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="在此输入英文和常用符号"
+            aria-label="发送文字到远程电脑"
+            @beforeinput="handleBeforeInput"
+            @input="clearMobileInput"
+            @keydown="handleMobileKeyDown"
+            @keyup.stop
+          >
+          <div class="virtual-key-grid modifiers">
+            <button
+              v-for="key in modifierKeys"
+              :key="key.code"
+              type="button"
+              :class="{ active: activeModifiers.includes(key.code) }"
+              @click="emit('virtualModifier', key.code)"
+            >{{ key.label }}</button>
+          </div>
+          <div class="virtual-key-grid">
+            <button
+              v-for="key in functionKeys"
+              :key="key.code"
+              type="button"
+              @click="emit('virtualKey', key.code)"
+            >{{ key.label }}</button>
+            <button type="button" @click="emit('virtualMouse', 'left')">左键</button>
+            <button type="button" @click="emit('virtualMouse', 'right')">右键</button>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 </template>
