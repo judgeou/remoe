@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>remoe 网页客户端</title>
+  <link rel="stylesheet" href="./style.css?v=3">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">REMOE · PROTOCOL V7</p>
+      <h1>浏览器远程连接</h1>
+      <p class="intro">通过 STUN-only WebRTC DataChannel 接收 AV1 画面并控制远程键鼠。</p>
+    </header>
+
+    <form id="connect-form">
+      <label class="invite-field">
+        <span>Host invite URL</span>
+        <input id="invite" type="url" autocomplete="off" spellcheck="false"
+               placeholder="wss://signal.example.com/signal#invite" aria-describedby="invite-help">
+      </label>
+      <p id="invite-help" class="help">也可以打开 <code>https://信令域名/#invite</code>，此时留空即可连接。</p>
+      <div class="settings">
+        <label><span>FPS</span><input id="fps" type="number" min="1" max="240" value="60"></label>
+        <label><span>码率 Mbps</span><input id="bitrate" type="number" min="1" max="1000" value="20"></label>
+        <label><span>缩放 %</span><input id="scale" type="number" min="10" max="100" value="100"></label>
+      </div>
+      <div class="actions">
+        <button id="connect" type="submit">连接并验证</button>
+        <button id="stop" type="button" class="secondary" disabled>停止</button>
+      </div>
+    </form>
+
+    <section class="viewer" aria-live="polite">
+      <div id="placeholder">等待视频</div>
+      <canvas id="video" hidden></canvas>
+      <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
+      <div id="control-gate" class="control-gate" hidden>
+        <button id="capture-input" type="button">点击画面接管键鼠</button>
+        <span>按 Esc 随时释放</span>
+      </div>
+      <div class="remote-toolbar">
+        <span id="remote-status">正在连接…</span>
+        <button id="remote-stop" type="button">断开</button>
+      </div>
+    </section>
+    <div class="telemetry">
+      <strong id="status">尚未连接</strong>
+      <span id="details"></span>
+    </div>
+  </main>
+  <script type="module" src="./app.js?v=3"></script>
+</body>
+</html>

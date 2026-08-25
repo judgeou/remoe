@@ -1,6 +1,6 @@
 # WebSocket 信令服务器部署
 
-本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的 WSS 信令中继和 STUN-only 服务。示例域名
+本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的网页验证客户端、WSS 信令中继和 STUN-only 服务。示例域名
 统一使用 `signal.example.com`，部署时替换为自己的域名。
 
 信令服务器只转发 SDP/ICE bootstrap 的二进制帧，不承载 DataChannel 业务数据。STUN 由同机 coturn
@@ -50,6 +50,18 @@ sudo install -o root -g root -m 0644 \
 cd /opt/remoe/signaling-server
 sudo npm ci --omit=dev --ignore-scripts
 sudo chown -R root:root /opt/remoe/signaling-server
+
+# 安装无构建步骤的静态网页客户端
+sudo install -d -o root -g root -m 0755 /opt/remoe/web-client
+sudo install -o root -g root -m 0644 \
+  web-client/index.html \
+  web-client/style.css \
+  web-client/app.js \
+  web-client/input.js \
+  web-client/layout.js \
+  web-client/protocol.js \
+  web-client/remoe-client.js \
+  /opt/remoe/web-client/
 ```
 
 安装并启动 systemd 单元：
@@ -104,8 +116,8 @@ sudo systemctl enable caddy
 sudo systemctl status --no-pager caddy
 ```
 
-Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，并将 `/signal` 与 `/healthz` 反向代理到
-`127.0.0.1:8080`。
+Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，将 `/signal` 与 `/healthz` 反向代理到
+`127.0.0.1:8080`，并从 `/opt/remoe/web-client` 提供网页验证客户端。
 
 ## 部署 STUN-only
 
@@ -143,6 +155,7 @@ sudo journalctl -u coturn -n 100 --no-pager
 
 ```bash
 curl --fail https://signal.example.com/healthz
+curl --fail https://signal.example.com/ | grep 'remoe WebRTC'
 ```
 
 预期格式：
@@ -173,6 +186,26 @@ Host 会保持这一条 WSS 连接等待 Client，不会每 15 秒重连。Windo
 向 Mbed TLS 提供 CA bundle，因此 WSS 会验证证书链和域名，无效证书会被拒绝。
 服务器不会由 Client 创建 session；错误或已过期的邀请会立即返回 `Invite not found or expired`。
 
+### 使用网页验证客户端
+
+先启动 Host 并复制它打印的完整 WSS invite。使用最新版 Chrome 或 Edge 打开：
+
+```text
+https://signal.example.com/
+```
+
+把 WSS invite 粘贴到输入框，点击“连接并验证”。也可以把 invite 的 `#` 及其后内容附加到网页
+地址，例如 `https://signal.example.com/#V1StGXR8_Z5jdHi6B-myT`；URL fragment 不会随 HTTP 请求发送到
+服务器。页面成功建立两条 DataChannel、重组 NVENC AV1 并由 WebCodecs 显示第一帧后，会让画面
+自动占满网页。点击画面中央的按钮即可通过 Pointer Lock 接管键鼠，按 `Esc` 释放；右上角按钮用于
+断开。页面会按视频与浏览器视口的实际尺寸等比缩放，保证整张远程画面可见，并绘制一个与发送到
+Host 的绝对坐标同步的本地鼠标指针。浏览器要求 Pointer Lock 由一次明确的用户操作触发，因此它
+不能在异步连接完成时自动启用。
+
+若页面报告浏览器不支持 AV1 配置，先在 `chrome://gpu` 或 `edge://gpu` 检查硬件视频解码情况。
+WebCodecs 的 codec 支持由浏览器和机器共同决定，页面会在发送 `StreamReady` 前调用
+`VideoDecoder.isConfigSupported()`，不会在已知不支持时启动 Host 视频发送。
+
 ## 更新服务
 
 拉取新代码并完成测试后，只需更新生产文件和依赖：
@@ -185,6 +218,15 @@ npm test
 sudo install -o root -g root -m 0644 \
   package.json package-lock.json server.mjs \
   /opt/remoe/signaling-server/
+sudo install -o root -g root -m 0644 \
+  ../web-client/index.html \
+  ../web-client/style.css \
+  ../web-client/app.js \
+  ../web-client/input.js \
+  ../web-client/layout.js \
+  ../web-client/protocol.js \
+  ../web-client/remoe-client.js \
+  /opt/remoe/web-client/
 cd /opt/remoe/signaling-server
 sudo npm ci --omit=dev --ignore-scripts
 sudo chown -R root:root /opt/remoe/signaling-server

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>remoe layout fixture</title>
+  <link rel="stylesheet" href="../style.css?v=3">
+</head>
+<body class="remote-active control-active">
+  <main>
+    <section class="viewer">
+      <canvas id="video" width="2560" height="1440"></canvas>
+      <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
+      <div class="remote-toolbar"><span>fixture</span><button>断开</button></div>
+    </section>
+  </main>
+  <script type="module">
+    import { cursorViewportPosition, fitVideoSize } from '../layout.js';
+    const canvas = document.querySelector('#video');
+    const cursor = document.querySelector('#remote-cursor');
+    const fitted = fitVideoSize(2560, 1440,
+      document.documentElement.clientWidth, document.documentElement.clientHeight);
+    canvas.style.width = `${fitted.width}px`;
+    canvas.style.height = `${fitted.height}px`;
+    const point = cursorViewportPosition(32768, 32768, canvas.getBoundingClientRect());
+    cursor.style.left = `${point.left}px`;
+    cursor.style.top = `${point.top}px`;
+  </script>
+</body>
+</html>

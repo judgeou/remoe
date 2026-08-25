@@ -1,0 +1,142 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #080b10;
+  color: #eef3f8;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 80% 0%, rgba(61, 214, 173, .12), transparent 35rem),
+    #080b10;
+}
+
+main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 52px 0; }
+header { max-width: 760px; margin-bottom: 32px; }
+.eyebrow { color: #49dcaf; font: 700 12px/1.4 ui-monospace, monospace; letter-spacing: .16em; }
+h1 { margin: 8px 0 12px; font-size: clamp(32px, 6vw, 58px); line-height: 1; letter-spacing: -.04em; }
+.intro, .help, #details { color: #8d99a8; }
+
+form {
+  padding: 22px;
+  border: 1px solid #26303b;
+  border-radius: 16px;
+  background: rgba(15, 20, 27, .9);
+}
+
+label span { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 700; }
+input {
+  width: 100%;
+  border: 1px solid #35414f;
+  border-radius: 9px;
+  padding: 11px 12px;
+  background: #090d12;
+  color: inherit;
+  font: inherit;
+}
+input:focus { outline: 2px solid #49dcaf; outline-offset: 1px; }
+.help { margin: 8px 0 18px; font-size: 12px; }
+.settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.actions { display: flex; gap: 10px; margin-top: 20px; }
+button {
+  border: 0;
+  border-radius: 9px;
+  padding: 11px 18px;
+  background: #49dcaf;
+  color: #06100d;
+  font: 750 14px/1 inherit;
+  cursor: pointer;
+}
+button.secondary { background: #252e39; color: #dce4ec; }
+button:disabled { opacity: .45; cursor: default; }
+
+.viewer {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  margin-top: 24px;
+  min-height: 320px;
+  aspect-ratio: 16 / 9;
+  border: 1px solid #26303b;
+  border-radius: 16px;
+  background: #020304;
+}
+.viewer > * { grid-area: 1 / 1; }
+#placeholder { color: #586575; font-weight: 650; }
+canvas { display: block; width: 100%; height: auto; }
+.telemetry { display: flex; justify-content: space-between; gap: 20px; padding: 14px 2px; font-size: 13px; }
+#status.error { color: #ff766f; }
+.control-gate {
+  z-index: 3;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 20px;
+  border-radius: 14px;
+  background: rgba(5, 9, 13, .78);
+  backdrop-filter: blur(10px);
+}
+.control-gate span { color: #a9b4c0; font-size: 12px; }
+.remote-toolbar { display: none; }
+.remote-cursor {
+  position: fixed;
+  z-index: 2;
+  display: none;
+  width: 22px;
+  height: 30px;
+  transform: translate(-2px, -2px);
+  background: #fff;
+  clip-path: polygon(0 0, 0 78%, 24% 61%, 42% 100%, 57% 92%, 40% 57%, 78% 57%);
+  filter: drop-shadow(0 0 1px #000) drop-shadow(1px 2px 1px rgba(0, 0, 0, .85));
+  pointer-events: none;
+}
+
+body.remote-active { overflow: hidden; background: #000; }
+body.remote-active main { width: 100%; height: 100vh; margin: 0; padding: 0; }
+body.remote-active header,
+body.remote-active form,
+body.remote-active .telemetry { display: none; }
+body.remote-active .viewer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  aspect-ratio: auto;
+}
+body.remote-active .remote-toolbar {
+  position: fixed;
+  z-index: 4;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 10px;
+  background: rgba(8, 12, 17, .82);
+  color: #c9d2dc;
+  font-size: 12px;
+  backdrop-filter: blur(10px);
+  transition: opacity .2s;
+}
+.remote-toolbar button { padding: 7px 10px; background: #303a46; color: #eef3f8; }
+.remote-toolbar .error { color: #ff766f; }
+body.control-active .remote-toolbar { opacity: .15; pointer-events: none; }
+body.control-active canvas { cursor: none; }
+body.control-active .remote-cursor { display: block; }
+
+@media (max-width: 640px) {
+  main { padding-top: 30px; }
+  .settings { grid-template-columns: 1fr; }
+  .telemetry { flex-direction: column; gap: 6px; }
+}

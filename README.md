@@ -151,6 +151,11 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 
 ## WebRTC 传输协议 v7
 
+仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它复用相同的 WSS invite、STUN-only ICE、
+双 DataChannel 和 protocol v7，通过 WebCodecs 解码 NVENC AV1，并发送键鼠 `InputEvent`。连接后
+画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
+使用方法见 `docs/signaling-server-deployment.md`。
+
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
 依次承载 `ClientConfig`、`StreamHeader`、`StreamReady` 和 `InputEvent`。无序、不重传的
