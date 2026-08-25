@@ -117,7 +117,7 @@ function requireSameOrigin(request) {
 function createLoginSession(userId) {
   const value = randomToken();
   store.createSession(tokenHash(value), userId, Date.now() + webSessionLifetimeMs);
-  return cookie('remoe_session', value, { maxAge: webSessionLifetimeMs });
+  return cookie('remoe_session', value);
 }
 
 function beginCeremony(state) {
@@ -176,14 +176,54 @@ function publicPasskey(row) {
   };
 }
 
+async function createRegistrationOptions(userId, existing, compatibilityMode) {
+  const userName = `remoe-${userId.slice(0, 8)}`;
+  const options = await generateRegistrationOptions({
+    rpName: 'remoe',
+    rpID: rpId,
+    userID: new TextEncoder().encode(userId),
+    userName,
+    userDisplayName: userName,
+    attestationType: 'none',
+    excludeCredentials: existing.map((row) => ({
+      id: row.credential_id,
+      transports: JSON.parse(row.transports),
+    })),
+    authenticatorSelection: compatibilityMode ? {
+      authenticatorAttachment: 'platform',
+      requireResidentKey: false,
+      userVerification: 'required',
+    } : {
+      authenticatorAttachment: 'platform',
+      residentKey: 'preferred',
+      userVerification: 'required',
+    },
+  });
+  if (compatibilityMode) {
+    delete options.authenticatorSelection.residentKey;
+    options.authenticatorSelection.requireResidentKey = false;
+  }
+  return options;
+}
+
+function localCredentialIds(body) {
+  if (!Array.isArray(body.credentialIds)) return [];
+  return [...new Set(body.credentialIds)]
+    .filter((id) => typeof id === 'string' && /^[A-Za-z0-9_-]{16,1400}$/.test(id))
+    .slice(0, 32);
+}
+
 async function handleApi(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/account') {
+    const sessionToken = parseCookies(request).remoe_session;
     const userId = requestUser(request);
     if (!userId) return json(response, 200, { authenticated: false });
     return json(response, 200, {
       authenticated: true,
       hosts: store.hostsForUser(userId).map(publicHost),
       passkeys: store.passkeysForUser(userId).map(publicPasskey),
+    }, {
+      'set-cookie': cookie('remoe_session', sessionToken),
     });
   }
 
@@ -192,21 +232,12 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && url.pathname === '/api/auth/register/options') {
+    const body = await readJson(request);
     const currentUser = requestUser(request);
     const userId = currentUser ?? randomToken(18);
     const existing = currentUser ? store.passkeysForUser(userId) : [];
-    const options = await generateRegistrationOptions({
-      rpName: 'remoe',
-      rpID: rpId,
-      userID: new TextEncoder().encode(userId),
-      userName: `remoe-${userId.slice(0, 8)}`,
-      attestationType: 'none',
-      excludeCredentials: existing.map((row) => ({
-        id: row.credential_id,
-        transports: JSON.parse(row.transports),
-      })),
-      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-    });
+    const compatibilityMode = body.compatibilityMode === true;
+    const options = await createRegistrationOptions(userId, existing, compatibilityMode);
     return json(response, 200, options, {
       'set-cookie': beginCeremony({
         type: currentUser ? 'add' : 'new', userId, challenge: options.challenge,
@@ -222,18 +253,8 @@ async function handleApi(request, response, url) {
       throw Object.assign(new Error('Recovery code is invalid'), { status: 400 });
     }
     const existing = store.passkeysForUser(record.user_id);
-    const options = await generateRegistrationOptions({
-      rpName: 'remoe',
-      rpID: rpId,
-      userID: new TextEncoder().encode(record.user_id),
-      userName: `remoe-${record.user_id.slice(0, 8)}`,
-      attestationType: 'none',
-      excludeCredentials: existing.map((row) => ({
-        id: row.credential_id,
-        transports: JSON.parse(row.transports),
-      })),
-      authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
-    });
+    const options = await createRegistrationOptions(
+      record.user_id, existing, body.compatibilityMode === true);
     return json(response, 200, options, {
       'set-cookie': beginCeremony({
         type: 'recover', userId: record.user_id, challenge: options.challenge,
@@ -285,10 +306,17 @@ async function handleApi(request, response, url) {
   }
 
   if (request.method === 'POST' && url.pathname === '/api/auth/login/options') {
+    const body = await readJson(request);
+    const knownCredentials = localCredentialIds(body)
+      .map((id) => store.passkeyById(id))
+      .filter(Boolean);
     const options = await generateAuthenticationOptions({
       rpID: rpId,
       userVerification: 'required',
-      allowCredentials: [],
+      allowCredentials: knownCredentials.map((row) => ({
+        id: row.credential_id,
+        transports: JSON.parse(row.transports),
+      })),
     });
     return json(response, 200, options, {
       'set-cookie': beginCeremony({ type: 'login', challenge: options.challenge }),

@@ -3,7 +3,7 @@
 本文说明如何在 Debian/Ubuntu 服务器部署 remoe 的网页验证客户端、WSS 信令中继和 STUN-only 服务。示例域名
 统一使用 `signal.example.com`，部署时替换为自己的域名。
 
-服务使用 SQLite 保存 passkey 公钥、30 天网页登录、轮换恢复码哈希和 Host 列表；WebRTC 部分仍只
+服务使用 SQLite 保存 passkey 公钥、网页登录、轮换恢复码哈希和 Host 列表；WebRTC 部分仍只
 转发 SDP/ICE bootstrap 的二进制帧，不承载 DataChannel 业务数据。STUN 由同机 coturn 单独提供，
 TURN 禁用。Node.js 只监听 `127.0.0.1:8080`，公网入口由 Caddy 提供 HTTPS/WSS。
 
@@ -324,7 +324,9 @@ sudo ss -lunp
 - `/healthz` 返回 502：检查 `remoe-signaling.service` 是否正在运行，以及 Node.js 是否监听 8080。
 - STUN 超时：检查 UDP 3478 的 IPv4/IPv6 云安全组、主机防火墙和 coturn 监听状态。
 - passkey 无法创建：检查网页是否为 HTTPS、`REMOE_RP_ID` 是否等于部署域名，以及
-  `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。
+  `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。部分 Android Credential Manager 实现会在
+  请求可发现凭据时返回 `NotReadableError`；网页会自动回退到不可发现的本机凭据，并长期保存公开的
+  credential ID。清除站点数据或换设备后，使用最新恢复码在该设备重新注册即可。
 - 配对码错误：配对码十分钟失效；重新启动未配对 Host，或在已配对 Host 本机使用 `--repair`。
 - Host 显示离线：检查 Host 的 WSS 日志以及 `/host` 是否由 Caddy 反向代理。
 - DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名
@@ -332,7 +334,9 @@ sudo ss -lunp
 
 ## 安全边界
 
-- 日常网页访问使用 WebAuthn/passkey；30 天登录 Cookie 设置为 HttpOnly、SameSite=Strict 和 Secure。
+- 日常网页访问使用 WebAuthn/passkey；登录 Cookie 是只在当前浏览器会话有效的 HttpOnly、
+  SameSite=Strict、Secure Cookie。credential ID 不是秘密，会长期保存在浏览器 localStorage，供
+  Android 等只能创建不可发现 WebAuthn 凭据的环境在登录时填写 `allowCredentials`。
 - 恢复码约有 130 bit 随机熵，服务器只保存 SHA-256 哈希；新 passkey 验证成功后在 SQLite 事务中
   消费旧码并生成新码。恢复码仍是 bearer secret，不应发送给其他人。
 - Host 长期 token 由 Windows DPAPI 保护，服务器只保存哈希。该简化模型信任服务器，未使用 TPM

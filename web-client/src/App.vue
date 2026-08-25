@@ -47,7 +47,7 @@ const bitrate = ref(20);
 const scale = ref(100);
 const running = ref(false);
 const supported = ref(true);
-const status = ref('尚未连接');
+const status = ref('');
 const statusError = ref(false);
 const details = ref('');
 const remoteActive = ref(false);
@@ -133,8 +133,6 @@ async function connect(inviteOverride?: string) {
         const target = canvas();
         target.width = stream.width;
         target.height = stream.height;
-        setRemoteActive(true);
-        fitRemoteVideo();
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
           `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps · ${stream.codec}`;
       },
@@ -145,6 +143,7 @@ async function connect(inviteOverride?: string) {
         context.drawImage(frame, 0, 0, target.width, target.height);
         if (frameVisible.value) return;
         frameVisible.value = true;
+        setRemoteActive(true);
         void nextTick(() => {
           fitRemoteVideo();
           inputController = new RemoteInputController(
@@ -373,7 +372,7 @@ onBeforeUnmount(() => {
       @capture="captureInput"
       @stop="stopSession"
     />
-    <div class="telemetry">
+    <div v-if="status || details" class="telemetry">
       <strong id="status" :class="{ error: statusError }">{{ status }}</strong>
       <span id="details">{{ details }}</span>
     </div>

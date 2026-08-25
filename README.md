@@ -266,7 +266,8 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 
 ## 当前限制与安全边界
 
-- 网页账号使用 WebAuthn/passkey 与 30 天登录 Cookie；Host 使用 DPAPI 保护的长期 bearer token。
+- 网页账号使用 WebAuthn/passkey 与浏览器会话 Cookie；credential ID 长期保存在浏览器本地，用于兼容
+  只能创建不可发现 WebAuthn 凭据的设备。Host 使用 DPAPI 保护的长期 bearer token。
   该简化模型信任服务器，登录 Cookie 或 Host token 被当前用户上下文中的恶意程序窃取时仍可能被冒用。
 - 恢复码是约 130 bit 熵的单次 bearer secret，服务端只保存哈希；使用后会在新 passkey 注册成功的
   同一数据库事务中轮换。全部账号凭据丢失时可在 Host 本机重新配对，损失仅为原账号的 Host 列表。

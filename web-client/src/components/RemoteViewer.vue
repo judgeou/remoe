@@ -26,9 +26,8 @@ defineExpose({
 </script>
 
 <template>
-  <section class="viewer" aria-live="polite">
-    <div v-if="!frameVisible" id="placeholder">等待视频</div>
-    <canvas v-show="frameVisible" id="video" ref="canvas" :style="canvasStyle"></canvas>
+  <section v-show="frameVisible" class="viewer" aria-live="polite">
+    <canvas id="video" ref="canvas" :style="canvasStyle"></canvas>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
     <div v-if="frameVisible && !controlActive" id="control-gate" class="control-gate">
       <button id="capture-input" type="button" @click="$emit('capture')">点击画面接管键鼠</button>

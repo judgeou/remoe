@@ -16,7 +16,7 @@ const recoveryCode = ref('');
   <section class="account-panel">
     <p class="eyebrow">REMOE · PASSKEY</p>
     <h1>你的远程电脑</h1>
-    <p class="intro">使用 Windows Hello、手机或安全密钥登录。登录状态会在这台浏览器保留 30 天。</p>
+    <p class="intro">使用 Windows Hello、手机或安全密钥登录。关闭浏览器后需要重新验证。</p>
     <p v-if="error" class="notice error">{{ error }}</p>
     <div class="account-actions">
       <button :disabled="busy" @click="emit('login')">使用 passkey 登录</button>

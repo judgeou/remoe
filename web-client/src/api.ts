@@ -36,6 +36,55 @@ const errorMessages: Record<string, string> = {
   'The last passkey cannot be removed': '不能删除账号最后一个 passkey',
 };
 
+const credentialIdsKey = 'remoe_credential_ids';
+const compatibilityModeKey = 'remoe_webauthn_compatibility';
+const credentialIdPattern = /^[A-Za-z0-9_-]{16,1400}$/;
+
+function storedCredentialIds(): string[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(credentialIdsKey) ?? '[]');
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value)]
+      .filter((id): id is string => typeof id === 'string' && credentialIdPattern.test(id))
+      .slice(-32);
+  } catch {
+    return [];
+  }
+}
+
+function rememberCredentialId(id: string) {
+  if (!credentialIdPattern.test(id)) return;
+  try {
+    localStorage.setItem(credentialIdsKey,
+      JSON.stringify([...new Set([...storedCredentialIds(), id])].slice(-32)));
+  } catch {
+    // Private browsing or storage policy may make localStorage unavailable.
+  }
+}
+
+function prefersCompatibilityMode(): boolean {
+  try {
+    return localStorage.getItem(compatibilityModeKey) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function rememberCompatibilityMode() {
+  try {
+    localStorage.setItem(compatibilityModeKey, 'true');
+  } catch {
+    // The current attempt can still continue without remembering the preference.
+  }
+}
+
+function isCredentialManagerFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const cause = error.cause instanceof Error ? error.cause : null;
+  return [error, cause].some((candidate) => candidate?.name === 'NotReadableError' &&
+    candidate.message.toLowerCase().includes('credential manager'));
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -60,13 +109,29 @@ export async function getAccount(): Promise<AccountState> {
 }
 
 async function finishRegistration(optionsPath: string, body?: object) {
-  const options = await request<PublicKeyCredentialCreationOptionsJSON>(optionsPath, {
-    method: 'POST', body: JSON.stringify(body ?? {}),
-  });
-  const credential = await startRegistration({ optionsJSON: options });
-  return request<{ verified: boolean; recoveryCode: string | null }>('/api/auth/register/verify', {
+  const optionsFor = (compatibilityMode: boolean) =>
+    request<PublicKeyCredentialCreationOptionsJSON>(optionsPath, {
+      method: 'POST', body: JSON.stringify({ ...body, compatibilityMode }),
+    });
+  let compatibilityMode = prefersCompatibilityMode();
+  let options = await optionsFor(compatibilityMode);
+  let credential;
+  try {
+    credential = await startRegistration({ optionsJSON: options });
+  } catch (error) {
+    if (compatibilityMode || !isCredentialManagerFailure(error)) throw error;
+    compatibilityMode = true;
+    rememberCompatibilityMode();
+    options = await optionsFor(true);
+    credential = await startRegistration({ optionsJSON: options });
+  }
+  const result = await request<{ verified: boolean; recoveryCode: string | null }>(
+    '/api/auth/register/verify', {
     method: 'POST', body: JSON.stringify(credential),
   });
+  rememberCredentialId(credential.id);
+  if (compatibilityMode) rememberCompatibilityMode();
+  return result;
 }
 
 export const createAccount = () => finishRegistration('/api/auth/register/options');
@@ -75,10 +140,11 @@ export const recoverAccount = (code: string) => finishRegistration('/api/recover
 
 export async function login() {
   const options = await request<PublicKeyCredentialRequestOptionsJSON>('/api/auth/login/options', {
-    method: 'POST', body: '{}',
+    method: 'POST', body: JSON.stringify({ credentialIds: storedCredentialIds() }),
   });
   const credential = await startAuthentication({ optionsJSON: options });
   await request('/api/auth/login/verify', { method: 'POST', body: JSON.stringify(credential) });
+  rememberCredentialId(credential.id);
 }
 
 export const logout = () => request('/api/auth/logout', { method: 'POST', body: '{}' });

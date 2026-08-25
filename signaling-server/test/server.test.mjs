@@ -16,6 +16,7 @@ const testUserId = 'test_user_123456789';
 const testHostId = 'test_host_123456789';
 const testHostToken = 'host_token_abcdefghijklmnopqrstuvwxyz123456';
 const testWebSession = 'web_session_abcdefghijklmnopqrstuvwxyz123456';
+const testCredentialId = 'credential_abcdefghijklmnopqrstuvwxyz123456';
 let serverProcess;
 
 before(async () => {
@@ -24,6 +25,16 @@ before(async () => {
   database.prepare('INSERT INTO users(id, created_at) VALUES(?, ?)').run(testUserId, Date.now());
   store.createHost(testHostId, testUserId, 'Test managed Host', tokenHash(testHostToken));
   store.createSession(tokenHash(testWebSession), testUserId, Date.now() + 60_000);
+  store.addPasskey({
+    credentialId: testCredentialId,
+    userId: testUserId,
+    publicKey: Buffer.from([1, 2, 3]),
+    counter: 0,
+    transports: JSON.stringify(['internal']),
+    backupEligible: 0,
+    backupState: 0,
+    createdAt: Date.now(),
+  });
   database.close();
   serverProcess = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
@@ -227,8 +238,22 @@ test('issues WebAuthn registration and discoverable login challenges', async () 
   assert.match(registrationResponse.headers.get('set-cookie'), /remoe_ceremony=/);
   const registration = await registrationResponse.json();
   assert.equal(registration.rp.id, 'localhost');
+  assert.equal(registration.authenticatorSelection.authenticatorAttachment, 'platform');
+  assert.equal(registration.authenticatorSelection.residentKey, 'preferred');
+  assert.equal(registration.authenticatorSelection.requireResidentKey, false);
   assert.equal(registration.authenticatorSelection.userVerification, 'required');
   assert.ok(registration.challenge.length >= 32);
+
+  const compatibilityResponse = await fetch(
+    `http://127.0.0.1:${port}/api/auth/register/options`, {
+      method: 'POST', headers, body: JSON.stringify({ compatibilityMode: true }),
+    });
+  assert.equal(compatibilityResponse.status, 200);
+  const compatibility = await compatibilityResponse.json();
+  assert.equal(compatibility.authenticatorSelection.authenticatorAttachment, 'platform');
+  assert.equal('residentKey' in compatibility.authenticatorSelection, false);
+  assert.equal(compatibility.authenticatorSelection.requireResidentKey, false);
+  assert.equal(compatibility.authenticatorSelection.userVerification, 'required');
 
   const loginResponse = await fetch(`http://127.0.0.1:${port}/api/auth/login/options`, {
     method: 'POST', headers, body: '{}',
@@ -238,4 +263,27 @@ test('issues WebAuthn registration and discoverable login challenges', async () 
   assert.equal(authentication.rpId, 'localhost');
   assert.equal(authentication.userVerification, 'required');
   assert.deepEqual(authentication.allowCredentials, []);
+
+  const localLoginResponse = await fetch(`http://127.0.0.1:${port}/api/auth/login/options`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ credentialIds: [testCredentialId, 'invalid'] }),
+  });
+  assert.equal(localLoginResponse.status, 200);
+  const localAuthentication = await localLoginResponse.json();
+  assert.deepEqual(localAuthentication.allowCredentials, [{
+    id: testCredentialId,
+    type: 'public-key',
+    transports: ['internal'],
+  }]);
+});
+
+test('refreshes an authenticated login as a browser-session cookie', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/account`, {
+    headers: { cookie: `remoe_session=${testWebSession}` },
+  });
+  assert.equal(response.status, 200);
+  const setCookie = response.headers.get('set-cookie');
+  assert.match(setCookie, /^remoe_session=/);
+  assert.match(setCookie, /HttpOnly/);
+  assert.doesNotMatch(setCookie, /Max-Age|Expires/i);
 });
