@@ -158,7 +158,8 @@ curl --fail https://signal.example.com/healthz
   --signal-url "wss://signal.example.com/signal"
 ```
 
-host 会打印包含 21 字符 Nano ID 的邀请 URL。client 使用完整邀请 URL：
+信令服务器确认 Host session 注册成功后，host 才会打印包含 21 字符 Nano ID 的邀请 URL。client
+使用完整邀请 URL：
 
 ```powershell
 .\build-local\Release\remoe_client.exe `
@@ -170,6 +171,7 @@ SDP/ICE 信令。应用会从 WSS URL 自动派生同域名的 `stun:signal.exam
 命令行参数；成功生成服务器反射地址后会打印 `WebRTC STUN reflexive candidate gathered`。
 Host 会保持这一条 WSS 连接等待 Client，不会每 15 秒重连。Windows 程序从系统 `ROOT` 证书库
 向 Mbed TLS 提供 CA bundle，因此 WSS 会验证证书链和域名，无效证书会被拒绝。
+服务器不会由 Client 创建 session；错误或已过期的邀请会立即返回 `Invite not found or expired`。
 
 ## 更新服务
 
@@ -217,8 +219,7 @@ sudo ss -lunp
 - HTTPS 证书申请失败：检查 A/AAAA 记录、TCP 80/443、安全组和主机防火墙。
 - `/healthz` 返回 502：检查 `remoe-signaling.service` 是否正在运行，以及 Node.js 是否监听 8080。
 - STUN 超时：检查 UDP 3478 的 IPv4/IPv6 云安全组、主机防火墙和 coturn 监听状态。
-- WebSocket 返回 400：邀请 URL 的 Nano ID 或 role 参数无效。
-- WebSocket 返回 409：同一 session 已有相同角色连接；关闭旧进程后重试。
+- 注册响应错误：检查邀请 URL 是否完整、Host 是否仍在线，以及该邀请是否已有 Client 使用。
 - DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名
   UDP 3478 STUN 地址。禁用 TURN 时跨部分 NAT 仍可能无法直连。
 
@@ -226,6 +227,7 @@ sudo ss -lunp
 
 - 邀请 URL 当前是 bearer secret，不等同于用户身份认证，不应公开传播。
 - 信令使用 WSS，Caddyfile 默认添加 HSTS、`nosniff` 和 Referrer Policy。
-- 服务限制单 session 和全局排队内存、会话数量及空闲时间，并在发送方断开时清除残留帧。
+- 只有已连接的 Host 可以创建 session；Host 断开时 session 立即失效并关闭对应 Client。
+- 服务限制单 session 和全局排队内存、会话数量及空闲时间，并清除残留信令帧。
 - 不应开放 Node.js 的 8080 端口到公网。
 - WebAuthn/passkey 接入后，应由认证流程签发短期授权，而不是仅依赖邀请 URL。

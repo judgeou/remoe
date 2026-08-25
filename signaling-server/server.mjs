@@ -36,21 +36,18 @@ function rejectUpgrade(socket, status, reason) {
   socket.destroy();
 }
 
-function getSession(id) {
-  let session = sessions.get(id);
-  if (!session) {
-    if (sessions.size >= maxSessions) return null;
-    session = {
-      host: null,
-      client: null,
-      pendingHost: [],
-      pendingHostBytes: 0,
-      pendingClient: [],
-      pendingClientBytes: 0,
-      lastActivity: Date.now(),
-    };
-    sessions.set(id, session);
-  }
+function createSession(id) {
+  if (sessions.size >= maxSessions) return null;
+  const session = {
+    host: null,
+    client: null,
+    pendingHost: [],
+    pendingHostBytes: 0,
+    pendingClient: [],
+    pendingClientBytes: 0,
+    lastActivity: Date.now(),
+  };
+  sessions.set(id, session);
   return session;
 }
 
@@ -117,28 +114,37 @@ server.on('upgrade', (request, socket, head) => {
     return;
   }
 
-  const session = getSession(id);
-  if (!session) {
-    rejectUpgrade(socket, 503, 'Service Unavailable');
-    return;
+  let session = sessions.get(id);
+  let rejection = null;
+  if (role === 'client' &&
+      (!session || session.host?.readyState !== WebSocket.OPEN)) {
+    rejection = 'invite-not-found';
   }
-  if (session[role]) {
-    rejectUpgrade(socket, 409, 'Conflict');
-    return;
-  }
+  if (!session && role === 'host') session = createSession(id);
+  if (!session && !rejection) rejection = 'service-unavailable';
+  if (session?.[role]) rejection = role === 'client' ? 'invite-in-use' : 'host-in-use';
   websocketServer.handleUpgrade(request, socket, head, (websocket) => {
-    websocketServer.emit('connection', websocket, request, { id, role, session });
+    websocketServer.emit('connection', websocket, request, { id, role, session, rejection });
   });
 });
 
 websocketServer.on('connection', (socket, request, context) => {
-  const { id, role, session } = context;
+  const { id, role, session, rejection } = context;
+  if (rejection) {
+    socket.send(`error:${rejection}`);
+    socket.close(4004, 'Registration rejected');
+    return;
+  }
   socket.isAlive = true;
   session[role] = socket;
   session.lastActivity = Date.now();
+  socket.send('registered');
   flushPending(session, role, socket);
 
-  socket.on('pong', () => { socket.isAlive = true; });
+  socket.on('pong', () => {
+    socket.isAlive = true;
+    session.lastActivity = Date.now();
+  });
   socket.on('message', (message, isBinary) => {
     session.lastActivity = Date.now();
     if (!isBinary) {
@@ -162,6 +168,12 @@ websocketServer.on('connection', (socket, request, context) => {
       // Queued messages produced by this connection are no longer valid for
       // a future peer using the same session ID.
       discardPendingFor(session, peerRole(role));
+    }
+    if (role === 'host') {
+      session.client?.close(4001, 'Invite expired');
+      discardPending(session);
+      sessions.delete(id);
+      return;
     }
     removeIfEmpty(id, session);
   });

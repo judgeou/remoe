@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { after, before, test } from 'node:test';
-import { setTimeout as delay } from 'node:timers/promises';
 import WebSocket from 'ws';
 
 const port = 18080 + Math.floor(Math.random() * 1000);
@@ -25,10 +24,31 @@ function connect(role, session = 'test_session_1234') {
   return new WebSocket(`ws://127.0.0.1:${port}/signal?session=${session}&role=${role}`);
 }
 
+async function connectRegistered(role, session = 'test_session_1234') {
+  const socket = connect(role, session);
+  const opened = once(socket, 'open');
+  const registration = once(socket, 'message');
+  await opened;
+  const [message, isBinary] = await registration;
+  assert.equal(isBinary, false);
+  assert.equal(message.toString(), 'registered');
+  return socket;
+}
+
+async function expectRejected(role, session, expected) {
+  const socket = connect(role, session);
+  const response = once(socket, 'message');
+  const closed = once(socket, 'close');
+  await once(socket, 'open');
+  const [message, isBinary] = await response;
+  assert.equal(isBinary, false);
+  assert.equal(message.toString(), `error:${expected}`);
+  await closed;
+}
+
 test('relays binary messages in both directions', async () => {
-  const host = connect('host');
-  const client = connect('client');
-  await Promise.all([once(host, 'open'), once(client, 'open')]);
+  const host = await connectRegistered('host');
+  const client = await connectRegistered('client');
 
   const hostMessage = once(host, 'message');
   client.send(Buffer.from([1, 2, 3]));
@@ -45,51 +65,33 @@ test('relays binary messages in both directions', async () => {
   client.close();
 });
 
-test('queues messages until the peer connects', async () => {
-  const client = connect('client', 'queued_session_1234');
-  await once(client, 'open');
-  client.send(Buffer.from('offer'));
-
-  const host = connect('host', 'queued_session_1234');
-  const message = once(host, 'message');
-  await once(host, 'open');
-  const [data] = await message;
-  assert.equal(data.toString(), 'offer');
-  host.close();
-  client.close();
+test('rejects a client when the host invite is absent', async () => {
+  await expectRejected('client', 'missing_session_1234', 'invite-not-found');
 });
 
 test('rejects duplicate roles', async () => {
-  const first = connect('host', 'duplicate_session');
-  await once(first, 'open');
-  const second = connect('host', 'duplicate_session');
-  const [error] = await once(second, 'error');
-  assert.match(error.message, /409/);
+  const first = await connectRegistered('host', 'duplicate_session');
+  await expectRejected('host', 'duplicate_session', 'host-in-use');
   first.close();
 });
 
-test('discards queued signaling when its sender disconnects', async () => {
+test('expires the invite when its host disconnects', async () => {
   const session = 'reusable_session_1234';
-  const firstHost = connect('host', session);
-  await once(firstHost, 'open');
-  firstHost.send(Buffer.from('stale'));
+  const firstHost = await connectRegistered('host', session);
+  const firstClient = await connectRegistered('client', session);
+  const clientClosed = once(firstClient, 'close');
   firstHost.close();
   await once(firstHost, 'close');
-  await delay(20);
+  await clientClosed;
 
-  const client = connect('client', session);
-  await once(client, 'open');
-  let received = false;
-  client.once('message', () => { received = true; });
-  await delay(50);
-  assert.equal(received, false);
+  await expectRejected('client', session, 'invite-not-found');
 
-  const secondHost = connect('host', session);
-  await once(secondHost, 'open');
-  const freshMessage = once(client, 'message');
+  const secondHost = await connectRegistered('host', session);
+  const secondClient = await connectRegistered('client', session);
+  const freshMessage = once(secondClient, 'message');
   secondHost.send(Buffer.from('fresh'));
   const [data] = await freshMessage;
   assert.equal(data.toString(), 'fresh');
   secondHost.close();
-  client.close();
+  secondClient.close();
 });

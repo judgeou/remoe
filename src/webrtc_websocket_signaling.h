@@ -21,6 +21,7 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     std::string signaling_invite_url,
     WebRtcTransport::Callbacks callbacks,
     std::chrono::milliseconds timeout = std::chrono::seconds(15),
-    std::function<bool()> stop_requested = {});
+    std::function<bool()> stop_requested = {},
+    std::function<void()> on_signaling_open = {});
 
 } // namespace remoe

@@ -149,7 +149,7 @@ public:
     ~WebSocketSignalingStream() { close(); }
 
     void connect(const std::string& url, std::chrono::milliseconds timeout,
-                 std::function<bool()> stop_requested) {
+                 std::function<bool()> stop_requested, bool client_role) {
         rtc::WebSocket::Configuration configuration;
         configuration.connectionTimeout = timeout;
         configuration.maxMessageSize = 1024 * 1024 + 1024;
@@ -185,18 +185,40 @@ public:
             [weak_self](rtc::binary message) {
                 if (const auto self = weak_self.lock()) self->receive_binary(std::move(message));
             },
-            [weak_self](std::string) {
+            [weak_self](std::string message) {
                 if (const auto self = weak_self.lock()) {
-                    self->set_error("Signaling server sent a text WebSocket message");
+                    if (message == "registered") {
+                        {
+                            std::lock_guard lock(self->mutex_);
+                            self->registered_ = true;
+                        }
+                        self->changed_.notify_all();
+                    } else if (message == "error:invite-not-found") {
+                        self->set_error("Invite not found or expired");
+                    } else if (message == "error:invite-in-use") {
+                        self->set_error("Invite is already in use");
+                    } else if (message == "error:service-unavailable") {
+                        self->set_error("Signaling server has reached its session limit");
+                    } else if (message == "error:host-in-use") {
+                        self->set_error("Host invite is already registered");
+                    } else {
+                        self->set_error("Signaling server sent an unknown registration response");
+                    }
                 }
             });
         websocket_->open(url);
 
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         std::unique_lock lock(mutex_);
-        changed_.wait_until(lock, deadline, [&] { return open_ || closed_ || !error_.empty(); });
-        if (!open_) {
-            const std::string detail = error_.empty() ? "connection timed out" : error_;
+        changed_.wait_until(lock, deadline, [&] {
+            return registered_ || closed_ || !error_.empty();
+        });
+        if (!registered_) {
+            std::string detail = error_.empty() ? "connection timed out" : error_;
+            if (client_role && (detail == "Invite not found or expired" ||
+                                detail == "Invite is already in use")) {
+                throw std::runtime_error(detail);
+            }
             throw std::runtime_error("WebSocket signaling connection failed: " + detail);
         }
     }
@@ -292,6 +314,7 @@ private:
     std::string error_;
     std::function<bool()> stop_requested_;
     bool open_ = false;
+    bool registered_ = false;
     bool closed_ = false;
 };
 
@@ -323,7 +346,7 @@ std::string create_webrtc_signaling_invite(std::string signaling_url) {
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role, std::string signaling_invite_url,
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
-    std::function<bool()> stop_requested) {
+    std::function<bool()> stop_requested, std::function<void()> on_signaling_open) {
     auto stream = std::make_shared<WebSocketSignalingStream>();
     auto [signaling_url, session_id] = split_invite(std::move(signaling_invite_url));
     const std::string stun_url = derive_stun_url(signaling_url);
@@ -331,7 +354,8 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     constexpr auto connection_timeout = std::chrono::seconds(15);
     stream->connect(url, timeout == (std::chrono::milliseconds::max)()
                              ? connection_timeout : timeout,
-                    std::move(stop_requested));
+                    std::move(stop_requested), role == WebRtcTransport::Role::Offerer);
+    if (on_signaling_open) on_signaling_open();
 
     WebRtcTcpBootstrapIo io;
     io.send_all = [stream](const void* data, std::size_t size) {

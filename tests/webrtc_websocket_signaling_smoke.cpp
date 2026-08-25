@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
         std::atomic_bool client_srflx{false};
         std::atomic_bool host_video_open{false};
         std::atomic_bool client_video_open{false};
+        std::atomic_bool host_registered{false};
 
         remoe::WebRtcTransport::Callbacks host_callbacks;
         host_callbacks.on_local_candidate = [&](auto candidate) {
@@ -89,8 +90,17 @@ int main(int argc, char** argv) {
         auto host_future = std::async(std::launch::async, [&] {
             return remoe::establish_webrtc_over_websocket(
                 remoe::WebRtcTransport::Role::Answerer, invite,
-                std::move(host_callbacks), 15s);
+                std::move(host_callbacks), 15s, {}, [&] {
+                    host_registered = true;
+                    received.notify_all();
+                });
         });
+        {
+            std::unique_lock lock(mutex);
+            if (!received.wait_for(lock, 5s, [&] { return host_registered.load(); })) {
+                throw std::runtime_error("Timed out registering the host invite");
+            }
+        }
         remoe::WebRtcTransport::Callbacks client_callbacks;
         client_callbacks.on_local_candidate = [&](auto candidate) {
             if (candidate.candidate.find(" typ srflx") != std::string::npos) {

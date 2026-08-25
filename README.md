@@ -112,7 +112,8 @@ client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel G
 会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 
-host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包含该 ID 的邀请 URL：
+host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID；信令服务器确认 Host session 注册成功后，
+程序才会打印包含该 ID 的邀请 URL：
 
 ```powershell
 # host
@@ -129,6 +130,8 @@ host 启动时会自动生成约 126 bit 熵的 21 字符 Nano ID，并打印包
 后续会由 WebAuthn 授权流程签发短期会话。
 
 Host 建立 WSS 后会长期等待 Client，不会因 15 秒内无人连接而重建会话；`Ctrl+C` 仍可取消等待。
+Client 只能加入已有且在线的 Host session。错误或已经过期的邀请会立即返回
+`Invite not found or expired`，不会创建空 session 后等待超时。
 
 WebSocket 信令模式会从信令 URL 自动派生同域名的 `stun:<host>:3478` ICE server，不需要额外参数。
 STUN 只生成服务器反射地址，不启用 TURN relay；生成 `srflx` candidate 时 host/client 会打印确认信息。

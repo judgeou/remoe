@@ -435,11 +435,11 @@ int run(const Options& options) {
     if (options.max_bitrate_mbps) std::cout << options.max_bitrate_mbps << " Mbps";
     else std::cout << "unlimited";
     std::cout << '\n';
-    std::cout << "\nWebRTC invite URL: " << signaling_invite
-              << "\nWaiting for client (Ctrl+C to stop)\n" << std::flush;
+    std::cout << "\nRegistering with signaling server...\n" << std::flush;
 
     std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
+    bool invite_printed = false;
     while (g_running) {
         std::atomic_bool session_running{true};
         std::atomic_bool key_frame_requested{false};
@@ -547,7 +547,15 @@ int run(const Options& options) {
             control_channel = remoe::establish_webrtc_over_websocket(
                 remoe::WebRtcTransport::Role::Answerer, signaling_invite,
                 std::move(control_callbacks), (std::chrono::milliseconds::max)(),
-                [] { return !g_running.load(); });
+                [] { return !g_running.load(); }, [&] {
+                    if (!invite_printed) {
+                        std::cout << "WebRTC invite URL: " << signaling_invite << '\n';
+                        invite_printed = true;
+                    } else {
+                        std::cout << "Signaling reconnected\n";
+                    }
+                    std::cout << "Waiting for client (Ctrl+C to stop)\n" << std::flush;
+                });
         } catch (const std::exception& error) {
             session_running = false;
             if (!g_running) break;
