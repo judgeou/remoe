@@ -10,7 +10,7 @@ import {
   encodeKeyFrameRequest,
   encodeSignal,
   encodeStreamReady,
-} from './protocol.js?v=3';
+} from './protocol.js';
 
 const registrationErrors = Object.freeze({
   'error:invite-not-found': '邀请不存在、已经过期，或 Host 不在线',

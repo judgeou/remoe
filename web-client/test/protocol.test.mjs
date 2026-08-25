@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   MAGIC,
@@ -9,10 +9,10 @@ import {
   encodeClientConfig,
   encodeInputEvent,
   encodeSignal,
-} from '../protocol.js';
-import { parseInvite } from '../remoe-client.js';
-import { windowsScanCode } from '../input.js';
-import { cursorViewportPosition, fitVideoSize } from '../layout.js';
+} from '../src/core/protocol.js';
+import { parseInvite } from '../src/core/remoe-client.js';
+import { windowsScanCode } from '../src/core/input.js';
+import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
 test('encodes protocol v7 client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });

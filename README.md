@@ -156,6 +156,17 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
+网页使用 Vite、Vue 3 和 TypeScript 构建。开发与生产构建命令：
+
+```bash
+cd web-client
+npm ci
+npm test
+npm run build
+```
+
+生产文件输出到 `web-client/dist/`；该目录不提交 Git。
+
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
 依次承载 `ClientConfig`、`StreamHeader`、`StreamReady` 和 `InputEvent`。无序、不重传的

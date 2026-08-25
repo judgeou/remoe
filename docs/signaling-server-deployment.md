@@ -11,7 +11,8 @@
 - 一台具有公网 IPv4 或 IPv6 的 Debian/Ubuntu 服务器。
 - 域名的 A/AAAA 记录已经指向服务器。
 - 云安全组和主机防火墙允许 TCP 80、443；SSH 管理端口也需保持可用。
-- Node.js 18 或更高版本。
+- 服务器上的 Node.js 18 或更高版本，用于信令服务。
+- 构建网页的开发机使用 Node.js 22.18 或更高版本。
 
 先安装运行依赖：
 
@@ -50,18 +51,6 @@ sudo install -o root -g root -m 0644 \
 cd /opt/remoe/signaling-server
 sudo npm ci --omit=dev --ignore-scripts
 sudo chown -R root:root /opt/remoe/signaling-server
-
-# 安装无构建步骤的静态网页客户端
-sudo install -d -o root -g root -m 0755 /opt/remoe/web-client
-sudo install -o root -g root -m 0644 \
-  web-client/index.html \
-  web-client/style.css \
-  web-client/app.js \
-  web-client/input.js \
-  web-client/layout.js \
-  web-client/protocol.js \
-  web-client/remoe-client.js \
-  /opt/remoe/web-client/
 ```
 
 安装并启动 systemd 单元：
@@ -117,7 +106,34 @@ sudo systemctl status --no-pager caddy
 ```
 
 Caddy 会在 DNS 和公网端口正确时自动申请 TLS 证书，将 `/signal` 与 `/healthz` 反向代理到
-`127.0.0.1:8080`，并从 `/opt/remoe/web-client` 提供网页验证客户端。
+`127.0.0.1:8080`，并从 `/opt/remoe/web-client/current` 提供网页客户端。
+
+## 构建和部署网页客户端
+
+网页使用 Vite、Vue 3 和 TypeScript，构建在开发机完成，服务器只接收静态 `dist/`。在仓库根目录
+执行：
+
+```bash
+cd web-client
+npm ci
+npm test
+npm run build
+npm run deploy -- --server root@signal.example.com
+```
+
+`npm run build` 会先运行 `vue-tsc` 类型检查，再由 Vite 生成带内容哈希的生产文件。部署脚本检查
+`dist/index.html` 与 `dist/assets/`，通过一次 SSH 连接把压缩包上传到
+`/opt/remoe/web-client/releases/<release-id>`，最后原子切换 `current` 软链接。因此上传期间不会出现
+新 HTML 引用尚未上传完成的资源，也不会重复触发多次 SSH 认证。
+
+也可通过环境变量指定服务器：
+
+```bash
+REMOE_WEB_SERVER=root@signal.example.com npm run deploy
+```
+
+`--target` 可以修改远端目录，但出于安全限制必须位于 `/opt/remoe/` 内。旧 release 默认保留，出现
+问题时可以把 `current` 软链接切回上一版。
 
 ## 部署 STUN-only
 
@@ -155,7 +171,7 @@ sudo journalctl -u coturn -n 100 --no-pager
 
 ```bash
 curl --fail https://signal.example.com/healthz
-curl --fail https://signal.example.com/ | grep 'remoe WebRTC'
+curl --fail https://signal.example.com/ | grep 'remoe 网页客户端'
 ```
 
 预期格式：
@@ -218,20 +234,21 @@ npm test
 sudo install -o root -g root -m 0644 \
   package.json package-lock.json server.mjs \
   /opt/remoe/signaling-server/
-sudo install -o root -g root -m 0644 \
-  ../web-client/index.html \
-  ../web-client/style.css \
-  ../web-client/app.js \
-  ../web-client/input.js \
-  ../web-client/layout.js \
-  ../web-client/protocol.js \
-  ../web-client/remoe-client.js \
-  /opt/remoe/web-client/
 cd /opt/remoe/signaling-server
 sudo npm ci --omit=dev --ignore-scripts
 sudo chown -R root:root /opt/remoe/signaling-server
 sudo systemctl restart remoe-signaling.service
 curl --fail http://127.0.0.1:8080/healthz
+```
+
+网页更新在开发机执行，不需要重启 Caddy：
+
+```bash
+cd /path/to/remoe/web-client
+npm ci
+npm test
+npm run build
+npm run deploy -- --server root@signal.example.com
 ```
 
 如果 `deploy/Caddyfile` 或 systemd 单元有变化，应重新安装对应文件、运行配置验证，然后再 reload

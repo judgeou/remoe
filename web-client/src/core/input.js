@@ -2,7 +2,7 @@ import {
   INPUT_FLAG_EXTENDED_KEY,
   INPUT_FLAG_RELEASE,
   INPUT_TYPE,
-} from './protocol.js?v=3';
+} from './protocol.js';
 
 const scanCodes = new Map(Object.entries({
   Escape: [0x01, false],
@@ -70,6 +70,12 @@ export class RemoteInputController {
   #y = 32768;
   #listeners = [];
 
+  /**
+   * @param {HTMLCanvasElement} canvas
+   * @param {(event: {type: number, flags?: number, value1?: number, value2?: number}) => boolean} send
+   * @param {(active: boolean) => void} onActiveChanged
+   * @param {(position: {x: number, y: number}) => void} onPointerMoved
+   */
   constructor(canvas, send, onActiveChanged = () => {}, onPointerMoved = () => {}) {
     this.#canvas = canvas;
     this.#send = send;

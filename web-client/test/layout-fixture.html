@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>remoe layout fixture</title>
-  <link rel="stylesheet" href="../style.css?v=3">
+  <link rel="stylesheet" href="../src/style.css">
 </head>
 <body class="remote-active control-active">
   <main>
@@ -15,7 +15,7 @@
     </section>
   </main>
   <script type="module">
-    import { cursorViewportPosition, fitVideoSize } from '../layout.js';
+    import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
     const canvas = document.querySelector('#video');
     const cursor = document.querySelector('#remote-cursor');
     const fitted = fitVideoSize(2560, 1440,

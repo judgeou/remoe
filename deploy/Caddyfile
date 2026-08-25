@@ -10,7 +10,7 @@
 	}
 
 	handle {
-		root * /opt/remoe/web-client
+		root * /opt/remoe/web-client/current
 		try_files {path} /index.html
 		file_server
 	}
