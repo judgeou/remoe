@@ -4,6 +4,7 @@ import { ref } from 'vue';
 defineProps<{ busy: boolean; error: string }>();
 const emit = defineEmits<{
   login: [];
+  loginOther: [];
   create: [];
   recover: [code: string];
 }>();
@@ -22,6 +23,7 @@ const recoveryCode = ref('');
       <button :disabled="busy" @click="emit('login')">使用 passkey 登录</button>
       <button class="secondary" :disabled="busy" @click="emit('create')">创建新账号</button>
     </div>
+    <button class="text-button" :disabled="busy" @click="emit('loginOther')">使用其他 passkey</button>
     <button class="text-button" :disabled="busy" @click="recovering = !recovering">
       {{ recovering ? '取消恢复' : '使用账号恢复码' }}
     </button>

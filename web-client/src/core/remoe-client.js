@@ -317,7 +317,7 @@ export class RemoeBrowserClient {
     this.#events.onStats?.({
       fps: this.#statsFrames * 1_000 / elapsed,
       bitrateMbps: this.#statsBytes * 8 / elapsed / 1_000,
-      decodeQueueSize: this.#decoder?.decodeQueueSize ?? 0,
+      dataRateKBps: this.#statsBytes / elapsed,
       lossEvents: this.#statsLossEvents,
     });
     this.#statsStartedAt = now;

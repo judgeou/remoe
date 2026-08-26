@@ -20,8 +20,18 @@ export interface PasskeySummary {
 
 export interface AccountState {
   authenticated: boolean;
+  accountId: string | null;
   hosts: HostSummary[];
   passkeys: PasskeySummary[];
+}
+
+export interface CredentialActionResult {
+  credentialStored: boolean;
+}
+
+export interface RegistrationResult extends CredentialActionResult {
+  verified: boolean;
+  recoveryCode: string | null;
 }
 
 const errorMessages: Record<string, string> = {
@@ -34,9 +44,11 @@ const errorMessages: Record<string, string> = {
   'Host not found': '找不到这台 Host',
   'Pairing code is invalid or expired': '配对码无效或已经过期',
   'The last passkey cannot be removed': '不能删除账号最后一个 passkey',
+  'Passkey is not registered': '当前 passkey 不属于这个服务，请尝试“使用其他 passkey”或账号恢复码',
 };
 
 const credentialIdsKey = 'remoe_credential_ids';
+const activeCredentialIdKey = 'remoe_active_credential_id';
 const compatibilityModeKey = 'remoe_webauthn_compatibility';
 const credentialIdPattern = /^[A-Za-z0-9_-]{16,1400}$/;
 
@@ -52,13 +64,27 @@ function storedCredentialIds(): string[] {
   }
 }
 
-function rememberCredentialId(id: string) {
-  if (!credentialIdPattern.test(id)) return;
+function activeCredentialIds(): string[] {
+  try {
+    const active = localStorage.getItem(activeCredentialIdKey);
+    if (active && credentialIdPattern.test(active)) return [active];
+  } catch {
+    return [];
+  }
+  const stored = storedCredentialIds();
+  return stored.length ? [stored.at(-1)!] : [];
+}
+
+function rememberCredentialId(id: string): boolean {
+  if (!credentialIdPattern.test(id)) return false;
   try {
     localStorage.setItem(credentialIdsKey,
       JSON.stringify([...new Set([...storedCredentialIds(), id])].slice(-32)));
+    localStorage.setItem(activeCredentialIdKey, id);
+    return localStorage.getItem(activeCredentialIdKey) === id && storedCredentialIds().includes(id);
   } catch {
     // Private browsing or storage policy may make localStorage unavailable.
+    return false;
   }
 }
 
@@ -118,21 +144,24 @@ export async function getAccount(): Promise<AccountState> {
   const result = await request<Partial<AccountState>>('/api/account');
   return {
     authenticated: Boolean(result.authenticated),
+    accountId: result.accountId ?? null,
     hosts: result.hosts ?? [],
     passkeys: result.passkeys ?? [],
   };
 }
 
-async function authenticate(credentialIds: string[]) {
+async function authenticate(credentialIds: string[]): Promise<CredentialActionResult> {
   const options = await request<PublicKeyCredentialRequestOptionsJSON>('/api/auth/login/options', {
     method: 'POST', body: JSON.stringify({ credentialIds }),
   });
   const credential = await startAuthentication({ optionsJSON: options });
   await request('/api/auth/login/verify', { method: 'POST', body: JSON.stringify(credential) });
-  rememberCredentialId(credential.id);
+  return { credentialStored: rememberCredentialId(credential.id) };
 }
 
-async function finishRegistration(optionsPath: string, body?: object, loginOnDuplicate = false) {
+async function finishRegistration(
+  optionsPath: string, body?: object, loginOnDuplicate = false,
+): Promise<RegistrationResult> {
   const optionsFor = (compatibilityMode: boolean) =>
     request<PublicKeyCredentialCreationOptionsJSON>(optionsPath, {
       method: 'POST', body: JSON.stringify({ ...body, compatibilityMode }),
@@ -154,16 +183,16 @@ async function finishRegistration(optionsPath: string, body?: object, loginOnDup
     if (!loginOnDuplicate || !isPreviouslyRegistered(error)) {
       throw readableRegistrationError(error);
     }
-    await authenticate((options.excludeCredentials ?? []).map(({ id }) => id));
-    return { verified: true, recoveryCode: null };
+    const authentication = await authenticate((options.excludeCredentials ?? []).map(({ id }) => id));
+    return { verified: true, recoveryCode: null, ...authentication };
   }
   const result = await request<{ verified: boolean; recoveryCode: string | null }>(
     '/api/auth/register/verify', {
     method: 'POST', body: JSON.stringify(credential),
   });
-  rememberCredentialId(credential.id);
+  const credentialStored = rememberCredentialId(credential.id);
   if (compatibilityMode) rememberCompatibilityMode();
-  return result;
+  return { ...result, credentialStored };
 }
 
 export const createAccount = () => finishRegistration('/api/auth/register/options');
@@ -171,9 +200,9 @@ export const addPasskey = () => finishRegistration('/api/auth/register/options')
 export const recoverAccount = (code: string) =>
   finishRegistration('/api/recovery/options', { code }, true);
 
-export async function login() {
-  await authenticate(storedCredentialIds());
-}
+export const login = () => authenticate(activeCredentialIds());
+
+export const loginWithOtherPasskey = () => authenticate(storedCredentialIds());
 
 export const logout = () => request('/api/auth/logout', { method: 'POST', body: '{}' });
 

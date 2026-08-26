@@ -265,7 +265,27 @@ WebCodecs 的 codec 支持由浏览器和机器共同决定，页面会在发送
 
 ## 更新服务
 
-拉取新代码并完成测试后，只需更新生产文件和依赖：
+首次完成 systemd、环境变量和 Caddy 配置后，后续更新可以在开发机的仓库中一条命令完成。脚本会先
+运行测试，然后上传生产文件、安装生产依赖、原子切换 release、重启服务并检查健康状态；如果新版本
+无法启动或健康检查失败，会自动恢复上一 release：
+
+```bash
+cd /path/to/remoe/signaling-server
+npm run deploy -- root@signal.example.com
+```
+
+也可以使用显式参数或环境变量：
+
+```bash
+npm run deploy -- --server root@signal.example.com
+REMOE_SIGNAL_SERVER=root@signal.example.com npm run deploy
+```
+
+部署账号需要能够写入 `/opt/remoe/signaling-server`、运行 `npm ci`、切换软链接并重启
+`remoe-signaling.service`；仓库默认流程使用 `root`。数据库位于 `/var/lib/remoe/remoe.db`，不会包含在
+release 上传和回滚中。
+
+如需手动更新，执行：
 
 ```bash
 cd /path/to/remoe/signaling-server

@@ -6,7 +6,8 @@
   "description": "Opaque WebSocket signaling relay for remoe",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "deploy": "node scripts/deploy.mjs"
   },
   "engines": {
     "node": ">=22"

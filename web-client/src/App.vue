@@ -11,6 +11,7 @@ import {
   deleteHost,
   getAccount,
   login,
+  loginWithOtherPasskey,
   logout,
   pairHost,
   recoverAccount,
@@ -43,7 +44,7 @@ type ViewportGesture =
 interface PerformanceStats {
   fps: number;
   bitrateMbps: number;
-  decodeQueueSize: number;
+  dataRateKBps: number;
   lossEvents: number;
 }
 
@@ -52,7 +53,7 @@ type LockableScreenOrientation = ScreenOrientation & {
 };
 
 const viewer = ref<InstanceType<typeof RemoteViewer> | null>(null);
-const account = reactive<AccountState>({ authenticated: false, hosts: [], passkeys: [] });
+const account = reactive<AccountState>({ authenticated: false, accountId: null, hosts: [], passkeys: [] });
 const accountLoading = ref(true);
 const accountBusy = ref(false);
 const accountError = ref('');
@@ -75,7 +76,7 @@ const cursorStyle = reactive<CSSProperties>({});
 const performanceStats = reactive<PerformanceStats>({
   fps: 0,
   bitrateMbps: 0,
-  decodeQueueSize: 0,
+  dataRateKBps: 0,
   lossEvents: 0,
 });
 const touchPreferred = ref(false);
@@ -203,7 +204,7 @@ function leaveRemoteMode() {
   delete canvasStyle.height;
   delete canvasStyle.transform;
   delete canvasStyle.transformOrigin;
-  Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, decodeQueueSize: 0, lossEvents: 0 });
+  Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, dataRateKBps: 0, lossEvents: 0 });
   document.body.classList.remove('touch-control-active');
   releaseMobileDisplayFeatures();
   setRemoteActive(false);
@@ -406,6 +407,7 @@ async function refreshAccount() {
   try {
     const next = await getAccount();
     account.authenticated = next.authenticated;
+    account.accountId = next.accountId;
     account.hosts = next.hosts;
     account.passkeys = next.passkeys;
   } catch (error) {
@@ -432,14 +434,30 @@ function registerAccount() {
     const result = await createAccount();
     recoveryCode.value = result.recoveryCode ?? '';
     await refreshAccount();
+    showCredentialStorageWarning(result.credentialStored);
   });
 }
 
 function loginAccount() {
   return accountAction(async () => {
-    await login();
+    const result = await login();
     await refreshAccount();
+    showCredentialStorageWarning(result.credentialStored);
   });
+}
+
+function loginOtherAccount() {
+  return accountAction(async () => {
+    const result = await loginWithOtherPasskey();
+    await refreshAccount();
+    showCredentialStorageWarning(result.credentialStored);
+  });
+}
+
+function showCredentialStorageWarning(stored: boolean) {
+  if (!stored) {
+    accountError.value = '此浏览器无法保存本机 passkey 标识；退出后可能无法再次登录，请保存最新恢复码。';
+  }
 }
 
 function recover(code: string) {
@@ -447,6 +465,7 @@ function recover(code: string) {
     const result = await recoverAccount(code);
     recoveryCode.value = result.recoveryCode ?? '';
     await refreshAccount();
+    showCredentialStorageWarning(result.credentialStored);
   });
 }
 
@@ -474,8 +493,9 @@ function connectManagedHost(id: string) {
 
 function addAccountPasskey() {
   return accountAction(async () => {
-    await addPasskey();
+    const result = await addPasskey();
     await refreshAccount();
+    showCredentialStorageWarning(result.credentialStored);
   });
 }
 
@@ -549,6 +569,7 @@ onBeforeUnmount(() => {
         :busy="accountBusy"
         :error="accountError"
         @login="loginAccount"
+        @login-other="loginOtherAccount"
         @create="registerAccount"
         @recover="recover"
       />
@@ -583,6 +604,7 @@ onBeforeUnmount(() => {
         v-model:scale="scale"
         :hosts="account.hosts"
         :passkeys="account.passkeys"
+        :account-id="account.accountId"
         :busy="accountBusy || running"
         :error="accountError"
         @connect="connectManagedHost"

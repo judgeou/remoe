@@ -220,6 +220,7 @@ async function handleApi(request, response, url) {
     if (!userId) return json(response, 200, { authenticated: false });
     return json(response, 200, {
       authenticated: true,
+      accountId: userId,
       hosts: store.hostsForUser(userId).map(publicHost),
       passkeys: store.passkeysForUser(userId).map(publicPasskey),
     }, {
@@ -307,9 +308,13 @@ async function handleApi(request, response, url) {
 
   if (request.method === 'POST' && url.pathname === '/api/auth/login/options') {
     const body = await readJson(request);
-    const knownCredentials = localCredentialIds(body)
+    const requestedCredentialIds = localCredentialIds(body);
+    const knownCredentials = requestedCredentialIds
       .map((id) => store.passkeyById(id))
       .filter(Boolean);
+    if (requestedCredentialIds.length && !knownCredentials.length) {
+      throw Object.assign(new Error('Passkey is not registered'), { status: 400 });
+    }
     const options = await generateAuthenticationOptions({
       rpID: rpId,
       userVerification: 'required',

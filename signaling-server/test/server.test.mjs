@@ -145,6 +145,7 @@ test('assigns an authenticated managed Host without exposing an invite to the us
   });
   const account = await accountResponse.json();
   assert.equal(account.authenticated, true);
+  assert.equal(account.accountId, testUserId);
   assert.equal(account.hosts[0].online, true);
 
   const connectResponse = await fetch(
@@ -275,6 +276,13 @@ test('issues WebAuthn registration and discoverable login challenges', async () 
     type: 'public-key',
     transports: ['internal'],
   }]);
+
+  const unknownLoginResponse = await fetch(`http://127.0.0.1:${port}/api/auth/login/options`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ credentialIds: ['credential_unknown_123456789'] }),
+  });
+  assert.equal(unknownLoginResponse.status, 400);
+  assert.deepEqual(await unknownLoginResponse.json(), { error: 'Passkey is not registered' });
 });
 
 test('refreshes an authenticated login as a browser-session cookie', async () => {

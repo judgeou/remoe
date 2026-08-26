@@ -5,6 +5,7 @@ import type { HostSummary, PasskeySummary } from '../api';
 defineProps<{
   hosts: HostSummary[];
   passkeys: PasskeySummary[];
+  accountId: string | null;
   busy: boolean;
   error: string;
 }>();
@@ -91,7 +92,7 @@ function removeHost(host: HostSummary) {
 
     <details class="security-panel">
       <summary>账号与恢复</summary>
-      <p>已注册 {{ passkeys.length }} 个 passkey。恢复码丢失时，仍可在 Host 本机使用 <code>--repair</code>。</p>
+      <p>账号 <code>{{ accountId?.slice(0, 8) }}</code> · 已注册 {{ passkeys.length }} 个 passkey。恢复码丢失时，仍可在 Host 本机使用 <code>--repair</code>。</p>
       <div class="inline-actions">
         <button class="secondary small" :disabled="busy" @click="emit('addPasskey')">添加 passkey</button>
         <button class="secondary small" :disabled="busy" @click="emit('rotateRecovery')">生成新恢复码</button>
