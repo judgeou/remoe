@@ -75,6 +75,21 @@ cmake --build build --config Release
 
 生成文件为 `build/Release/remoe_host.exe`。
 
+### GitHub 自动构建与发布
+
+仓库中的 `.github/workflows/release.yml` 会在向 `main` 推送或提交 Pull Request 时自动执行
+Windows x64 Release 构建和原生测试。构建结果可从对应 GitHub Actions 运行记录的 Artifacts 中下载。
+
+推送以 `v` 开头的版本标签时，工作流还会创建 GitHub Release，并上传包含
+`remoe_host.exe`、可用时的 `remoe_client.exe` 以及本说明文件的 `remoe-windows-x64.zip`：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+发布新版本前需要同步更新 `CMakeLists.txt` 中 `project(... VERSION ...)` 的版本号。
+
 ## 运行
 
 `remoe_host.exe` 默认以当前用户权限运行；首次配置防火墙时会为规则安装弹出一次 UAC。若希望 host

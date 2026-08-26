@@ -1,0 +1,82 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Build Release
+        shell: cmd
+        run: build.cmd Release
+
+      - name: Run native tests
+        shell: pwsh
+        run: ctest --test-dir build-local -C Release --output-on-failure
+
+      - name: Package executables
+        shell: pwsh
+        run: |
+          $packageDir = "dist/remoe-windows-x64"
+          New-Item -ItemType Directory -Force $packageDir | Out-Null
+
+          Copy-Item "build-local/Release/remoe_host.exe" $packageDir
+          if (Test-Path "build-local/Release/remoe_client.exe") {
+            Copy-Item "build-local/Release/remoe_client.exe" $packageDir
+          }
+          Copy-Item "README.md" $packageDir
+
+          Compress-Archive `
+            -Path "$packageDir/*" `
+            -DestinationPath "dist/remoe-windows-x64.zip" `
+            -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: remoe-windows-x64
+          path: dist/remoe-windows-x64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: remoe-windows-x64
+          path: release-assets
+
+      - name: Create release and upload executable archive
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release-assets/remoe-windows-x64.zip
+          generate_release_notes: true
