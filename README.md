@@ -1,7 +1,8 @@
 # remoe
 
 `remoe_host` 是 Windows 桌面视频流 host 原型：使用 Desktop Duplication API 抓取指定显示器，
-通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 WebRTC 向一个 client 发送码流。视频、键鼠控制和
+优先通过 Intel oneVPL、不可用时通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 WebRTC 向一个
+client 发送码流。视频、键鼠控制和
 关键帧请求均使用 DataChannel，不需要知道或开放 host IP/端口。
 
 `remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
@@ -14,13 +15,15 @@
 - Windows 10/11 x64
 - Visual Studio 2022（Desktop development with C++）及 Windows 10/11 SDK
 - CMake 3.24+
-- 支持 AV1 NVENC 的 NVIDIA GPU 和兼容驱动（通常为 Ada Lovelace 或更新架构）
+- 支持 AV1 硬件编码的 Intel GPU 和当前 Intel 图形驱动；或作为回退，支持 AV1 NVENC 的
+  NVIDIA GPU 和兼容驱动（通常为 Ada Lovelace 或更新架构）
 - NVIDIA Video Codec SDK 13.0.37，默认路径：
   `third_party/NVENC_Video_Codec_SDK_13.0.37`
 - libdatachannel 0.24.5 及其固定版本子依赖，默认路径：
   `third_party/libdatachannel-0.24.5`
 - Mbed TLS 3.6.7 源码，默认路径：`third_party/mbedtls-3.6.7`
-- 构建 client 时需要 Intel oneVPL 2.x 源码，默认路径：`third_party/libvpl`
+- 构建 Intel host 编码器或 client 时需要 Intel oneVPL 2.10+ 源码，默认路径：
+  `third_party/libvpl`
 - 运行 client 时需要支持 AV1 硬件解码的 Intel GPU 和当前 Intel 图形驱动
 
 当前工程固定使用 NVENC API 13.0，以兼容本机驱动 596.49。若替换 SDK，所用 SDK 的 NVENC API
@@ -44,9 +47,10 @@
 “Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
 组件或单独安装的 Ninja 均可。
 
-当 `third_party/libvpl` 存在时还会生成 `build-local/Release/remoe_client.exe`。如果 oneVPL
-源码不在默认位置，可在手动配置 CMake 时传入 `-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时
-原有的 host-only 构建仍然可用。
+当 `third_party/libvpl` 存在时，host 会编入 Intel AV1 编码支持并生成
+`build-local/Release/remoe_client.exe`。如果 oneVPL 源码不在默认位置，可在手动配置 CMake 时
+传入 `-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时 host 仍可构建，但只使用 NVENC。NVENC DLL
+在发生回退时才动态加载，因此没有安装 NVIDIA 驱动不会影响 Intel 路径启动。
 
 libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
 WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed TLS，用于验证服务器证书链及
@@ -73,10 +77,15 @@ cmake --build build --config Release
 
 ## 运行
 
-`remoe_host.exe` 默认以当前用户权限运行，不会主动弹出 UAC。需要管理员权限时添加 `--admin`，
-程序会使用 Windows `runas` 重新启动自身；如果用户拒绝授权，host 不会运行。管理员权限可以减少
+`remoe_host.exe` 默认以当前用户权限运行；首次配置防火墙时会为规则安装弹出一次 UAC。若希望 host
+本身也以管理员权限运行，可添加 `--admin`，程序会使用 Windows `runas` 重新启动自身；如果用户拒绝
+授权，host 不会运行。管理员权限可以减少
 普通高完整性窗口的交互限制，但 Windows UAC 安全桌面仍属于隔离桌面，当前版本不能采集或远程操作
 安全桌面本身。
+
+首次正常启动时，host 会检查是否存在精确绑定当前 `remoe_host.exe` 路径的入站 UDP 防火墙规则。
+规则缺失、禁用或指向旧路径时会弹出一次 UAC 请求，随后创建适用于 Domain、Private 和 Public
+网络的 `remoe host WebRTC UDP` 程序规则。`--help` 和 `--check-encoder` 不触发该检查。
 
 启动 host（信令 URL 必填）：
 
@@ -94,6 +103,7 @@ cmake --build build --config Release
 | `--max-fps` | 不限制 | 可选的 client 最大帧率 |
 | `--max-bitrate` | 不限制 | 可选的 client 最大 CBR 码率，单位 Mbps |
 | `--admin` | 关闭 | 通过 UAC `runas` 重新启动为管理员进程 |
+| `--check-encoder` | 关闭 | 无需信令，采集并硬件编码一个 AV1 测试帧后退出 |
 | `--repair` | 关闭 | 在 Host 本机重新生成配对码、转移账号并轮换设备凭证 |
 | `--legacy-invite` | 关闭 | 兼容模式：自动生成并打印匿名邀请 URL |
 
@@ -284,7 +294,10 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 ## 源码结构
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
-- `src/main.cpp`：NVENC AV1 配置、采集/编码循环、键鼠注入与重连逻辑
+- `src/main.cpp`：采集/编码循环、键鼠注入与重连逻辑
+- `src/video_encoder.*`：AV1 编码器抽象与 Intel oneVPL → NVIDIA NVENC 选择策略
+- `src/vpl_encoder.cpp`：Intel oneVPL D3D11/NV12 AV1 硬件编码
+- `src/nvenc_encoder.cpp`、`src/nvenc_api_loader.cpp`：NVENC AV1 回退与驱动 DLL 延迟加载
 - `src/host_identity.*`：Host 长期设备凭证的 Windows DPAPI 持久化
 - `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
 - `src/webrtc_tcp_bootstrap.*`：信令帧编解码与协商状态机（同时供 WSS adapter 和测试复用）

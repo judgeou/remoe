@@ -1,12 +1,15 @@
 #include "desktop_capture.h"
 #include "host_identity.h"
 #include "protocol.h"
+#include "video_encoder.h"
 #include "webrtc_websocket_signaling.h"
 
-#include "NvEncoder/NvEncoderD3D11.h"
-
 #include <Windows.h>
+#include <netfw.h>
+#include <objbase.h>
+#include <oleauto.h>
 #include <shellapi.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +22,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -32,6 +36,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 std::atomic_bool g_running{true};
+constexpr wchar_t kFirewallRuleName[] = L"remoe host WebRTC UDP";
+constexpr long kFirewallProfiles = NET_FW_PROFILE2_DOMAIN |
+                                   NET_FW_PROFILE2_PRIVATE |
+                                   NET_FW_PROFILE2_PUBLIC;
 
 BOOL WINAPI console_handler(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
@@ -49,6 +57,7 @@ struct Options {
     std::string signaling_url;
     bool repair = false;
     bool legacy_invite = false;
+    bool check_encoder = false;
 };
 
 struct StreamSettings {
@@ -74,6 +83,17 @@ bool is_process_elevated() {
                                  std::to_string(error));
     }
     return elevation.TokenIsElevated != 0;
+}
+
+std::wstring current_executable_path() {
+    std::vector<wchar_t> executable(32768);
+    const DWORD size = GetModuleFileNameW(nullptr, executable.data(),
+                                         static_cast<DWORD>(executable.size()));
+    if (size == 0 || size == executable.size()) {
+        throw std::runtime_error("GetModuleFileNameW failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+    return std::wstring(executable.data(), size);
 }
 
 std::wstring quote_windows_argument(std::wstring_view argument) {
@@ -124,19 +144,13 @@ bool relaunch_as_admin_if_requested() {
 
     if (!requested || is_process_elevated()) return false;
 
-    std::vector<wchar_t> executable(32768);
-    const DWORD executable_size = GetModuleFileNameW(nullptr, executable.data(),
-                                                     static_cast<DWORD>(executable.size()));
-    if (executable_size == 0 || executable_size == executable.size()) {
-        throw std::runtime_error("GetModuleFileNameW failed, Win32 error " +
-                                 std::to_string(GetLastError()));
-    }
+    const std::wstring executable = current_executable_path();
 
     SHELLEXECUTEINFOW execute{};
     execute.cbSize = sizeof(execute);
     execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
     execute.lpVerb = L"runas";
-    execute.lpFile = executable.data();
+    execute.lpFile = executable.c_str();
     execute.lpParameters = parameters.c_str();
     execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) {
@@ -149,6 +163,184 @@ bool relaunch_as_admin_if_requested() {
     }
     if (execute.hProcess) CloseHandle(execute.hProcess);
     return true;
+}
+
+class ComInitialization {
+public:
+    ComInitialization() {
+        status_ = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(status_) && status_ != RPC_E_CHANGED_MODE) {
+            throw std::runtime_error("CoInitializeEx failed, HRESULT " +
+                                     std::to_string(static_cast<unsigned long>(status_)));
+        }
+    }
+    ~ComInitialization() {
+        if (SUCCEEDED(status_)) CoUninitialize();
+    }
+
+private:
+    HRESULT status_ = E_FAIL;
+};
+
+class ScopedBstr {
+public:
+    ScopedBstr() = default;
+    explicit ScopedBstr(const wchar_t* value) : value_(SysAllocString(value)) {
+        if (!value_) throw std::bad_alloc();
+    }
+    ~ScopedBstr() { SysFreeString(value_); }
+    ScopedBstr(const ScopedBstr&) = delete;
+    ScopedBstr& operator=(const ScopedBstr&) = delete;
+
+    [[nodiscard]] BSTR get() const noexcept { return value_; }
+    [[nodiscard]] BSTR* put() noexcept {
+        SysFreeString(value_);
+        value_ = nullptr;
+        return &value_;
+    }
+
+private:
+    BSTR value_ = nullptr;
+};
+
+Microsoft::WRL::ComPtr<INetFwPolicy2> firewall_policy() {
+    Microsoft::WRL::ComPtr<INetFwPolicy2> policy;
+    const HRESULT status = CoCreateInstance(__uuidof(NetFwPolicy2), nullptr,
+                                            CLSCTX_INPROC_SERVER,
+                                            IID_PPV_ARGS(&policy));
+    if (FAILED(status)) {
+        throw std::runtime_error("Unable to access Windows Firewall policy, HRESULT " +
+                                 std::to_string(static_cast<unsigned long>(status)));
+    }
+    return policy;
+}
+
+bool firewall_rule_is_current() {
+    ComInitialization com;
+    const auto policy = firewall_policy();
+    Microsoft::WRL::ComPtr<INetFwRules> rules;
+    if (FAILED(policy->get_Rules(&rules))) return false;
+
+    const ScopedBstr name(kFirewallRuleName);
+    Microsoft::WRL::ComPtr<INetFwRule> rule;
+    if (FAILED(rules->Item(name.get(), rule.GetAddressOf())) || !rule) return false;
+
+    ScopedBstr application;
+    NET_FW_RULE_DIRECTION direction{};
+    NET_FW_ACTION action{};
+    long protocol = 0;
+    long profiles = 0;
+    VARIANT_BOOL enabled = VARIANT_FALSE;
+    const bool valid =
+        SUCCEEDED(rule->get_ApplicationName(application.put())) &&
+        SUCCEEDED(rule->get_Direction(&direction)) &&
+        SUCCEEDED(rule->get_Action(&action)) &&
+        SUCCEEDED(rule->get_Protocol(&protocol)) &&
+        SUCCEEDED(rule->get_Profiles(&profiles)) &&
+        SUCCEEDED(rule->get_Enabled(&enabled));
+    const std::wstring executable = current_executable_path();
+    return valid && application.get() &&
+        _wcsicmp(application.get(), executable.c_str()) == 0 &&
+        direction == NET_FW_RULE_DIR_IN && action == NET_FW_ACTION_ALLOW &&
+        protocol == NET_FW_IP_PROTOCOL_UDP &&
+        (profiles & kFirewallProfiles) == kFirewallProfiles &&
+        enabled == VARIANT_TRUE;
+}
+
+int install_firewall_rule() {
+    try {
+        if (!is_process_elevated()) {
+            throw std::runtime_error(
+                "firewall rule installation requires administrator privileges");
+        }
+        ComInitialization com;
+        const auto policy = firewall_policy();
+        Microsoft::WRL::ComPtr<INetFwRules> rules;
+        HRESULT status = policy->get_Rules(&rules);
+        if (FAILED(status)) {
+            throw std::runtime_error("INetFwPolicy2::get_Rules failed, HRESULT " +
+                                     std::to_string(static_cast<unsigned long>(status)));
+        }
+
+        const ScopedBstr name(kFirewallRuleName);
+        // Replace a disabled or stale rule left after moving the executable.
+        (void)rules->Remove(name.get());
+
+        Microsoft::WRL::ComPtr<INetFwRule> rule;
+        status = CoCreateInstance(__uuidof(NetFwRule), nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&rule));
+        if (FAILED(status)) {
+            throw std::runtime_error("Unable to create Windows Firewall rule, HRESULT " +
+                                     std::to_string(static_cast<unsigned long>(status)));
+        }
+
+        const std::wstring executable = current_executable_path();
+        const ScopedBstr application(executable.c_str());
+        const ScopedBstr description(
+            L"Allows inbound WebRTC ICE/DTLS/SCTP UDP traffic for remoe host.");
+        status = rule->put_Name(name.get());
+        if (SUCCEEDED(status)) status = rule->put_Description(description.get());
+        if (SUCCEEDED(status)) status = rule->put_ApplicationName(application.get());
+        if (SUCCEEDED(status)) status = rule->put_Protocol(NET_FW_IP_PROTOCOL_UDP);
+        if (SUCCEEDED(status)) status = rule->put_Direction(NET_FW_RULE_DIR_IN);
+        if (SUCCEEDED(status)) status = rule->put_Action(NET_FW_ACTION_ALLOW);
+        if (SUCCEEDED(status)) status = rule->put_Profiles(kFirewallProfiles);
+        if (SUCCEEDED(status)) status = rule->put_EdgeTraversal(VARIANT_TRUE);
+        if (SUCCEEDED(status)) status = rule->put_Enabled(VARIANT_TRUE);
+        if (SUCCEEDED(status)) status = rules->Add(rule.Get());
+        if (FAILED(status)) {
+            throw std::runtime_error("Adding Windows Firewall rule failed, HRESULT " +
+                                     std::to_string(static_cast<unsigned long>(status)));
+        }
+        std::cout << "Windows Firewall rule installed for remoe_host UDP\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Firewall setup error: " << error.what() << '\n';
+        return 1;
+    }
+}
+
+void ensure_firewall_rule() {
+    if (firewall_rule_is_current()) return;
+
+    std::cout << "WebRTC UDP firewall rule is missing; requesting administrator permission...\n"
+              << std::flush;
+    if (is_process_elevated()) {
+        if (install_firewall_rule() != 0 || !firewall_rule_is_current()) {
+            throw std::runtime_error("Windows Firewall rule installation failed");
+        }
+        return;
+    }
+    const std::wstring executable = current_executable_path();
+    SHELLEXECUTEINFOW execute{};
+    execute.cbSize = sizeof(execute);
+    execute.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    execute.lpVerb = L"runas";
+    execute.lpFile = executable.c_str();
+    execute.lpParameters = L"--install-firewall-rule";
+    execute.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&execute)) {
+        const DWORD error = GetLastError();
+        if (error == ERROR_CANCELLED) {
+            throw std::runtime_error("Windows Firewall permission was cancelled");
+        }
+        throw std::runtime_error("Unable to launch firewall setup, Win32 error " +
+                                 std::to_string(error));
+    }
+    if (!execute.hProcess) {
+        throw std::runtime_error("Windows Firewall setup process did not start");
+    }
+    WaitForSingleObject(execute.hProcess, INFINITE);
+    DWORD exit_code = 1;
+    const BOOL got_exit_code = GetExitCodeProcess(execute.hProcess, &exit_code);
+    CloseHandle(execute.hProcess);
+    if (!got_exit_code || exit_code != 0) {
+        throw std::runtime_error("Windows Firewall rule installation failed");
+    }
+    if (!firewall_rule_is_current()) {
+        throw std::runtime_error("Windows Firewall rule was not installed correctly");
+    }
+    std::cout << "WebRTC UDP firewall rule is ready\n";
 }
 
 std::uint32_t parse_u32(std::string_view text, std::string_view name, std::uint32_t min,
@@ -168,7 +360,7 @@ std::uint32_t parse_u32(std::string_view text, std::string_view name, std::uint3
 
 void print_help() {
     std::cout <<
-        "remoe_host - Windows desktop AV1/NVENC streaming host\n\n"
+        "remoe_host - Windows desktop hardware AV1 streaming host\n\n"
         "Usage: remoe_host [options]\n"
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
@@ -176,6 +368,7 @@ void print_help() {
         "  --signal-url <ws(s)://...> WebSocket signaling URL (required)\n"
         "  --repair           Rebind this Host to an account and rotate its credential\n"
         "  --legacy-invite    Print an anonymous invite for the native client\n"
+        "  --check-encoder    Encode one test frame and exit (no signaling required)\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
         "  --help             Show this help\n";
@@ -198,6 +391,10 @@ Options parse_options(int argc, char** argv) {
             options.legacy_invite = true;
             continue;
         }
+        if (arg == "--check-encoder") {
+            options.check_encoder = true;
+            continue;
+        }
         if (i + 1 >= argc) throw std::runtime_error("missing value after " + std::string(arg));
         const std::string_view value(argv[++i]);
         if (arg == "--output") options.output = parse_u32(value, arg, 0, 63);
@@ -208,7 +405,7 @@ Options parse_options(int argc, char** argv) {
         } else if (arg == "--signal-url") options.signaling_url = value;
         else throw std::runtime_error("unknown option: " + std::string(arg));
     }
-    if (options.signaling_url.empty()) {
+    if (options.signaling_url.empty() && !options.check_encoder) {
         throw std::runtime_error("--signal-url is required");
     }
     if (options.repair && options.legacy_invite) {
@@ -217,42 +414,12 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-bool is_key_picture(NV_ENC_PIC_TYPE type) {
-    return type == NV_ENC_PIC_TYPE_IDR || type == NV_ENC_PIC_TYPE_I ||
-           type == NV_ENC_PIC_TYPE_SWITCH;
-}
-
-std::uint32_t read_le32(const std::uint8_t* bytes) {
-    return static_cast<std::uint32_t>(bytes[0]) |
-           (static_cast<std::uint32_t>(bytes[1]) << 8) |
-           (static_cast<std::uint32_t>(bytes[2]) << 16) |
-           (static_cast<std::uint32_t>(bytes[3]) << 24);
-}
-
-std::span<const std::uint8_t> unwrap_av1_ivf(const std::vector<std::uint8_t>& packet) {
-    std::size_t offset = 0;
-    if (packet.size() >= 4 && packet[0] == 'D' && packet[1] == 'K' &&
-        packet[2] == 'I' && packet[3] == 'F') {
-        if (packet.size() < 32) throw std::runtime_error("truncated IVF file header from NVENC wrapper");
-        offset = 32;
-    }
-    if (packet.size() < offset + 12) {
-        throw std::runtime_error("truncated IVF frame header from NVENC wrapper");
-    }
-    const std::uint32_t frame_size = read_le32(packet.data() + offset);
-    offset += 12;
-    if (frame_size != packet.size() - offset) {
-        throw std::runtime_error("invalid IVF frame size from NVENC wrapper");
-    }
-    return {packet.data() + offset, frame_size};
-}
-
 enum class VideoSendResult { Sent, Dropped, Failed };
 
 VideoSendResult send_packet(remoe::WebRtcTransport& transport,
-                            const NvEncOutputFrame& packet,
+                            const remoe::EncodedVideoFrame& packet,
                             std::uint64_t frame_number, std::uint64_t timestamp_us) {
-    const auto av1 = unwrap_av1_ivf(packet.frame);
+    const std::span<const std::uint8_t> av1(packet.data);
     if (av1.empty() || av1.size() > (std::numeric_limits<std::uint32_t>::max)()) {
         return VideoSendResult::Failed;
     }
@@ -265,7 +432,7 @@ VideoSendResult send_packet(remoe::WebRtcTransport& transport,
     header.frame_size = static_cast<std::uint32_t>(av1.size());
     header.frame_number = frame_number;
     header.timestamp_us = timestamp_us;
-    if (is_key_picture(packet.pictureType)) header.flags |= remoe::protocol::kFrameKey;
+    if (packet.key_frame) header.flags |= remoe::protocol::kFrameKey;
     std::vector<std::uint8_t> message(sizeof(header) + remoe::protocol::kVideoChunkPayloadSize);
     for (std::size_t offset = 0; offset < av1.size();
          offset += remoe::protocol::kVideoChunkPayloadSize) {
@@ -280,30 +447,6 @@ VideoSendResult send_packet(remoe::WebRtcTransport& transport,
         }
     }
     return VideoSendResult::Sent;
-}
-
-void configure_encoder(NvEncoderD3D11& encoder, const StreamSettings& settings) {
-    NV_ENC_INITIALIZE_PARAMS init{NV_ENC_INITIALIZE_PARAMS_VER};
-    NV_ENC_CONFIG config{NV_ENC_CONFIG_VER};
-    init.encodeConfig = &config;
-    encoder.CreateDefaultEncoderParams(&init, NV_ENC_CODEC_AV1_GUID, NV_ENC_PRESET_P1_GUID,
-                                       NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY);
-
-    init.frameRateNum = settings.fps;
-    init.frameRateDen = 1;
-    init.enablePTD = 1;
-    // Avoid periodic quality pulses at low bitrates. The client explicitly requests
-    // an IDR if it must discard stale frames.
-    init.encodeConfig->gopLength = NVENC_INFINITE_GOPLENGTH;
-    init.encodeConfig->frameIntervalP = 1;
-    init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-    init.encodeConfig->rcParams.averageBitRate = settings.bitrate_bps;
-    init.encodeConfig->rcParams.maxBitRate = init.encodeConfig->rcParams.averageBitRate;
-    init.encodeConfig->rcParams.vbvBufferSize = init.encodeConfig->rcParams.averageBitRate / settings.fps;
-    init.encodeConfig->rcParams.vbvInitialDelay = init.encodeConfig->rcParams.vbvBufferSize;
-    init.encodeConfig->encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-    init.encodeConfig->encodeCodecConfig.av1Config.repeatSeqHdr = 1;
-    encoder.CreateEncoder(&init);
 }
 
 bool validate_client_settings(const remoe::protocol::ClientConfig& request,
@@ -441,6 +584,31 @@ int run(const Options& options) {
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
               << remoe::protocol::kVersion << ")\n";
     remoe::DesktopCapture capture(options.output);
+    if (options.check_encoder) {
+        const std::uint32_t width = scaled_dimension(capture.width(), 100);
+        const std::uint32_t height = scaled_dimension(capture.height(), 100);
+        auto encoder = remoe::create_preferred_av1_encoder(
+            capture.device(), width, height, 60, 20'000'000);
+        capture.use_device(encoder->device());
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            ID3D11Texture2D* texture = encoder->input_texture();
+            if (!capture.acquire(texture, width, height, std::chrono::milliseconds(250))) {
+                encoder->discard_input();
+                continue;
+            }
+            auto frames = encoder->encode(true);
+            if (frames.empty()) frames = encoder->drain();
+            if (frames.empty() || frames.front().data.empty()) {
+                throw std::runtime_error("AV1 encoder produced no test frame");
+            }
+            std::cout << "AV1 encoder check passed: " << frames.front().data.size()
+                      << " bytes, " << (frames.front().key_frame ? "key frame" : "frame")
+                      << '\n';
+            return 0;
+        }
+        throw std::runtime_error("desktop capture timed out during AV1 encoder check");
+    }
+    ensure_firewall_rule();
     std::optional<remoe::ManagedHostIdentity> host_identity;
     std::string signaling_invite;
     if (options.legacy_invite) {
@@ -645,9 +813,10 @@ int run(const Options& options) {
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
 
-        NvEncoderD3D11 encoder(capture.device(), encoded_width, encoded_height,
-                               NV_ENC_BUFFER_FORMAT_ARGB, 0);
-        configure_encoder(encoder, settings);
+        auto encoder = remoe::create_preferred_av1_encoder(
+            capture.device(), encoded_width, encoded_height,
+            settings.fps, settings.bitrate_bps);
+        capture.use_device(encoder->device());
         std::cout << "Client requested: " << settings.fps << " fps, "
                   << settings.bitrate_bps / 1'000'000.0 << " Mbps, "
                   << settings.scale_percent << "% resolution (" << encoded_width << 'x'
@@ -660,7 +829,6 @@ int run(const Options& options) {
         stream_header.bitrate_bps = settings.bitrate_bps;
         if (!control_channel->send_binary(std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t*>(&stream_header), sizeof(stream_header)))) {
-            encoder.DestroyEncoder();
             continue;
         }
 
@@ -671,7 +839,6 @@ int run(const Options& options) {
             }
         }
         if (!g_running || !session_running) {
-            encoder.DestroyEncoder();
             control_channel->close();
             continue;
         }
@@ -680,18 +847,17 @@ int run(const Options& options) {
         auto next_frame = Clock::now();
         while (g_running && session_running && control_channel->is_open()) {
             next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
-            const NvEncInputFrame* input = encoder.GetNextInputFrame();
-            auto* texture = static_cast<ID3D11Texture2D*>(input->inputPtr);
-            if (!capture.acquire(texture, std::chrono::milliseconds(100))) continue;
-
-            NV_ENC_PIC_PARAMS picture{NV_ENC_PIC_PARAMS_VER};
-            if (first_input || key_frame_requested.exchange(false)) {
-                picture.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
-                first_input = false;
+            ID3D11Texture2D* texture = encoder->input_texture();
+            if (!capture.acquire(texture, encoded_width, encoded_height,
+                                 std::chrono::milliseconds(100))) {
+                encoder->discard_input();
+                continue;
             }
 
-            std::vector<NvEncOutputFrame> packets;
-            encoder.EncodeFrame(packets, &picture);
+            const bool force_key_frame =
+                first_input || key_frame_requested.exchange(false);
+            first_input = false;
+            auto packets = encoder->encode(force_key_frame);
             const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count();
             bool failed = false;
             for (const auto& packet : packets) {
@@ -716,9 +882,7 @@ int run(const Options& options) {
             std::lock_guard lock(input_mutex);
             release_remote_inputs(pressed_keys, pressed_buttons);
         }
-        std::vector<NvEncOutputFrame> pending;
-        encoder.EndEncode(pending);
-        encoder.DestroyEncoder();
+        encoder->drain();
         std::cout << "Client disconnected\n";
     }
     return 0;
@@ -728,10 +892,13 @@ int run(const Options& options) {
 
 int main(int argc, char** argv) {
     try {
+        for (int index = 1; index < argc; ++index) {
+            if (std::string_view(argv[index]) == "--install-firewall-rule") {
+                return install_firewall_rule();
+            }
+        }
         if (relaunch_as_admin_if_requested()) return 0;
         return run(parse_options(argc, argv));
-    } catch (const NVENCException& error) {
-        std::cerr << "NVENC error: " << error.what() << " (code " << error.getErrorCode() << ")\n";
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';
     }

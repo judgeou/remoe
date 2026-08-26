@@ -60,12 +60,51 @@ DesktopCapture::DesktopCapture(std::uint32_t output_index) : output_index_(outpu
     create_duplication();
 }
 
+void DesktopCapture::use_device(ID3D11Device* device) {
+    if (!device) throw std::runtime_error("cannot capture with a null D3D11 device");
+    if (device == device_.Get()) return;
+
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+    check_hr(device->QueryInterface(IID_PPV_ARGS(&dxgi_device)), "Query IDXGIDevice");
+    Microsoft::WRL::ComPtr<IDXGIAdapter> device_adapter;
+    check_hr(dxgi_device->GetAdapter(&device_adapter), "IDXGIDevice::GetAdapter");
+    DXGI_ADAPTER_DESC device_description{};
+    DXGI_ADAPTER_DESC1 capture_description{};
+    check_hr(device_adapter->GetDesc(&device_description), "IDXGIAdapter::GetDesc");
+    check_hr(adapter_->GetDesc1(&capture_description), "IDXGIAdapter1::GetDesc1");
+    if (device_description.AdapterLuid.HighPart != capture_description.AdapterLuid.HighPart ||
+        device_description.AdapterLuid.LowPart != capture_description.AdapterLuid.LowPart) {
+        throw std::runtime_error("encoder D3D11 device belongs to a different display adapter");
+    }
+
+    duplication_.Reset();
+    video_processor_.Reset();
+    video_enumerator_.Reset();
+    video_context_.Reset();
+    video_device_.Reset();
+    context_.Reset();
+    device_ = device;
+    device_->GetImmediateContext(&context_);
+    if (!context_) throw std::runtime_error("ID3D11Device::GetImmediateContext failed");
+    check_hr(device_.As(&video_device_), "Query ID3D11VideoDevice");
+    check_hr(context_.As(&video_context_), "Query ID3D11VideoContext");
+    scaler_source_width_ = 0;
+    scaler_source_height_ = 0;
+    scaler_destination_width_ = 0;
+    scaler_destination_height_ = 0;
+    scaler_source_format_ = DXGI_FORMAT_UNKNOWN;
+    scaler_destination_format_ = DXGI_FORMAT_UNKNOWN;
+    create_duplication();
+}
+
 void DesktopCapture::create_duplication() {
     duplication_.Reset();
     check_hr(output_->DuplicateOutput(device_.Get(), &duplication_), "IDXGIOutput1::DuplicateOutput");
 }
 
-bool DesktopCapture::acquire(ID3D11Texture2D* destination, std::chrono::milliseconds timeout) {
+bool DesktopCapture::acquire(ID3D11Texture2D* destination, std::uint32_t content_width,
+                             std::uint32_t content_height,
+                             std::chrono::milliseconds timeout) {
     DXGI_OUTDUPL_FRAME_INFO frame_info{};
     Microsoft::WRL::ComPtr<IDXGIResource> resource;
     HRESULT hr = duplication_->AcquireNextFrame(static_cast<UINT>(timeout.count()), &frame_info, &resource);
@@ -87,23 +126,32 @@ bool DesktopCapture::acquire(ID3D11Texture2D* destination, std::chrono::millisec
     D3D11_TEXTURE2D_DESC destination_description{};
     source->GetDesc(&source_description);
     destination->GetDesc(&destination_description);
-    if (source_description.Width == destination_description.Width &&
-        source_description.Height == destination_description.Height) {
+    if (source_description.Width == content_width &&
+        source_description.Height == content_height &&
+        destination_description.Width == content_width &&
+        destination_description.Height == content_height &&
+        source_description.Format == destination_description.Format) {
         context_->CopyResource(destination, source.Get());
     } else {
         scale_texture(source.Get(), destination, source_description.Width, source_description.Height,
-                      destination_description.Width, destination_description.Height);
+                      content_width, content_height, source_description.Format,
+                      destination_description.Format);
     }
     return true;
 }
 
 void DesktopCapture::scale_texture(ID3D11Texture2D* source, ID3D11Texture2D* destination,
                                    std::uint32_t source_width, std::uint32_t source_height,
-                                   std::uint32_t destination_width, std::uint32_t destination_height) {
+                                   std::uint32_t destination_width,
+                                   std::uint32_t destination_height,
+                                   DXGI_FORMAT source_format,
+                                   DXGI_FORMAT destination_format) {
     if (!video_processor_ || source_width != scaler_source_width_ ||
         source_height != scaler_source_height_ ||
         destination_width != scaler_destination_width_ ||
-        destination_height != scaler_destination_height_) {
+        destination_height != scaler_destination_height_ ||
+        source_format != scaler_source_format_ ||
+        destination_format != scaler_destination_format_) {
         video_processor_.Reset();
         video_enumerator_.Reset();
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC description{};
@@ -123,6 +171,8 @@ void DesktopCapture::scale_texture(ID3D11Texture2D* source, ID3D11Texture2D* des
         scaler_source_height_ = source_height;
         scaler_destination_width_ = destination_width;
         scaler_destination_height_ = destination_height;
+        scaler_source_format_ = source_format;
+        scaler_destination_format_ = destination_format;
     }
 
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_description{};
