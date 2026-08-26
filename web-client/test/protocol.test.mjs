@@ -4,6 +4,7 @@ import {
   MAGIC,
   SIGNAL_TYPE,
   SignalFrameBuffer,
+  VideoDecodeGate,
   VideoFrameAssembler,
   decodeStreamHeader,
   encodeClientConfig,
@@ -73,6 +74,60 @@ test('reassembles an AV1 frame arriving out of chunk order', () => {
   const result = assembler.consume(makeChunk(0, 16_384)).frame;
   assert.equal(result.frameNumber, 42n);
   assert.deepEqual(result.data, frame);
+});
+
+test('ignores delayed chunks from frames discarded during decoder recovery', () => {
+  const assembler = new VideoFrameAssembler();
+  const chunk = (frameNumber) => {
+    const bytes = new Uint8Array(37);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, MAGIC.videoChunk, true);
+    view.setUint16(4, 7, true);
+    view.setUint16(6, 36, true);
+    view.setBigUint64(12, frameNumber, true);
+    view.setBigUint64(20, frameNumber * 1_000n, true);
+    view.setUint32(28, 1, true);
+    bytes[36] = Number(frameNumber);
+    return bytes;
+  };
+
+  assert.equal(assembler.consume(chunk(10n)).frame.frameNumber, 10n);
+  assembler.clear();
+  assert.deepEqual(assembler.consume(chunk(9n)), { frame: null, lossDetected: false });
+  assert.equal(assembler.consume(chunk(11n)).frame.frameNumber, 11n);
+});
+
+test('stops delta-frame decoding across loss until a key frame arrives', () => {
+  const gate = new VideoDecodeGate();
+  const frame = (frameNumber, key = false) => ({
+    frameNumber,
+    flags: key ? 1 : 0,
+  });
+
+  assert.equal(gate.evaluate(frame(40n, true)).frame.frameNumber, 40n);
+  assert.equal(gate.evaluate(frame(41n)).frame.frameNumber, 41n);
+
+  const gap = gate.evaluate(frame(43n));
+  assert.equal(gap.frame, null);
+  assert.equal(gap.recoveryStarted, true);
+  assert.deepEqual(gate.evaluate(frame(44n)), { frame: null, recoveryStarted: false });
+
+  const recovered = gate.evaluate(frame(45n, true));
+  assert.equal(recovered.frame.frameNumber, 45n);
+  assert.equal(gate.evaluate(frame(46n)).frame.frameNumber, 46n);
+});
+
+test('treats an evicted incomplete frame as loss even without a number gap', () => {
+  const gate = new VideoDecodeGate();
+  const key = { frameNumber: 1n, flags: 1 };
+  const delta = { frameNumber: 2n, flags: 0 };
+
+  assert.equal(gate.evaluate(key).frame, key);
+  assert.deepEqual(gate.evaluate(delta, true), { frame: null, recoveryStarted: true });
+  assert.deepEqual(gate.evaluate({ frameNumber: 3n, flags: 0 }), {
+    frame: null,
+    recoveryStarted: false,
+  });
 });
 
 test('accepts native and browser-shaped invite URLs without exposing the fragment', () => {

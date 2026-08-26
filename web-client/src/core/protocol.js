@@ -202,10 +202,19 @@ export function decodeVideoChunk(value) {
 export class VideoFrameAssembler {
   #frames = new Map();
   #newest = 0n;
+  #discardThrough = -1n;
+
+  clear() {
+    this.#frames.clear();
+    this.#discardThrough = this.#newest;
+  }
 
   consume(value) {
     const chunk = decodeVideoChunk(value);
     if (chunk.frameNumber > this.#newest) this.#newest = chunk.frameNumber;
+    if (chunk.frameNumber <= this.#discardThrough) {
+      return { frame: null, lossDetected: false };
+    }
     let assembly = this.#frames.get(chunk.frameNumber);
     const chunkCount = Math.ceil(chunk.frameSize / VIDEO_CHUNK_PAYLOAD_SIZE);
     if (!assembly) {
@@ -246,6 +255,41 @@ export class VideoFrameAssembler {
       },
       lossDetected,
     };
+  }
+}
+
+// AV1 delta frames depend on earlier reference frames. Once a frame is missing,
+// feeding later delta frames to WebCodecs can produce visible corruption instead
+// of a decode error, so hold them until the host supplies a fresh key frame.
+export class VideoDecodeGate {
+  #lastFrame = -1n;
+  #waitingForKeyFrame = true;
+
+  evaluate(frame, lossDetected = false) {
+    let recoveryStarted = false;
+    if (lossDetected && !this.#waitingForKeyFrame) {
+      this.#waitingForKeyFrame = true;
+      recoveryStarted = true;
+    }
+
+    if (!frame || frame.frameNumber <= this.#lastFrame) {
+      return { frame: null, recoveryStarted };
+    }
+
+    if (this.#lastFrame >= 0n && frame.frameNumber !== this.#lastFrame + 1n &&
+        !this.#waitingForKeyFrame) {
+      this.#waitingForKeyFrame = true;
+      recoveryStarted = true;
+    }
+
+    const keyFrame = (frame.flags & FRAME_FLAG_KEY) !== 0;
+    if (this.#waitingForKeyFrame) {
+      if (!keyFrame) return { frame: null, recoveryStarted };
+      this.#waitingForKeyFrame = false;
+    }
+
+    this.#lastFrame = frame.frameNumber;
+    return { frame, recoveryStarted };
   }
 }
 

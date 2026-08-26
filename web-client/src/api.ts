@@ -85,6 +85,21 @@ function isCredentialManagerFailure(error: unknown): boolean {
     candidate.message.toLowerCase().includes('credential manager'));
 }
 
+function isPreviouslyRegistered(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const candidate = error as Error & { code?: string };
+  return candidate.code === 'ERROR_AUTHENTICATOR_PREVIOUSLY_REGISTERED' ||
+    candidate.name === 'InvalidStateError' ||
+    (candidate.cause instanceof Error && candidate.cause.name === 'InvalidStateError');
+}
+
+function readableRegistrationError(error: unknown): Error {
+  if (isPreviouslyRegistered(error)) {
+    return new Error('这台设备已有该账号的 passkey，请直接使用 passkey 登录');
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -108,7 +123,16 @@ export async function getAccount(): Promise<AccountState> {
   };
 }
 
-async function finishRegistration(optionsPath: string, body?: object) {
+async function authenticate(credentialIds: string[]) {
+  const options = await request<PublicKeyCredentialRequestOptionsJSON>('/api/auth/login/options', {
+    method: 'POST', body: JSON.stringify({ credentialIds }),
+  });
+  const credential = await startAuthentication({ optionsJSON: options });
+  await request('/api/auth/login/verify', { method: 'POST', body: JSON.stringify(credential) });
+  rememberCredentialId(credential.id);
+}
+
+async function finishRegistration(optionsPath: string, body?: object, loginOnDuplicate = false) {
   const optionsFor = (compatibilityMode: boolean) =>
     request<PublicKeyCredentialCreationOptionsJSON>(optionsPath, {
       method: 'POST', body: JSON.stringify({ ...body, compatibilityMode }),
@@ -117,13 +141,21 @@ async function finishRegistration(optionsPath: string, body?: object) {
   let options = await optionsFor(compatibilityMode);
   let credential;
   try {
-    credential = await startRegistration({ optionsJSON: options });
+    try {
+      credential = await startRegistration({ optionsJSON: options });
+    } catch (error) {
+      if (compatibilityMode || !isCredentialManagerFailure(error)) throw error;
+      compatibilityMode = true;
+      rememberCompatibilityMode();
+      options = await optionsFor(true);
+      credential = await startRegistration({ optionsJSON: options });
+    }
   } catch (error) {
-    if (compatibilityMode || !isCredentialManagerFailure(error)) throw error;
-    compatibilityMode = true;
-    rememberCompatibilityMode();
-    options = await optionsFor(true);
-    credential = await startRegistration({ optionsJSON: options });
+    if (!loginOnDuplicate || !isPreviouslyRegistered(error)) {
+      throw readableRegistrationError(error);
+    }
+    await authenticate((options.excludeCredentials ?? []).map(({ id }) => id));
+    return { verified: true, recoveryCode: null };
   }
   const result = await request<{ verified: boolean; recoveryCode: string | null }>(
     '/api/auth/register/verify', {
@@ -136,15 +168,11 @@ async function finishRegistration(optionsPath: string, body?: object) {
 
 export const createAccount = () => finishRegistration('/api/auth/register/options');
 export const addPasskey = () => finishRegistration('/api/auth/register/options');
-export const recoverAccount = (code: string) => finishRegistration('/api/recovery/options', { code });
+export const recoverAccount = (code: string) =>
+  finishRegistration('/api/recovery/options', { code }, true);
 
 export async function login() {
-  const options = await request<PublicKeyCredentialRequestOptionsJSON>('/api/auth/login/options', {
-    method: 'POST', body: JSON.stringify({ credentialIds: storedCredentialIds() }),
-  });
-  const credential = await startAuthentication({ optionsJSON: options });
-  await request('/api/auth/login/verify', { method: 'POST', body: JSON.stringify(credential) });
-  rememberCredentialId(credential.id);
+  await authenticate(storedCredentialIds());
 }
 
 export const logout = () => request('/api/auth/logout', { method: 'POST', body: '{}' });

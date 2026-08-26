@@ -2,6 +2,7 @@ import {
   FRAME_FLAG_KEY,
   SIGNAL_TYPE,
   SignalFrameBuffer,
+  VideoDecodeGate,
   VideoFrameAssembler,
   av1CodecString,
   decodeStreamHeader,
@@ -67,7 +68,9 @@ export class RemoeBrowserClient {
   #control = null;
   #video = null;
   #decoder = null;
+  #decoderConfig = null;
   #assembler = new VideoFrameAssembler();
+  #decodeGate = new VideoDecodeGate();
   #signalBuffer = new SignalFrameBuffer();
   #pendingCandidates = [];
   #remoteDescription = false;
@@ -80,8 +83,7 @@ export class RemoeBrowserClient {
   #bootstrapComplete = false;
   #streamStarted = false;
   #stopped = false;
-  #lastKeyFrameRequest = 0;
-  #lastDecodedFrame = -1n;
+  #lastKeyFrameRequest = Number.NEGATIVE_INFINITY;
   #inputSequence = 0;
   #inputReady = false;
   #statsStartedAt = 0;
@@ -270,7 +272,8 @@ export class RemoeBrowserClient {
       },
       error: (error) => this.#fail(new Error(`AV1 解码失败：${error.message}`)),
     });
-    this.#decoder.configure(support.config ?? config);
+    this.#decoderConfig = support.config ?? config;
+    this.#decoder.configure(this.#decoderConfig);
     this.#statsStartedAt = performance.now();
     this.#statsBytes = 0;
     this.#statsFrames = 0;
@@ -286,17 +289,20 @@ export class RemoeBrowserClient {
       const bytes = toBytes(value);
       this.#statsBytes += bytes.byteLength;
       const { frame, lossDetected } = this.#assembler.consume(bytes);
-      if (lossDetected) {
+      const decision = this.#decodeGate.evaluate(frame, lossDetected);
+      if (decision.recoveryStarted) {
         this.#statsLossEvents += 1;
+        this.#assembler.clear();
+        this.#decoder?.reset();
+        if (this.#decoder && this.#decoderConfig) this.#decoder.configure(this.#decoderConfig);
         this.#requestKeyFrame();
       }
       this.#maybeReportStats();
-      if (!frame || !this.#decoder || frame.frameNumber <= this.#lastDecodedFrame) return;
-      this.#lastDecodedFrame = frame.frameNumber;
+      if (!decision.frame || !this.#decoder) return;
       this.#decoder.decode(new EncodedVideoChunk({
-        type: (frame.flags & FRAME_FLAG_KEY) ? 'key' : 'delta',
-        timestamp: Number(frame.timestampUs),
-        data: frame.data,
+        type: (decision.frame.flags & FRAME_FLAG_KEY) ? 'key' : 'delta',
+        timestamp: Number(decision.frame.timestampUs),
+        data: decision.frame.data,
       }));
     } catch (error) {
       this.#fail(error);

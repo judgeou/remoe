@@ -142,10 +142,17 @@ canvas { display: block; width: 100%; height: auto; }
   width: 22px;
   height: 30px;
   transform: translate(-2px, -2px);
+  background: #000;
+  clip-path: polygon(0 0, 0 78%, 24% 61%, 42% 100%, 57% 92%, 40% 57%, 78% 57%);
+  filter: drop-shadow(1px 2px 1px rgba(0, 0, 0, .7));
+  pointer-events: none;
+}
+.remote-cursor::after {
+  position: absolute;
+  inset: 2px;
+  content: '';
   background: #fff;
   clip-path: polygon(0 0, 0 78%, 24% 61%, 42% 100%, 57% 92%, 40% 57%, 78% 57%);
-  filter: drop-shadow(0 0 1px #000) drop-shadow(1px 2px 1px rgba(0, 0, 0, .85));
-  pointer-events: none;
 }
 
 body.remote-active { overflow: hidden; background: #000; }
