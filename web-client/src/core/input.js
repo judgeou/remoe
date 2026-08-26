@@ -48,6 +48,8 @@ const mouseTypes = new Map([
   [4, INPUT_TYPE.mouseX2],
 ]);
 
+const twoFingerThreshold = 8;
+
 const printableKeys = new Map();
 for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
   printableKeys.set(letter, [`Key${letter.toUpperCase()}`, false]);
@@ -82,6 +84,7 @@ export class RemoteInputController {
   #send;
   #onActiveChanged;
   #onPointerMoved;
+  #onViewportGesture;
   #active = false;
   #pressedKeys = new Map();
   #pressedButtons = new Set();
@@ -100,12 +103,17 @@ export class RemoteInputController {
    * @param {(event: {type: number, flags?: number, value1?: number, value2?: number}) => boolean} send
    * @param {(active: boolean) => void} onActiveChanged
    * @param {(position: {x: number, y: number}) => void} onPointerMoved
+   * @param {(gesture: ({type: 'pan', deltaX: number, deltaY: number} |
+   *   {type: 'pinch', scale: number, clientX: number, clientY: number,
+   *    deltaX: number, deltaY: number})) => boolean} onViewportGesture
    */
-  constructor(canvas, send, onActiveChanged = () => {}, onPointerMoved = () => {}) {
+  constructor(canvas, send, onActiveChanged = () => {}, onPointerMoved = () => {},
+              onViewportGesture = () => false) {
     this.#canvas = canvas;
     this.#send = send;
     this.#onActiveChanged = onActiveChanged;
     this.#onPointerMoved = onPointerMoved;
+    this.#onViewportGesture = onViewportGesture;
     this.#listen(document, 'pointerlockchange', () => this.#pointerLockChanged());
     this.#listen(document, 'mousemove', (event) => this.#mouseMove(event));
     this.#listen(document, 'mousedown', (event) => this.#mouseButton(event, false));
@@ -311,7 +319,15 @@ export class RemoteInputController {
 
     if (this.#touches.size >= 2) {
       this.#touchGesture.maxPointers = 2;
-      this.#touchGesture.lastCenter = this.#touchCenter();
+      const center = this.#touchCenter();
+      const spread = this.#touchSpread();
+      Object.assign(this.#touchGesture, {
+        lastCenter: center,
+        twoFingerStartCenter: center,
+        lastSpread: spread,
+        startSpread: spread,
+        twoFingerMode: null,
+      });
       if (this.#touchDrag) {
         this.#send({ type: INPUT_TYPE.mouseLeft, flags: INPUT_FLAG_RELEASE });
         this.#pressedButtons.delete(INPUT_TYPE.mouseLeft);
@@ -346,11 +362,41 @@ export class RemoteInputController {
       this.#moveRelative(deltaX, deltaY);
     } else if (this.#touches.size >= 2 && this.#touchGesture) {
       const center = this.#touchCenter();
-      const scrollX = Math.round((center.x - this.#touchGesture.lastCenter.x) * 3);
-      const scrollY = Math.round((center.y - this.#touchGesture.lastCenter.y) * 3);
+      const spread = this.#touchSpread();
+      const gesture = this.#touchGesture;
+      if (!gesture.twoFingerMode) {
+        const pan = Math.hypot(
+          center.x - gesture.twoFingerStartCenter.x,
+          center.y - gesture.twoFingerStartCenter.y,
+        );
+        const pinch = Math.abs(spread - gesture.startSpread);
+        if (Math.max(pan, pinch) >= twoFingerThreshold) {
+          gesture.twoFingerMode = pinch > pan ? 'pinch' : 'scroll';
+        }
+      }
+
+      const deltaX = center.x - gesture.lastCenter.x;
+      const deltaY = center.y - gesture.lastCenter.y;
+      if (gesture.twoFingerMode === 'scroll') {
+        const consumed = this.#onViewportGesture({ type: 'pan', deltaX, deltaY });
+        if (!consumed) {
+          const scrollX = Math.round(deltaX * 3);
+          const scrollY = Math.round(deltaY * 3);
+          if (scrollY) this.#send({ type: INPUT_TYPE.mouseWheel, value1: scrollY });
+          if (scrollX) this.#send({ type: INPUT_TYPE.mouseHorizontalWheel, value1: scrollX });
+        }
+      } else if (gesture.twoFingerMode === 'pinch' && gesture.lastSpread > 0 && spread > 0) {
+        this.#onViewportGesture({
+          type: 'pinch',
+          scale: spread / gesture.lastSpread,
+          clientX: center.x,
+          clientY: center.y,
+          deltaX,
+          deltaY,
+        });
+      }
       this.#touchGesture.lastCenter = center;
-      if (scrollY) this.#send({ type: INPUT_TYPE.mouseWheel, value1: scrollY });
-      if (scrollX) this.#send({ type: INPUT_TYPE.mouseHorizontalWheel, value1: scrollX });
+      this.#touchGesture.lastSpread = spread;
     }
   }
 
@@ -380,7 +426,8 @@ export class RemoteInputController {
       this.#touchDrag = false;
     } else if (this.#touchGesture) {
       const elapsed = performance.now() - this.#touchGesture.startedAt;
-      if (elapsed < 500 && this.#touchGesture.distance < 18) {
+      if (!this.#touchGesture.twoFingerMode && elapsed < 500 &&
+          this.#touchGesture.distance < 18) {
         if (this.#touchGesture.maxPointers === 2) {
           this.tapMouseButton('right');
           this.#lastTap = null;
@@ -405,6 +452,12 @@ export class RemoteInputController {
       y += point.y;
     }
     return { x: x / this.#touches.size, y: y / this.#touches.size };
+  }
+
+  #touchSpread() {
+    const points = [...this.#touches.values()];
+    if (points.length < 2) return 0;
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
   }
 
   #mouseButton(event, release) {

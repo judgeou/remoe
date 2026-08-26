@@ -172,9 +172,18 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
   globalThis.window = fakeWindow;
 
   const inputs = [];
+  const viewportGestures = [];
+  let viewportZoomed = false;
   const controller = new RemoteInputController(canvas, (event) => {
     inputs.push(event);
     return true;
+  }, undefined, undefined, (gesture) => {
+    if (gesture.type === 'pinch') viewportZoomed = true;
+    if (gesture.type === 'pinch' || viewportZoomed) {
+      viewportGestures.push(gesture);
+      return true;
+    }
+    return false;
   });
   const pointer = (type, id, x, y) => {
     const event = new Event(type, { cancelable: true });
@@ -204,6 +213,38 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
     assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x2a));
     assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x1e));
     assert.ok(inputs.some((event) => event.type === 9 && event.value1 === 0x35));
+
+    controller.setTouchMode('trackpad');
+    inputs.length = 0;
+    pointer('pointerdown', 10, 30, 25);
+    pointer('pointerdown', 11, 70, 25);
+    pointer('pointermove', 11, 85, 25);
+    pointer('pointerup', 11, 85, 25);
+    pointer('pointerup', 10, 30, 25);
+    assert.equal(inputs.length, 0);
+    assert.ok(viewportGestures.some((gesture) =>
+      gesture.type === 'pinch' && gesture.scale > 1));
+
+    inputs.length = 0;
+    viewportGestures.length = 0;
+    pointer('pointerdown', 12, 20, 20);
+    pointer('pointerdown', 13, 40, 20);
+    pointer('pointermove', 12, 20, 30);
+    pointer('pointermove', 13, 40, 30);
+    pointer('pointerup', 13, 40, 30);
+    pointer('pointerup', 12, 20, 30);
+    assert.equal(inputs.length, 0);
+    assert.ok(viewportGestures.some((gesture) => gesture.type === 'pan'));
+
+    inputs.length = 0;
+    viewportZoomed = false;
+    pointer('pointerdown', 14, 20, 20);
+    pointer('pointerdown', 15, 40, 20);
+    pointer('pointermove', 14, 20, 30);
+    pointer('pointermove', 15, 40, 30);
+    pointer('pointerup', 15, 40, 30);
+    pointer('pointerup', 14, 20, 30);
+    assert.ok(inputs.some((event) => event.type === 7 && event.value1 > 0));
 
     inputs.length = 0;
     controller.setTouchMode('direct');

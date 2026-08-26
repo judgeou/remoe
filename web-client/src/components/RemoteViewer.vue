@@ -22,6 +22,7 @@ defineProps<{
   fullscreenActive: boolean;
   orientationLocked: boolean;
   wakeLockEnabled: boolean;
+  viewportZoom: number;
 }>();
 
 const emit = defineEmits<{
@@ -35,6 +36,7 @@ const emit = defineEmits<{
   fullscreen: [];
   orientation: [];
   wakeLock: [];
+  resetViewport: [];
 }>();
 
 const canvas = ref<HTMLCanvasElement | null>(null);
@@ -180,7 +182,7 @@ defineExpose({
         <div v-show="showMobilePanel" class="mobile-panel">
           <p class="touch-help">
             {{ touchMode === 'trackpad'
-              ? '单指移动/点击 · 双击拖动 · 双指滚动/右键'
+              ? '单指移动/点击 · 双击拖动 · 双指滚动/缩放；放大后拖动画面 · 双指轻点右键'
               : '点击定位 · 按住拖动；可用键盘面板中的右键按钮' }}
           </p>
           <div class="mobile-display-actions">
@@ -188,6 +190,9 @@ defineExpose({
           <button type="button" :class="{ active: orientationLocked }" @click="emit('orientation')">横屏</button>
           <button type="button" :class="{ active: wakeLockEnabled }" @click="emit('wakeLock')">常亮</button>
             <button type="button" :class="{ active: showPerformance }" @click="showPerformance = !showPerformance">性能</button>
+            <button type="button" :disabled="viewportZoom <= 1" @click="emit('resetViewport')">
+              画面 {{ Math.round(viewportZoom * 100) }}%
+            </button>
           </div>
         </div>
         <div v-show="showMobileKeyboard" class="mobile-keyboard">

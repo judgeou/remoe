@@ -35,6 +35,11 @@ interface CursorPosition {
   y: number;
 }
 
+type ViewportGesture =
+  | { type: 'pan'; deltaX: number; deltaY: number }
+  | { type: 'pinch'; scale: number; clientX: number; clientY: number;
+      deltaX: number; deltaY: number };
+
 interface PerformanceStats {
   fps: number;
   bitrateMbps: number;
@@ -64,6 +69,7 @@ const details = ref('');
 const remoteActive = ref(false);
 const controlActive = ref(false);
 const frameVisible = ref(false);
+const viewportZoom = ref(1);
 const canvasStyle = reactive<CSSProperties>({});
 const cursorStyle = reactive<CSSProperties>({});
 const performanceStats = reactive<PerformanceStats>({
@@ -82,6 +88,8 @@ const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
 let wakeLockSentinel: WakeLockSentinel | null = null;
 let streamSize: { width: number; height: number } | null = null;
+let fittedVideoSize: { width: number; height: number } | null = null;
+let viewportPan = { x: 0, y: 0 };
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
 
@@ -108,6 +116,63 @@ function positionRemoteCursor(position: CursorPosition = cursorPosition) {
   cursorStyle.top = `${point.top}px`;
 }
 
+function clampViewportPan() {
+  if (!fittedVideoSize || !viewer.value || viewportZoom.value <= 1) {
+    viewportPan = { x: 0, y: 0 };
+    return;
+  }
+  const bounds = viewer.value.getElement().getBoundingClientRect();
+  const maxX = Math.max(0, (fittedVideoSize.width * viewportZoom.value - bounds.width) / 2);
+  const maxY = Math.max(0, (fittedVideoSize.height * viewportZoom.value - bounds.height) / 2);
+  viewportPan.x = Math.max(-maxX, Math.min(maxX, viewportPan.x));
+  viewportPan.y = Math.max(-maxY, Math.min(maxY, viewportPan.y));
+}
+
+function applyViewportTransform() {
+  clampViewportPan();
+  if (viewportZoom.value <= 1) {
+    viewportZoom.value = 1;
+    delete canvasStyle.transform;
+    delete canvasStyle.transformOrigin;
+  } else {
+    canvasStyle.transformOrigin = 'center center';
+    canvasStyle.transform = `translate3d(${viewportPan.x}px, ${viewportPan.y}px, 0) ` +
+      `scale(${viewportZoom.value})`;
+  }
+  void nextTick(() => positionRemoteCursor());
+}
+
+function resetViewport() {
+  viewportZoom.value = 1;
+  viewportPan = { x: 0, y: 0 };
+  applyViewportTransform();
+}
+
+function handleViewportGesture(gesture: ViewportGesture): boolean {
+  if (gesture.type === 'pan') {
+    if (viewportZoom.value <= 1) return false;
+    viewportPan.x += gesture.deltaX;
+    viewportPan.y += gesture.deltaY;
+    applyViewportTransform();
+    return true;
+  }
+
+  if (!Number.isFinite(gesture.scale) || gesture.scale <= 0 || !viewer.value) return true;
+  const oldZoom = viewportZoom.value;
+  const nextZoom = Math.max(1, Math.min(4, oldZoom * gesture.scale));
+  const bounds = viewer.value.getElement().getBoundingClientRect();
+  const previousCenterX = gesture.clientX - gesture.deltaX;
+  const previousCenterY = gesture.clientY - gesture.deltaY;
+  const ratio = nextZoom / oldZoom;
+  viewportPan.x += gesture.deltaX +
+    (1 - ratio) * (previousCenterX - (bounds.left + bounds.width / 2 + viewportPan.x));
+  viewportPan.y += gesture.deltaY +
+    (1 - ratio) * (previousCenterY - (bounds.top + bounds.height / 2 + viewportPan.y));
+  viewportZoom.value = nextZoom;
+  applyViewportTransform();
+  return true;
+}
+
 function fitRemoteVideo() {
   if (!streamSize || !remoteActive.value) return;
   const viewportWidth = window.visualViewport?.width ?? document.documentElement.clientWidth;
@@ -120,7 +185,8 @@ function fitRemoteVideo() {
   );
   canvasStyle.width = `${fitted.width}px`;
   canvasStyle.height = `${fitted.height}px`;
-  void nextTick(() => positionRemoteCursor());
+  fittedVideoSize = fitted;
+  applyViewportTransform();
 }
 
 function leaveRemoteMode() {
@@ -130,8 +196,13 @@ function leaveRemoteMode() {
   activeModifiers.value = [];
   frameVisible.value = false;
   streamSize = null;
+  fittedVideoSize = null;
+  viewportZoom.value = 1;
+  viewportPan = { x: 0, y: 0 };
   delete canvasStyle.width;
   delete canvasStyle.height;
+  delete canvasStyle.transform;
+  delete canvasStyle.transformOrigin;
   Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, decodeQueueSize: 0, lossEvents: 0 });
   document.body.classList.remove('touch-control-active');
   releaseMobileDisplayFeatures();
@@ -309,6 +380,7 @@ async function connect(inviteOverride?: string) {
               setInputActive(active);
             },
             (position: CursorPosition) => positionRemoteCursor(position),
+            (gesture: ViewportGesture) => handleViewportGesture(gesture),
           );
         });
         setStatus(touchPreferred.value
@@ -538,6 +610,7 @@ onBeforeUnmount(() => {
       :fullscreen-active="fullscreenActive"
       :orientation-locked="orientationLocked"
       :wake-lock-enabled="wakeLockEnabled"
+      :viewport-zoom="viewportZoom"
       @capture="captureInput"
       @stop="stopSession"
       @touch-mode="selectTouchMode"
@@ -548,6 +621,7 @@ onBeforeUnmount(() => {
       @fullscreen="toggleFullscreen"
       @orientation="toggleOrientation"
       @wake-lock="toggleWakeLock"
+      @reset-viewport="resetViewport"
     />
     <div v-if="status || details" class="telemetry">
       <strong id="status" :class="{ error: statusError }">{{ status }}</strong>
