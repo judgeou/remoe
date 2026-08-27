@@ -14,6 +14,7 @@ constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
 constexpr std::uint16_t kVersion = 7;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
+constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
 
 enum FrameFlags : std::uint32_t {
@@ -68,7 +69,9 @@ struct StreamHeader {
     std::uint32_t fps_num = 0;
     std::uint32_t fps_den = 1;
     std::uint32_t bitrate_bps = 0;
-    std::uint32_t reserved = 0;
+    // H.264 uses the low 24 bits for profile_idc, constraint flags and level_idc.
+    // AV1 leaves this field at zero.
+    std::uint32_t codec_profile = 0;
 };
 
 struct StreamReady {

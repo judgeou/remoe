@@ -109,6 +109,7 @@ target_link_libraries(remoe_webrtc_transport
 set(VPL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvpl"
     CACHE PATH "Path to Intel oneVPL source")
 option(REMOE_BUILD_CLIENT "Build the Intel oneVPL AV1 client when available" ON)
+option(REMOE_BUILD_X264_HOST "Build the GPL GDI/libyuv/x264 host" OFF)
 
 if(EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
     # Build only the dispatcher. This avoids oneVPL's standalone packaging CMake,
@@ -208,6 +209,78 @@ target_link_libraries(remoe_host PRIVATE
     ws2_32)
 install(TARGETS remoe_host RUNTIME DESTINATION bin)
 
+if(REMOE_BUILD_X264_HOST)
+    set(LIBYUV_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libyuv"
+        CACHE PATH "Path to libyuv source")
+    set(X264_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/x264"
+        CACHE PATH "Path to x264 source")
+    set(X264_BUILD_ROOT "${X264_ROOT}/build-msvc"
+        CACHE PATH "Path to configured x264 MSVC build")
+    set(X264_LIBRARY "${X264_BUILD_ROOT}/libx264.lib"
+        CACHE FILEPATH "Path to the static x264 library")
+
+    foreach(required_file
+            "${LIBYUV_ROOT}/CMakeLists.txt"
+            "${LIBYUV_ROOT}/include/libyuv.h"
+            "${X264_ROOT}/x264.h"
+            "${X264_BUILD_ROOT}/x264_config.h"
+            "${X264_LIBRARY}")
+        if(NOT EXISTS "${required_file}")
+            message(FATAL_ERROR
+                "Missing x264 host dependency file: ${required_file}. "
+                "See README.md for the separate GPL build instructions.")
+        endif()
+    endforeach()
+
+    set(UNIT_TEST OFF CACHE BOOL "Build libyuv unit tests" FORCE)
+    set(CMAKE_DISABLE_FIND_PACKAGE_JPEG TRUE CACHE BOOL
+        "The remoe x264 path does not use libyuv MJPEG conversion" FORCE)
+    add_subdirectory("${LIBYUV_ROOT}" third_party/libyuv EXCLUDE_FROM_ALL)
+
+    add_library(remoe_x264 STATIC IMPORTED GLOBAL)
+    set_target_properties(remoe_x264 PROPERTIES
+        IMPORTED_LOCATION "${X264_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${X264_ROOT};${X264_BUILD_ROOT}")
+
+    add_executable(remoe_host_x264
+        src/remoe_host.manifest
+        src/encoded_video_frame.h
+        src/gdi_capture.cpp
+        src/gdi_capture.h
+        src/host_identity.cpp
+        src/host_identity.h
+        src/main.cpp
+        src/protocol.h
+        src/x264_encoder.cpp
+        src/x264_encoder.h)
+    target_include_directories(remoe_host_x264 PRIVATE
+        src
+        "${LIBYUV_ROOT}/include")
+    target_compile_definitions(remoe_host_x264 PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        REMOE_VERSION="${PROJECT_VERSION}"
+        REMOE_X264_HOST=1
+        _WIN32_WINNT=0x0A00)
+    target_compile_options(remoe_host_x264 PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_options(remoe_host_x264 PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/MANIFESTUAC:NO>)
+    target_link_libraries(remoe_host_x264 PRIVATE
+        remoe_webrtc_transport
+        yuv
+        remoe_x264
+        gdi32
+        ole32
+        oleaut32
+        shell32
+        user32
+        ws2_32)
+    install(TARGETS remoe_host_x264 RUNTIME DESTINATION bin)
+    install(FILES "${X264_ROOT}/COPYING" DESTINATION licenses/x264)
+    install(FILES "${LIBYUV_ROOT}/LICENSE" DESTINATION licenses/libyuv)
+endif()
+
 if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
     add_executable(remoe_client
         src/client_main.cpp
@@ -238,6 +311,22 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    if(REMOE_BUILD_X264_HOST)
+        add_executable(remoe_x264_encoder_smoke
+            tests/x264_encoder_smoke.cpp
+            src/x264_encoder.cpp
+            src/x264_encoder.h
+            src/encoded_video_frame.h)
+        target_include_directories(remoe_x264_encoder_smoke PRIVATE
+            src
+            "${LIBYUV_ROOT}/include")
+        target_compile_options(remoe_x264_encoder_smoke PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+        target_link_libraries(remoe_x264_encoder_smoke PRIVATE yuv remoe_x264)
+        add_test(NAME x264_encoder_smoke COMMAND remoe_x264_encoder_smoke)
+        set_tests_properties(x264_encoder_smoke PROPERTIES TIMEOUT 30)
+    endif()
+
     add_executable(remoe_webrtc_transport_smoke
         tests/webrtc_transport_smoke.cpp)
     target_compile_definitions(remoe_webrtc_transport_smoke PRIVATE

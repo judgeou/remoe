@@ -10,6 +10,7 @@ import {
   encodeClientConfig,
   encodeInputEvent,
   encodeSignal,
+  h264CodecString,
 } from '../src/core/protocol.js';
 import { parseInvite } from '../src/core/remoe-client.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
@@ -51,6 +52,25 @@ test('decodes a valid stream header', () => {
   view.setUint32(24, 1, true);
   view.setUint32(28, 20_000_000, true);
   assert.equal(decodeStreamHeader(bytes).width, 1920);
+});
+
+test('decodes a valid H.264 stream header and profile', () => {
+  const bytes = new Uint8Array(36);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC.stream, true);
+  view.setUint16(4, 7, true);
+  view.setUint16(6, 36, true);
+  view.setUint32(8, MAGIC.h264, true);
+  view.setUint32(12, 1280, true);
+  view.setUint32(16, 720, true);
+  view.setUint32(20, 30, true);
+  view.setUint32(24, 1, true);
+  view.setUint32(28, 8_000_000, true);
+  view.setUint32(32, 0x42e02a, true);
+  const header = decodeStreamHeader(bytes);
+  assert.equal(header.codec, MAGIC.h264);
+  assert.equal(header.codecProfile, 0x42e02a);
+  assert.equal(h264CodecString(header), 'avc1.42E02A');
 });
 
 test('reassembles an AV1 frame arriving out of chunk order', () => {

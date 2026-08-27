@@ -9,6 +9,7 @@ export const MAGIC = Object.freeze({
   input: 0x54504e49,
   signal: 0x534d5257,
   av1: 0x31305641,
+  h264: 0x34363248,
 });
 
 export const SIGNAL_TYPE = Object.freeze({
@@ -131,12 +132,16 @@ export function decodeStreamHeader(value) {
     fpsNum: view.getUint32(20, true),
     fpsDen: view.getUint32(24, true),
     bitrateBps: view.getUint32(28, true),
-    reserved: view.getUint32(32, true),
+    codecProfile: view.getUint32(32, true),
   };
+  const codecValid = result.codec === MAGIC.av1 || result.codec === MAGIC.h264;
+  const profileValid = result.codec === MAGIC.av1
+    ? result.codecProfile === 0
+    : result.codecProfile > 0 && result.codecProfile <= 0xffffff;
   if (result.magic !== MAGIC.stream || result.version !== PROTOCOL_VERSION ||
-      result.headerSize !== 36 || result.codec !== MAGIC.av1 ||
+      result.headerSize !== 36 || !codecValid || !profileValid ||
       result.width < 2 || result.height < 2 || result.fpsNum < 1 ||
-      result.fpsDen !== 1 || result.reserved !== 0) {
+      result.fpsDen !== 1) {
     throw new Error('Host 返回了无效或不受支持的 StreamHeader');
   }
   return result;
@@ -258,7 +263,7 @@ export class VideoFrameAssembler {
   }
 }
 
-// AV1 delta frames depend on earlier reference frames. Once a frame is missing,
+// Inter-frame video depends on earlier reference frames. Once a frame is missing,
 // feeding later delta frames to WebCodecs can produce visible corruption instead
 // of a decode error, so hold them until the host supplies a fresh key frame.
 export class VideoDecodeGate {
@@ -301,4 +306,11 @@ export function av1CodecString({ width, height, fpsNum, fpsDen = 1 }) {
   else if (pixels <= 2_359_296 && samplesPerSecond <= 141_557_760) level = 9;
   else if (pixels <= 8_912_896 && samplesPerSecond <= 267_386_880) level = 12;
   return `av01.0.${String(level).padStart(2, '0')}M.08`;
+}
+
+export function h264CodecString({ codecProfile }) {
+  if (!Number.isInteger(codecProfile) || codecProfile <= 0 || codecProfile > 0xffffff) {
+    throw new RangeError('无效的 H.264 profile-level-id');
+  }
+  return `avc1.${codecProfile.toString(16).padStart(6, '0').toUpperCase()}`;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "encoded_video_frame.h"
+
 #include <d3d11.h>
 
 #include <cstdint>
@@ -8,11 +10,6 @@
 #include <vector>
 
 namespace remoe {
-
-struct EncodedVideoFrame {
-    std::vector<std::uint8_t> data;
-    bool key_frame = false;
-};
 
 class Av1Encoder {
 public:

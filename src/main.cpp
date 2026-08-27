@@ -1,7 +1,13 @@
+#if defined(REMOE_X264_HOST)
+#include "gdi_capture.h"
+#include "x264_encoder.h"
+#else
 #include "desktop_capture.h"
+#include "video_encoder.h"
+#endif
+#include "encoded_video_frame.h"
 #include "host_identity.h"
 #include "protocol.h"
-#include "video_encoder.h"
 #include "webrtc_websocket_signaling.h"
 
 #include <Windows.h>
@@ -359,9 +365,18 @@ std::uint32_t parse_u32(std::string_view text, std::string_view name, std::uint3
 }
 
 void print_help() {
+#if defined(REMOE_X264_HOST)
+    constexpr const char* description =
+        "remoe_host_x264 - Windows GDI software H.264 streaming host\n\n";
+    constexpr const char* executable = "remoe_host_x264";
+#else
+    constexpr const char* description =
+        "remoe_host - Windows desktop hardware AV1 streaming host\n\n";
+    constexpr const char* executable = "remoe_host";
+#endif
     std::cout <<
-        "remoe_host - Windows desktop hardware AV1 streaming host\n\n"
-        "Usage: remoe_host [options]\n"
+        description <<
+        "Usage: " << executable << " [options]\n"
         "  --output <index>   Desktop output index (default: 0)\n"
         "  --max-fps <1-240>  Optional maximum client frame rate (default: unlimited)\n"
         "  --max-bitrate <Mbps> Optional maximum client bitrate (default: unlimited)\n"
@@ -419,8 +434,9 @@ enum class VideoSendResult { Sent, Dropped, Failed };
 VideoSendResult send_packet(remoe::WebRtcTransport& transport,
                             const remoe::EncodedVideoFrame& packet,
                             std::uint64_t frame_number, std::uint64_t timestamp_us) {
-    const std::span<const std::uint8_t> av1(packet.data);
-    if (av1.empty() || av1.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+    const std::span<const std::uint8_t> encoded_video(packet.data);
+    if (encoded_video.empty() ||
+        encoded_video.size() > (std::numeric_limits<std::uint32_t>::max)()) {
         return VideoSendResult::Failed;
     }
     constexpr std::size_t max_buffered_video = 4 * 1024 * 1024;
@@ -429,18 +445,19 @@ VideoSendResult send_packet(remoe::WebRtcTransport& transport,
     }
 
     remoe::protocol::VideoChunkHeader header;
-    header.frame_size = static_cast<std::uint32_t>(av1.size());
+    header.frame_size = static_cast<std::uint32_t>(encoded_video.size());
     header.frame_number = frame_number;
     header.timestamp_us = timestamp_us;
     if (packet.key_frame) header.flags |= remoe::protocol::kFrameKey;
     std::vector<std::uint8_t> message(sizeof(header) + remoe::protocol::kVideoChunkPayloadSize);
-    for (std::size_t offset = 0; offset < av1.size();
+    for (std::size_t offset = 0; offset < encoded_video.size();
          offset += remoe::protocol::kVideoChunkPayloadSize) {
         const std::size_t chunk_size = (std::min)(
-            remoe::protocol::kVideoChunkPayloadSize, av1.size() - offset);
+            remoe::protocol::kVideoChunkPayloadSize, encoded_video.size() - offset);
         header.chunk_offset = static_cast<std::uint32_t>(offset);
         std::memcpy(message.data(), &header, sizeof(header));
-        std::memcpy(message.data() + sizeof(header), av1.data() + offset, chunk_size);
+        std::memcpy(message.data() + sizeof(header), encoded_video.data() + offset,
+                    chunk_size);
         if (!transport.send_video_binary(
                 std::span<const std::uint8_t>(message.data(), sizeof(header) + chunk_size))) {
             return VideoSendResult::Failed;
@@ -460,6 +477,9 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
         request.bitrate_bps < 1'000'000u ||
         request.bitrate_bps > 1'000'000'000u ||
+#if defined(REMOE_X264_HOST)
+        request.bitrate_bps > 50'000'000u ||
+#endif
         (options.max_bitrate_mbps != 0 &&
          request.bitrate_bps > options.max_bitrate_mbps * 1'000'000u)) {
         return false;
@@ -581,12 +601,36 @@ void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
 
 int run(const Options& options) {
     SetConsoleCtrlHandler(console_handler, TRUE);
+#if defined(REMOE_X264_HOST)
+    std::cout << "remoe_host_x264 " << REMOE_VERSION << " (protocol v"
+              << remoe::protocol::kVersion << ")\n";
+    remoe::GdiCapture capture(options.output);
+#else
     std::cout << "remoe_host " << REMOE_VERSION << " (protocol v"
               << remoe::protocol::kVersion << ")\n";
     remoe::DesktopCapture capture(options.output);
+#endif
     if (options.check_encoder) {
         const std::uint32_t width = scaled_dimension(capture.width(), 100);
         const std::uint32_t height = scaled_dimension(capture.height(), 100);
+#if defined(REMOE_X264_HOST)
+        auto encoder = remoe::create_x264_h264_encoder(width, height, 30, 8'000'000);
+        if (!capture.acquire(std::chrono::milliseconds(250))) {
+            throw std::runtime_error("GDI desktop capture failed during H.264 check");
+        }
+        auto frames = encoder->encode(
+            std::span<const std::uint8_t>(
+                capture.pixels(), static_cast<std::size_t>(capture.stride()) * capture.height()),
+            capture.width(), capture.height(), capture.stride(), true);
+        if (frames.empty()) frames = encoder->drain();
+        if (frames.empty() || frames.front().data.empty()) {
+            throw std::runtime_error("x264 produced no H.264 test frame");
+        }
+        std::cout << "H.264 encoder check passed: " << frames.front().data.size()
+                  << " bytes, " << (frames.front().key_frame ? "key frame" : "frame")
+                  << '\n';
+        return 0;
+#else
         auto encoder = remoe::create_preferred_av1_encoder(
             capture.device(), width, height, 60, 20'000'000);
         capture.use_device(encoder->device());
@@ -607,6 +651,7 @@ int run(const Options& options) {
             return 0;
         }
         throw std::runtime_error("desktop capture timed out during AV1 encoder check");
+#endif
     }
     ensure_firewall_rule();
     std::optional<remoe::ManagedHostIdentity> host_identity;
@@ -636,8 +681,12 @@ int run(const Options& options) {
             host_identity = *saved_identity;
         }
     }
-    std::cout << "Display " << options.output << ": " << capture.width() << 'x' << capture.height() << '\n'
-              << "Client FPS limit: ";
+    std::cout << "Display " << options.output << ": " << capture.width() << 'x'
+              << capture.height();
+#if defined(REMOE_X264_HOST)
+    std::wcout << L" (GDI " << capture.device_name() << L")";
+#endif
+    std::cout << "\nClient FPS limit: ";
     if (options.max_fps) std::cout << options.max_fps;
     else std::cout << "unlimited";
     std::cout << "\nClient bitrate limit: ";
@@ -813,16 +862,25 @@ int run(const Options& options) {
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
 
+#if defined(REMOE_X264_HOST)
+        auto encoder = remoe::create_x264_h264_encoder(
+            encoded_width, encoded_height, settings.fps, settings.bitrate_bps);
+#else
         auto encoder = remoe::create_preferred_av1_encoder(
             capture.device(), encoded_width, encoded_height,
             settings.fps, settings.bitrate_bps);
         capture.use_device(encoder->device());
+#endif
         std::cout << "Client requested: " << settings.fps << " fps, "
                   << settings.bitrate_bps / 1'000'000.0 << " Mbps, "
                   << settings.scale_percent << "% resolution (" << encoded_width << 'x'
                   << encoded_height << ")\n";
 
         remoe::protocol::StreamHeader stream_header;
+#if defined(REMOE_X264_HOST)
+        stream_header.codec = remoe::protocol::kCodecH264;
+        stream_header.codec_profile = encoder->profile_level_id();
+#endif
         stream_header.width = encoded_width;
         stream_header.height = encoded_height;
         stream_header.fps_num = settings.fps;
@@ -847,17 +905,29 @@ int run(const Options& options) {
         auto next_frame = Clock::now();
         while (g_running && session_running && control_channel->is_open()) {
             next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
+#if defined(REMOE_X264_HOST)
+            if (!capture.acquire(std::chrono::milliseconds(100))) continue;
+#else
             ID3D11Texture2D* texture = encoder->input_texture();
             if (!capture.acquire(texture, encoded_width, encoded_height,
                                  std::chrono::milliseconds(100))) {
                 encoder->discard_input();
                 continue;
             }
+#endif
 
             const bool force_key_frame =
                 first_input || key_frame_requested.exchange(false);
             first_input = false;
+#if defined(REMOE_X264_HOST)
+            auto packets = encoder->encode(
+                std::span<const std::uint8_t>(
+                    capture.pixels(),
+                    static_cast<std::size_t>(capture.stride()) * capture.height()),
+                capture.width(), capture.height(), capture.stride(), force_key_frame);
+#else
             auto packets = encoder->encode(force_key_frame);
+#endif
             const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count();
             bool failed = false;
             for (const auto& packet : packets) {

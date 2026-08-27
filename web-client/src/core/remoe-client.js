@@ -5,6 +5,8 @@ import {
   VideoDecodeGate,
   VideoFrameAssembler,
   av1CodecString,
+  h264CodecString,
+  MAGIC,
   decodeStreamHeader,
   encodeClientConfig,
   encodeInputEvent,
@@ -250,7 +252,8 @@ export class RemoeBrowserClient {
 
   async #handleControl(value) {
     const header = decodeStreamHeader(toBytes(value));
-    const codec = av1CodecString(header);
+    const isH264 = header.codec === MAGIC.h264;
+    const codec = isH264 ? h264CodecString(header) : av1CodecString(header);
     const config = {
       codec,
       codedWidth: header.width,
@@ -259,7 +262,7 @@ export class RemoeBrowserClient {
       optimizeForLatency: true,
     };
     const support = await VideoDecoder.isConfigSupported(config);
-    if (!support.supported) throw new Error(`浏览器不支持此 AV1 配置：${codec}`);
+    if (!support.supported) throw new Error(`浏览器不支持此视频配置：${codec}`);
     this.#decoder = new VideoDecoder({
       output: (frame) => {
         try {
@@ -270,7 +273,7 @@ export class RemoeBrowserClient {
           frame.close();
         }
       },
-      error: (error) => this.#fail(new Error(`AV1 解码失败：${error.message}`)),
+      error: (error) => this.#fail(new Error(`视频解码失败：${error.message}`)),
     });
     this.#decoderConfig = support.config ?? config;
     this.#decoder.configure(this.#decoderConfig);
@@ -281,7 +284,7 @@ export class RemoeBrowserClient {
     this.#events.onStream?.({ ...header, codec });
     this.#control.send(encodeStreamReady());
     this.#inputReady = true;
-    this.#status('等待第一张 AV1 画面…');
+    this.#status(`等待第一张 ${isH264 ? 'H.264' : 'AV1'} 画面…`);
   }
 
   #handleVideo(value) {

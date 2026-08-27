@@ -10,6 +10,10 @@ client 发送码流。视频、键鼠控制和
 
 当前版本提供加密的画面传输和窗口内键鼠远程控制。音频、剪贴板、文件传输与身份验证尚未实现。
 
+另有独立的 `remoe_host_x264.exe`：面向 Microsoft Basic Render Driver、Matrox G200e 等无法可靠
+使用 Desktop Duplication/硬件视频处理的服务器，使用 GDI BitBlt 抓屏、libyuv 在 CPU 上转换和缩放，
+并由 x264 编码 H.264。这个目标不编译或链接 NVIDIA、oneVPL、D3D11 与 DXGI 代码。
+
 ## 环境要求
 
 - Windows 10/11 x64
@@ -25,6 +29,13 @@ client 发送码流。视频、键鼠控制和
 - 构建 Intel host 编码器或 client 时需要 Intel oneVPL 2.10+ 源码，默认路径：
   `third_party/libvpl`
 - 运行 client 时需要支持 AV1 硬件解码的 Intel GPU 和当前 Intel 图形驱动
+
+仅构建 `remoe_host_x264.exe` 时还需要：
+
+- libyuv 源码，默认路径：`third_party/libyuv`
+- x264 源码及以 MSVC 构建的静态库，默认分别为 `third_party/x264` 和
+  `third_party/x264/build-msvc/libx264.lib`
+- NASM，以及能够执行 x264 `configure`/`make` 的 MSYS2、Git Bash 或 WSL 环境
 
 当前工程固定使用 NVENC API 13.0，以兼容本机驱动 596.49。若替换 SDK，所用 SDK 的 NVENC API
 版本不能高于驱动通过 `NvEncodeAPIGetMaxSupportedVersion` 返回的版本。
@@ -56,7 +67,7 @@ libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不�
 WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed TLS，用于验证服务器证书链及
 域名；证书无效时连接会直接失败，不会退化为跳过验证。
 `src/webrtc_transport.*` 提供 host/client 共用的双 DataChannel 传输封装。可靠有序的 control channel
-承载参数协商和键鼠输入；无序、不重传的 video channel 承载 AV1 分片。SDP/ICE 经 WSS 中继，
+承载参数协商和键鼠输入；无序、不重传的 video channel 承载编码视频分片。SDP/ICE 经 WSS 中继，
 STUN 地址由信令 URL 自动派生，TURN 有意禁用。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
@@ -74,6 +85,30 @@ cmake --build build --config Release
 ```
 
 生成文件为 `build/Release/remoe_host.exe`。
+
+### 单独构建 GDI + x264 Host
+
+x264 需先在已加载 x64 MSVC 环境的 shell 中配置为静态库。下面的 `bash` 和 `make` 可来自
+MSYS2/Git Bash；若使用 WSL，需要把 `CC` 和 `AS` 指向 Windows 的 `cl.exe` 与 `nasm.exe`：
+
+```powershell
+New-Item -ItemType Directory -Force third_party\x264\build-msvc | Out-Null
+Set-Location third_party\x264\build-msvc
+bash ../configure --host=x86_64-w64-mingw32 --enable-static --disable-cli --disable-opencl
+make -j
+Set-Location ..\..\..
+
+cmake -S . -B build-local -DREMOE_BUILD_X264_HOST=ON
+cmake --build build-local --config Release --target remoe_host_x264
+.\build-local\Release\remoe_host_x264.exe --check-encoder
+```
+
+若依赖不在默认位置，可设置 `LIBYUV_ROOT`、`X264_ROOT`、`X264_BUILD_ROOT` 和 `X264_LIBRARY`。
+该功能默认关闭，因而不会改变普通 `remoe_host.exe` 的构建或许可证边界。
+
+`remoe_host_x264.exe` 静态链接 GPL x264，分发该二进制时应把它作为 GPL 版本处理，提供对应完整源码
+和 GPL 许可证，并确保项目中与其组合的代码许可证兼容。此目标没有 NVIDIA 功能或 NVIDIA SDK 依赖；
+`remoe_host.exe` 仍是原有 Intel/NVIDIA AV1 版本。这里是构建结构说明，不替代针对具体发行方式的法律意见。
 
 ### GitHub 自动构建与发布
 
@@ -121,6 +156,10 @@ git push origin v0.1.0
 | `--check-encoder` | 关闭 | 无需信令，采集并硬件编码一个 AV1 测试帧后退出 |
 | `--repair` | 关闭 | 在 Host 本机重新生成配对码、转移账号并轮换设备凭证 |
 | `--legacy-invite` | 关闭 | 兼容模式：自动生成并打印匿名邀请 URL |
+
+对 `remoe_host_x264.exe`，`--output` 是 GDI `EnumDisplayMonitors` 的顺序；`--check-encoder` 测试
+GDI 抓屏和 x264 H.264 软件编码。它接受同一套连接参数，但码率上限为 50 Mbps。GDI 路径会把鼠标
+指针合成到画面中。H.264 播放目前由网页 Client 的 WebCodecs 路径支持；原生 oneVPL Client 仍只解 AV1。
 
 兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
 每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
@@ -198,7 +237,7 @@ npm run build
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
 依次承载 `ClientConfig`、`StreamHeader`、`StreamReady` 和 `InputEvent`。无序、不重传的
-`remoe-video` DataChannel 承载 `VideoChunkHeader + AV1 chunk`。
+`remoe-video` DataChannel 承载 `VideoChunkHeader + encoded video chunk`。
 
 ### ClientConfig（28 bytes）
 
@@ -220,13 +259,13 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 0 | u32 | magic | `RMOE` |
 | 4 | u16 | version | `7` |
 | 6 | u16 | header_size | `36` |
-| 8 | u32 | codec | `AV01` |
+| 8 | u32 | codec | `AV01` 或 `H264` |
 | 12 | u32 | width | 编码宽度 |
 | 16 | u32 | height | 编码高度 |
 | 20 | u32 | fps_num | 帧率分子 |
 | 24 | u32 | fps_den | 帧率分母，当前为 1 |
 | 28 | u32 | bitrate_bps | 目标码率 |
-| 32 | u32 | reserved | 0 |
+| 32 | u32 | codec_profile | AV1 为 0；H.264 为 `profile_idc << 16 | constraints << 8 | level_idc` |
 
 ### StreamReady（8 bytes）
 
@@ -248,11 +287,11 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 | 8 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
 | 12 | u64 | frame_number | 递增帧编号 |
 | 20 | u64 | timestamp_us | host 启动后的单调时钟微秒数 |
-| 28 | u32 | frame_size | 完整 AV1 帧长度 |
+| 28 | u32 | frame_size | 完整编码 access unit 长度 |
 | 32 | u32 | chunk_offset | 此分片在帧内的字节偏移 |
 
-每条 video DataChannel 消息最多携带 16 KiB AV1 数据。client 按帧号和偏移重组，丢弃长期不完整的帧
-并请求新关键帧。AV1 数据是 NVENC 的一次编码输出，不是 IVF 容器。
+每条 video DataChannel 消息最多携带 16 KiB 编码数据。client 按帧号和偏移重组，丢弃长期不完整的帧
+并请求新关键帧。AV1 数据不是 IVF 容器；H.264 每帧为 Annex-B access unit，IDR 携带 SPS/PPS。
 
 ### InputEvent（24 bytes）
 
@@ -268,7 +307,7 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 | 20 | u32 | sequence | client 递增事件编号 |
 
 type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必须为 0。host 收到后会在下一张
-捕获画面强制生成携带 sequence header 的 AV1 IDR，用于客户端丢弃积压帧后的快速恢复。
+捕获画面强制生成携带 codec headers 的 IDR，用于客户端丢弃积压帧后的快速恢复。
 
 ### WebRtcSignalHeader（20 bytes，仅连接初始化阶段）
 
@@ -288,7 +327,7 @@ type 3/4 不带 payload。双方完成确认后，WSS 不再参与业务数据�
 鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频边缘时坐标
 会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。
 
-client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携带 sequence header，因而 client 无需
+client 连接后的第一张图像强制为 IDR/key frame，并携带所需 codec headers，因而 client 无需
 连接建立前的码流状态。断线后 host 返回监听状态，支持后续 client 重连；同一时刻只服务一个 client。
 
 ## 当前限制与安全边界
@@ -300,6 +339,8 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
   同一数据库事务中轮换。全部账号凭据丢失时可在 Host 本机重新配对，损失仅为原账号的 Host 列表。
 - 自动配置 STUN，但有意禁用 TURN；对称 NAT、UDP 被封锁等无法直连的网络仍可能连接失败。
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
+- GDI/x264 路径是 CPU 抓屏、缩放、色彩转换和编码，兼容性优先，性能与帧率取决于服务器 CPU；
+  某些 RDP 会话、锁屏状态、受保护内容或显示驱动仍可能返回黑屏或静止画面。
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
 - `SendInput` 受 Windows UIPI 限制。控制高完整性应用时 host 通常也需要 `--admin`；即使提升权限，
   `Ctrl+Alt+Del` 和 UAC 安全桌面仍不能通过普通 `SendInput` 控制。
@@ -309,10 +350,12 @@ client 连接后的第一张图像强制为 IDR/key frame，并请求 NVENC 携�
 ## 源码结构
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
+- `src/gdi_capture.*`：GDI BitBlt 显示器抓取与鼠标指针合成
 - `src/main.cpp`：采集/编码循环、键鼠注入与重连逻辑
 - `src/video_encoder.*`：AV1 编码器抽象与 Intel oneVPL → NVIDIA NVENC 选择策略
 - `src/vpl_encoder.cpp`：Intel oneVPL D3D11/NV12 AV1 硬件编码
 - `src/nvenc_encoder.cpp`、`src/nvenc_api_loader.cpp`：NVENC AV1 回退与驱动 DLL 延迟加载
+- `src/x264_encoder.*`：libyuv BGRA 缩放/转 I420 与 x264 Annex-B H.264 软件编码
 - `src/host_identity.*`：Host 长期设备凭证的 Windows DPAPI 持久化
 - `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
 - `src/webrtc_tcp_bootstrap.*`：信令帧编解码与协商状态机（同时供 WSS adapter 和测试复用）

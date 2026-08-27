@@ -94,7 +94,7 @@ void validate_stream_header(const remoe::protocol::StreamHeader& header) {
         header.header_size != sizeof(header)) {
         throw std::runtime_error("host sent an incompatible stream header");
     }
-    if (header.codec != remoe::protocol::kCodecAv1) {
+    if (header.codec != remoe::protocol::kCodecAv1 || header.codec_profile != 0) {
         throw std::runtime_error("host stream is not AV1");
     }
     if (header.width == 0 || header.height == 0 || header.width > 16384 || header.height > 16384) {

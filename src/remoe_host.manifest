@@ -5,7 +5,7 @@
       processorArchitecture="amd64"
       name="remoe.host"
       type="win32" />
-  <description>remoe AV1 remote desktop host</description>
+  <description>remoe remote desktop host</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
