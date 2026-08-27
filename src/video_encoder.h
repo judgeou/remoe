@@ -1,6 +1,7 @@
 #pragma once
 
 #include "encoded_video_frame.h"
+#include "protocol.h"
 
 #include <d3d11.h>
 
@@ -33,6 +34,8 @@ protected:
 // can initialize on this D3D11 device, falls back to NVIDIA NVENC AV1.
 std::unique_ptr<Av1Encoder> create_preferred_av1_encoder(
     ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-    std::uint32_t fps, std::uint32_t bitrate_bps);
+    std::uint32_t fps, std::uint32_t bitrate_bps,
+    protocol::VideoRateControl rate_control = protocol::VideoRateControl::Cbr,
+    std::uint32_t quality = 28);
 
 } // namespace remoe

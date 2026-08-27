@@ -31,7 +31,7 @@ form {
 }
 
 label span { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 700; }
-input {
+input, select {
   width: 100%;
   border: 1px solid #35414f;
   border-radius: 9px;
@@ -40,7 +40,7 @@ input {
   color: inherit;
   font: inherit;
 }
-input:focus { outline: 2px solid #49dcaf; outline-offset: 1px; }
+input:focus, select:focus { outline: 2px solid #49dcaf; outline-offset: 1px; }
 .help { margin: 8px 0 18px; font-size: 12px; }
 .settings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
 .actions { display: flex; gap: 10px; margin-top: 20px; }

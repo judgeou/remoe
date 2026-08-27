@@ -8,17 +8,21 @@ namespace remoe {
 
 #if defined(REMOE_HAS_VPL_ENCODER)
 std::unique_ptr<Av1Encoder> create_vpl_av1_encoder(
-    ID3D11Device*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+    ID3D11Device*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+    protocol::VideoRateControl, std::uint32_t);
 #endif
 std::unique_ptr<Av1Encoder> create_nvenc_av1_encoder(
-    ID3D11Device*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+    ID3D11Device*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t,
+    protocol::VideoRateControl, std::uint32_t);
 
 std::unique_ptr<Av1Encoder> create_preferred_av1_encoder(
     ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-    std::uint32_t fps, std::uint32_t bitrate_bps) {
+    std::uint32_t fps, std::uint32_t bitrate_bps,
+    protocol::VideoRateControl rate_control, std::uint32_t quality) {
 #if defined(REMOE_HAS_VPL_ENCODER)
     try {
-        auto encoder = create_vpl_av1_encoder(device, width, height, fps, bitrate_bps);
+        auto encoder = create_vpl_av1_encoder(
+            device, width, height, fps, bitrate_bps, rate_control, quality);
         std::cout << "Selected AV1 encoder: " << encoder->name() << '\n';
         return encoder;
     } catch (const std::exception& error) {
@@ -30,7 +34,8 @@ std::unique_ptr<Av1Encoder> create_preferred_av1_encoder(
                  "falling back to NVIDIA NVENC AV1\n";
 #endif
 
-    auto encoder = create_nvenc_av1_encoder(device, width, height, fps, bitrate_bps);
+    auto encoder = create_nvenc_av1_encoder(
+        device, width, height, fps, bitrate_bps, rate_control, quality);
     std::cout << "Selected AV1 encoder: " << encoder->name() << '\n';
     return encoder;
 }

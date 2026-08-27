@@ -114,7 +114,8 @@ private:
 class VplAv1Encoder final : public Av1Encoder {
 public:
     VplAv1Encoder(ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-                  std::uint32_t fps, std::uint32_t bitrate_bps)
+                  std::uint32_t fps, std::uint32_t bitrate_bps,
+                  protocol::VideoRateControl rate_control, std::uint32_t quality)
         : width_(width), height_(height) {
         loader_ = MFXLoad();
         if (!loader_) {
@@ -141,7 +142,9 @@ public:
             parameters_.mfx.CodecProfile = MFX_PROFILE_AV1_MAIN;
             parameters_.mfx.LowPower = MFX_CODINGOPTION_ON;
             parameters_.mfx.TargetUsage = MFX_TARGETUSAGE_BEST_SPEED;
-            parameters_.mfx.RateControlMethod = MFX_RATECONTROL_CBR;
+            parameters_.mfx.RateControlMethod = static_cast<mfxU16>(
+                rate_control == protocol::VideoRateControl::FixedQuality
+                    ? MFX_RATECONTROL_ICQ : MFX_RATECONTROL_CBR);
             parameters_.mfx.GopPicSize = 0;
             parameters_.mfx.GopRefDist = 1;
             parameters_.mfx.FrameInfo.FourCC = MFX_FOURCC_NV12;
@@ -154,17 +157,21 @@ public:
             parameters_.mfx.FrameInfo.Width = static_cast<mfxU16>((width + 15u) & ~15u);
             parameters_.mfx.FrameInfo.Height = static_cast<mfxU16>((height + 15u) & ~15u);
 
-            const std::uint32_t target_kbps = (std::max)(1u, bitrate_bps / 1000u);
-            const std::uint32_t multiplier =
-                (target_kbps + (std::numeric_limits<mfxU16>::max)() - 1u) /
-                (std::numeric_limits<mfxU16>::max)();
-            parameters_.mfx.BRCParamMultiplier = static_cast<mfxU16>(multiplier);
-            parameters_.mfx.TargetKbps = static_cast<mfxU16>(
-                (target_kbps + multiplier - 1u) / multiplier);
-            parameters_.mfx.MaxKbps = parameters_.mfx.TargetKbps;
-            parameters_.mfx.BufferSizeInKB = static_cast<mfxU16>((std::min)(
-                65535u, (std::max)(1u, target_kbps / fps / multiplier)));
-            parameters_.mfx.InitialDelayInKB = parameters_.mfx.BufferSizeInKB;
+            if (rate_control == protocol::VideoRateControl::FixedQuality) {
+                parameters_.mfx.ICQQuality = static_cast<mfxU16>(quality);
+            } else {
+                const std::uint32_t target_kbps = (std::max)(1u, bitrate_bps / 1000u);
+                const std::uint32_t multiplier =
+                    (target_kbps + (std::numeric_limits<mfxU16>::max)() - 1u) /
+                    (std::numeric_limits<mfxU16>::max)();
+                parameters_.mfx.BRCParamMultiplier = static_cast<mfxU16>(multiplier);
+                parameters_.mfx.TargetKbps = static_cast<mfxU16>(
+                    (target_kbps + multiplier - 1u) / multiplier);
+                parameters_.mfx.MaxKbps = parameters_.mfx.TargetKbps;
+                parameters_.mfx.BufferSizeInKB = static_cast<mfxU16>((std::min)(
+                    65535u, (std::max)(1u, target_kbps / fps / multiplier)));
+                parameters_.mfx.InitialDelayInKB = parameters_.mfx.BufferSizeInKB;
+            }
 
             mfxStatus status = MFXVideoENCODE_Query(session_, &parameters_, &parameters_);
             if (status != MFX_WRN_INCOMPATIBLE_VIDEO_PARAM) {
@@ -230,8 +237,11 @@ public:
 
             const std::uint64_t bytes_per_frame =
                 (static_cast<std::uint64_t>(bitrate_bps) / 8u + fps - 1u) / fps;
-            const std::uint64_t buffer_size = (std::max<std::uint64_t>)(
-                8u * 1024u * 1024u, bytes_per_frame * 8u);
+            const std::uint64_t buffer_size = rate_control ==
+                protocol::VideoRateControl::FixedQuality
+                    ? 64u * 1024u * 1024u
+                    : (std::max<std::uint64_t>)(8u * 1024u * 1024u,
+                                               bytes_per_frame * 8u);
             if (buffer_size > (std::numeric_limits<mfxU32>::max)()) {
                 throw std::runtime_error("requested bitrate needs an oversized oneVPL buffer");
             }
@@ -430,8 +440,10 @@ private:
 
 std::unique_ptr<Av1Encoder> create_vpl_av1_encoder(
     ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-    std::uint32_t fps, std::uint32_t bitrate_bps) {
-    return std::make_unique<VplAv1Encoder>(device, width, height, fps, bitrate_bps);
+    std::uint32_t fps, std::uint32_t bitrate_bps,
+    protocol::VideoRateControl rate_control, std::uint32_t quality) {
+    return std::make_unique<VplAv1Encoder>(
+        device, width, height, fps, bitrate_bps, rate_control, quality);
 }
 
 } // namespace remoe

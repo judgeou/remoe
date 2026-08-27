@@ -227,15 +227,17 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 随后重建解码器恢复到最新画面。正常播放使用无限 GOP，
 不会因固定间隔关键帧在低码率下产生周期性的画质波动。
 
-`--fps` 可选范围为 1–240；`--bitrate` 是画质控制参数，单位 Mbps，可选范围为 1–1000；
+`--fps` 可选范围为 1–240；默认使用 `--bitrate` 指定 CBR 码率，单位 Mbps，可选范围为 1–1000。
+也可以通过 `--quality 1–51` 选择固定质量模式，数值越小质量越高，默认测试值为 28；固定质量模式
+不设置目标码率，Intel oneVPL 使用 ICQ，NVIDIA NVENC 使用 CONSTQP。
 `--scale` 是 host 编码分辨率相对被捕获显示器的百分比，可选范围为 10–100，默认 100。例如源画面
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## WebRTC 传输协议 v7
+## WebRTC 传输协议 v8
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-双 DataChannel 和 protocol v7，通过 WebCodecs 解码 NVENC AV1，并发送键鼠 `InputEvent` 与
+双 DataChannel 和 protocol v8，通过 WebCodecs 解码 AV1，并发送键鼠 `InputEvent` 与
 UTF-8 文本剪贴板。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
@@ -257,40 +259,44 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 无序、不重传的
 `remoe-video` DataChannel 承载 `VideoChunkHeader + encoded video chunk`。
 
-### ClientConfig（28 bytes）
+### ClientConfig（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `7` |
-| 6 | u16 | header_size | `28` |
+| 4 | u16 | version | `8` |
+| 6 | u16 | header_size | `36` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
-| 16 | u32 | bitrate_bps | client 请求的 CBR 码率 |
+| 16 | u32 | bitrate_bps | CBR 目标码率；固定质量时为 0 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
 | 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；其他位必须为 0 |
+| 28 | u32 | rate_control | 0=CBR；1=固定质量 |
+| 32 | u32 | quality | 固定质量为 1–51（小=高质量）；CBR 为 0 |
 
-### StreamHeader（36 bytes）
+### StreamHeader（44 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `7` |
-| 6 | u16 | header_size | `36` |
+| 4 | u16 | version | `8` |
+| 6 | u16 | header_size | `44` |
 | 8 | u32 | codec | `AV01` 或 `H264` |
 | 12 | u32 | width | 编码宽度 |
 | 16 | u32 | height | 编码高度 |
 | 20 | u32 | fps_num | 帧率分子 |
 | 24 | u32 | fps_den | 帧率分母，当前为 1 |
-| 28 | u32 | bitrate_bps | 目标码率 |
+| 28 | u32 | bitrate_bps | CBR 目标码率；固定质量时为 0 |
 | 32 | u32 | codec_profile | AV1 为 0；H.264 为 `profile_idc << 16 | constraints << 8 | level_idc` |
+| 36 | u32 | rate_control | 0=CBR；1=固定质量 |
+| 40 | u32 | quality | 固定质量值；CBR 为 0 |
 
 ### StreamReady（8 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `SRDY` |
-| 4 | u16 | version | `7` |
+| 4 | u16 | version | `8` |
 | 6 | u16 | header_size | `8` |
 
 client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
@@ -300,7 +306,7 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `VCHK` |
-| 4 | u16 | version | `7` |
+| 4 | u16 | version | `8` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
 | 12 | u64 | frame_number | 递增帧编号 |
@@ -316,7 +322,7 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `7` |
+| 4 | u16 | version | `8` |
 | 6 | u16 | header_size | `24` |
 | 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
@@ -332,7 +338,7 @@ type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `CLIP` |
-| 4 | u16 | version | `7` |
+| 4 | u16 | version | `8` |
 | 6 | u16 | header_size | `16` |
 | 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 1 MiB |
 | 12 | u32 | sequence | 发送方递增消息编号 |
@@ -347,7 +353,7 @@ Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `WRMS` |
-| 4 | u16 | version | `7` |
+| 4 | u16 | version | `8` |
 | 6 | u16 | header_size | `20` |
 | 8 | u16 | type | 1=SDP；2=ICE candidate；3=DataChannel ready；4=完成确认 |
 | 10 | u16 | reserved | 0 |

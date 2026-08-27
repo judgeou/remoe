@@ -36,6 +36,8 @@ struct Options {
     std::uint32_t fps = 60;
     std::uint32_t bitrate_mbps = 20;
     std::uint32_t scale_percent = 100;
+    bool fixed_quality = false;
+    std::uint32_t quality = 28;
     std::string signaling_url;
 };
 
@@ -59,7 +61,8 @@ void print_help() {
         "remoe_client - low-power Intel AV1 remote desktop viewer\n\n"
         "Usage: remoe_client [options]\n"
         "  --fps <1-240>     Requested frame rate (default: 60)\n"
-        "  --bitrate <Mbps>  Requested AV1 bitrate/quality (default: 20)\n"
+        "  --bitrate <Mbps>  Requested AV1 CBR bitrate (default: 20)\n"
+        "  --quality <1-51>  Use fixed quality; smaller is higher quality (default: 28)\n"
         "  --scale <10-100>  Requested encoding resolution percent (default: 100)\n"
         "  --signal-url <invite-url> Compatibility mode: connect directly with an invite URL\n"
         "Without --signal-url, the passkey login and Host selection window is shown.\n"
@@ -81,6 +84,9 @@ Options parse_options(int argc, char** argv) {
             options.fps = parse_u32(value, argument, 1, 240);
         } else if (argument == "--bitrate") {
             options.bitrate_mbps = parse_u32(value, argument, 1, 1000);
+        } else if (argument == "--quality") {
+            options.quality = parse_u32(value, argument, 1, 51);
+            options.fixed_quality = true;
         } else if (argument == "--scale") {
             options.scale_percent = parse_u32(value, argument, 10, 100);
         } else if (argument == "--signal-url") options.signaling_url = value;
@@ -97,6 +103,14 @@ void validate_stream_header(const remoe::protocol::StreamHeader& header) {
     }
     if (header.codec != remoe::protocol::kCodecAv1 || header.codec_profile != 0) {
         throw std::runtime_error("host stream is not AV1");
+    }
+    const bool cbr = header.rate_control == remoe::protocol::VideoRateControl::Cbr &&
+        header.bitrate_bps >= 1'000'000u && header.quality == 0;
+    const bool fixed_quality =
+        header.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
+        header.bitrate_bps == 0 && header.quality >= 1 && header.quality <= 51;
+    if (!cbr && !fixed_quality) {
+        throw std::runtime_error("host sent invalid AV1 rate-control parameters");
     }
     if (header.width == 0 || header.height == 0 || header.width > 16384 || header.height > 16384) {
         throw std::runtime_error("host sent an invalid video resolution");
@@ -343,7 +357,11 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
 int run(const Options& options) {
     remoe::protocol::ClientConfig request;
     request.fps_num = options.fps;
-    request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
+    request.bitrate_bps = options.fixed_quality ? 0 : options.bitrate_mbps * 1'000'000u;
+    request.rate_control = options.fixed_quality
+        ? remoe::protocol::VideoRateControl::FixedQuality
+        : remoe::protocol::VideoRateControl::Cbr;
+    request.quality = options.fixed_quality ? options.quality : 0;
     request.scale_percent = options.scale_percent;
     request.flags = remoe::protocol::kClientClipboardText;
 
@@ -479,7 +497,7 @@ int run(const Options& options) {
     }
     if (!control_channel->send_binary(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(&request), sizeof(request)))) {
-        throw std::runtime_error("failed to send the protocol v7 stream request");
+        throw std::runtime_error("failed to send the protocol v8 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;
@@ -497,12 +515,18 @@ int run(const Options& options) {
     validate_stream_header(stream_header);
     if (stream_header.fps_num != request.fps_num ||
         stream_header.fps_den != request.fps_den ||
-        stream_header.bitrate_bps != request.bitrate_bps) {
-        throw std::runtime_error("host did not honor the requested frame rate and bitrate");
+        stream_header.bitrate_bps != request.bitrate_bps ||
+        stream_header.rate_control != request.rate_control ||
+        stream_header.quality != request.quality) {
+        throw std::runtime_error("host did not honor the requested video parameters");
     }
     std::cout << "Stream: " << stream_header.width << 'x' << stream_header.height << ", "
-              << stream_header.fps_num << '/' << stream_header.fps_den << " fps, "
-              << stream_header.bitrate_bps / 1'000'000.0 << " Mbps\n";
+              << stream_header.fps_num << '/' << stream_header.fps_den << " fps, ";
+    if (stream_header.rate_control == remoe::protocol::VideoRateControl::FixedQuality) {
+        std::cout << "fixed quality " << stream_header.quality << '\n';
+    } else {
+        std::cout << stream_header.bitrate_bps / 1'000'000.0 << " Mbps CBR\n";
+    }
 
     remoe::VideoWindow window(stream_header.width, stream_header.height);
     window.set_input_callback([&control_channel](const remoe::protocol::InputEvent& event) {
@@ -510,8 +534,10 @@ int run(const Options& options) {
     });
     constexpr std::size_t minimum_queue_bytes = 8 * 1024 * 1024;
     constexpr std::size_t maximum_queue_bytes = 64 * 1024 * 1024;
-    const std::size_t two_seconds_of_stream =
-        static_cast<std::size_t>(stream_header.bitrate_bps) / 8 * 2;
+    const std::size_t two_seconds_of_stream = stream_header.rate_control ==
+        remoe::protocol::VideoRateControl::FixedQuality
+            ? maximum_queue_bytes
+            : static_cast<std::size_t>(stream_header.bitrate_bps) / 8 * 2;
     const std::size_t queue_bytes = (std::clamp)(two_seconds_of_stream,
                                                  minimum_queue_bytes,
                                                  maximum_queue_bytes);
@@ -580,6 +606,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                 session_options.fps = selected.fps;
                 session_options.bitrate_mbps = selected.bitrate_mbps;
                 session_options.scale_percent = selected.scale_percent;
+                session_options.fixed_quality = selected.fixed_quality;
+                session_options.quality = selected.quality;
                 run(session_options);
             });
             return 0;

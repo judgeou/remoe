@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 export const VIDEO_CHUNK_PAYLOAD_SIZE = 16 * 1024;
 
 export const MAGIC = Object.freeze({
@@ -21,6 +21,7 @@ export const SIGNAL_TYPE = Object.freeze({
 });
 
 export const FRAME_FLAG_KEY = 1;
+export const RATE_CONTROL = Object.freeze({ cbr: 0, fixedQuality: 1 });
 export const INPUT_FLAG_RELEASE = 1;
 export const INPUT_FLAG_EXTENDED_KEY = 2;
 
@@ -74,7 +75,7 @@ export class SignalFrameBuffer {
       if (view.getUint32(0, true) !== MAGIC.signal ||
           view.getUint16(4, true) !== PROTOCOL_VERSION ||
           view.getUint16(6, true) !== 20 || view.getUint16(10, true) !== 0) {
-        throw new Error('信令服务器转发了无效的 protocol v7 bootstrap 帧');
+        throw new Error('信令服务器转发了无效的 protocol v8 bootstrap 帧');
       }
       const type = view.getUint16(8, true);
       const valueSize = view.getUint32(12, true);
@@ -99,30 +100,41 @@ export class SignalFrameBuffer {
   }
 }
 
-export function encodeClientConfig({ fps = 60, bitrateMbps = 20, scalePercent = 100 } = {}) {
+export function encodeClientConfig({
+  fps = 60,
+  bitrateMbps = 20,
+  scalePercent = 100,
+  rateControl = 'cbr',
+  quality = 28,
+} = {}) {
+  const fixedQuality = rateControl === 'fixed-quality';
   if (!Number.isInteger(fps) || fps < 1 || fps > 240 ||
-      !Number.isFinite(bitrateMbps) || bitrateMbps < 1 || bitrateMbps > 1000 ||
+      (!fixedQuality && (!Number.isFinite(bitrateMbps) || bitrateMbps < 1 || bitrateMbps > 1000)) ||
+      (fixedQuality && (!Number.isInteger(quality) || quality < 1 || quality > 51)) ||
+      (!fixedQuality && rateControl !== 'cbr') ||
       !Number.isInteger(scalePercent) || scalePercent < 10 || scalePercent > 100) {
     throw new RangeError('无效的视频请求参数');
   }
-  const bitrate = Math.round(bitrateMbps * 1_000_000);
-  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v7 上限');
-  const bytes = new Uint8Array(28);
+  const bitrate = fixedQuality ? 0 : Math.round(bitrateMbps * 1_000_000);
+  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v8 上限');
+  const bytes = new Uint8Array(36);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.clientConfig, true);
   view.setUint16(4, PROTOCOL_VERSION, true);
-  view.setUint16(6, 28, true);
+  view.setUint16(6, 36, true);
   view.setUint32(8, fps, true);
   view.setUint32(12, 1, true);
   view.setUint32(16, bitrate, true);
   view.setUint32(20, scalePercent, true);
   view.setUint32(24, 1, true); // Supports bidirectional UTF-8 clipboard text.
+  view.setUint32(28, fixedQuality ? RATE_CONTROL.fixedQuality : RATE_CONTROL.cbr, true);
+  view.setUint32(32, fixedQuality ? quality : 0, true);
   return bytes;
 }
 
 export function decodeStreamHeader(value) {
   const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  if (bytes.byteLength !== 36) throw new Error('Host 返回的 StreamHeader 长度错误');
+  if (bytes.byteLength !== 44) throw new Error('Host 返回的 StreamHeader 长度错误');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const result = {
     magic: view.getUint32(0, true),
@@ -135,13 +147,19 @@ export function decodeStreamHeader(value) {
     fpsDen: view.getUint32(24, true),
     bitrateBps: view.getUint32(28, true),
     codecProfile: view.getUint32(32, true),
+    rateControl: view.getUint32(36, true),
+    quality: view.getUint32(40, true),
   };
   const codecValid = result.codec === MAGIC.av1 || result.codec === MAGIC.h264;
   const profileValid = result.codec === MAGIC.av1
     ? result.codecProfile === 0
     : result.codecProfile > 0 && result.codecProfile <= 0xffffff;
+  const rateControlValid = result.rateControl === RATE_CONTROL.cbr
+    ? result.bitrateBps >= 1_000_000 && result.quality === 0
+    : result.codec === MAGIC.av1 && result.rateControl === RATE_CONTROL.fixedQuality &&
+      result.bitrateBps === 0 && result.quality >= 1 && result.quality <= 51;
   if (result.magic !== MAGIC.stream || result.version !== PROTOCOL_VERSION ||
-      result.headerSize !== 36 || !codecValid || !profileValid ||
+      result.headerSize !== 44 || !codecValid || !profileValid || !rateControlValid ||
       result.width < 2 || result.height < 2 || result.fpsNum < 1 ||
       result.fpsDen !== 1) {
     throw new Error('Host 返回了无效或不受支持的 StreamHeader');

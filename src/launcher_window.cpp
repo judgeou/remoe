@@ -29,6 +29,8 @@ constexpr int kFpsEdit = 106;
 constexpr int kBitrateEdit = 107;
 constexpr int kScaleEdit = 108;
 constexpr int kStatusText = 109;
+constexpr int kFixedQualityCheck = 110;
+constexpr int kQualityEdit = 111;
 
 std::wstring widen(std::string_view value) {
     if (value.empty()) return {};
@@ -176,6 +178,10 @@ private:
         bitrate_ = add_control(L"EDIT", L"20", WS_BORDER | ES_NUMBER, 210, 352, 65, 25, kBitrateEdit);
         add_control(L"STATIC", L"缩放 %", 0, 295, 355, 55, 22);
         scale_ = add_control(L"EDIT", L"100", WS_BORDER | ES_NUMBER, 355, 352, 60, 25, kScaleEdit);
+        fixed_quality_ = add_control(L"BUTTON", L"固定质量", BS_AUTOCHECKBOX,
+                                     430, 352, 80, 25, kFixedQualityCheck);
+        quality_ = add_control(L"EDIT", L"28", WS_BORDER | ES_NUMBER,
+                               520, 352, 55, 25, kQualityEdit);
         refresh_ = add_control(L"BUTTON", L"刷新", BS_PUSHBUTTON, 20, 395, 80, 28, kRefreshButton);
         connect_ = add_control(L"BUTTON", L"连接", BS_DEFPUSHBUTTON, 110, 395, 100, 28, kConnectButton);
         logout_ = add_control(L"BUTTON", L"退出登录", BS_PUSHBUTTON, 220, 395, 90, 28, kLogoutButton);
@@ -201,6 +207,10 @@ private:
         const bool host_online = selected >= 0 && static_cast<std::size_t>(selected) < hosts_.size() &&
                                  hosts_[static_cast<std::size_t>(selected)].online;
         EnableWindow(connect_, idle && identity_.has_value() && host_online);
+        const bool fixed_quality =
+            SendMessageW(fixed_quality_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        EnableWindow(bitrate_, idle && !fixed_quality);
+        EnableWindow(quality_, idle && fixed_quality);
     }
 
     template <typename Function>
@@ -277,6 +287,9 @@ private:
             pending_selection_.fps = control_u32(fps_, 1, 240, "FPS");
             pending_selection_.bitrate_mbps = control_u32(bitrate_, 1, 1000, "bitrate");
             pending_selection_.scale_percent = control_u32(scale_, 10, 100, "scale");
+            pending_selection_.fixed_quality =
+                SendMessageW(fixed_quality_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            pending_selection_.quality = control_u32(quality_, 1, 51, "quality");
         } catch (const std::exception& error) {
             set_status(error.what());
             return;
@@ -456,6 +469,7 @@ private:
                 case kRefreshButton: begin_refresh(); break;
                 case kConnectButton: begin_connect(); break;
                 case kLogoutButton: begin_logout(); break;
+                case kFixedQualityCheck: update_controls(); break;
                 }
             }
             return 0;
@@ -488,6 +502,8 @@ private:
     HWND fps_ = nullptr;
     HWND bitrate_ = nullptr;
     HWND scale_ = nullptr;
+    HWND fixed_quality_ = nullptr;
+    HWND quality_ = nullptr;
     HWND status_ = nullptr;
     HFONT font_ = nullptr;
     bool font_owned_ = false;

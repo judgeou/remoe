@@ -23,6 +23,8 @@ const emit = defineEmits<{
 
 const fps = defineModel<number>('fps', { required: true });
 const bitrate = defineModel<number>('bitrate', { required: true });
+const rateControl = defineModel<'cbr' | 'fixed-quality'>('rateControl', { required: true });
+const quality = defineModel<number>('quality', { required: true });
 const scale = defineModel<number>('scale', { required: true });
 
 const pairingCode = ref('');
@@ -77,7 +79,9 @@ function removeHost(host: HostSummary) {
 
     <div class="settings dashboard-settings">
       <label><span>FPS</span><input v-model.number="fps" type="number" min="1" max="240"></label>
-      <label><span>码率 Mbps</span><input v-model.number="bitrate" type="number" min="1" max="1000"></label>
+      <label><span>码控</span><select v-model="rateControl"><option value="cbr">CBR</option><option value="fixed-quality">固定质量</option></select></label>
+      <label v-if="rateControl === 'cbr'"><span>码率 Mbps</span><input v-model.number="bitrate" type="number" min="1" max="1000"></label>
+      <label v-else><span>质量（小=好）</span><input v-model.number="quality" type="number" min="1" max="51"></label>
       <label><span>缩放 %</span><input v-model.number="scale" type="number" min="10" max="100"></label>
     </div>
 

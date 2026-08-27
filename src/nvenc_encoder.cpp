@@ -63,7 +63,8 @@ std::vector<EncodedVideoFrame> convert_packets(std::vector<NvEncOutputFrame>& pa
 class NvencAv1Encoder final : public Av1Encoder {
 public:
     NvencAv1Encoder(ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-                    std::uint32_t fps, std::uint32_t bitrate_bps)
+                    std::uint32_t fps, std::uint32_t bitrate_bps,
+                    protocol::VideoRateControl rate_control, std::uint32_t quality)
         : device_(device), encoder_(device, width, height, NV_ENC_BUFFER_FORMAT_ARGB, 0) {
         NV_ENC_INITIALIZE_PARAMS init{NV_ENC_INITIALIZE_PARAMS_VER};
         NV_ENC_CONFIG config{NV_ENC_CONFIG_VER};
@@ -76,11 +77,19 @@ public:
         init.enablePTD = 1;
         init.encodeConfig->gopLength = NVENC_INFINITE_GOPLENGTH;
         init.encodeConfig->frameIntervalP = 1;
-        init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
-        init.encodeConfig->rcParams.averageBitRate = bitrate_bps;
-        init.encodeConfig->rcParams.maxBitRate = bitrate_bps;
-        init.encodeConfig->rcParams.vbvBufferSize = bitrate_bps / fps;
-        init.encodeConfig->rcParams.vbvInitialDelay = init.encodeConfig->rcParams.vbvBufferSize;
+        if (rate_control == protocol::VideoRateControl::FixedQuality) {
+            init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+            init.encodeConfig->rcParams.constQP.qpIntra = quality;
+            init.encodeConfig->rcParams.constQP.qpInterP = quality;
+            init.encodeConfig->rcParams.constQP.qpInterB = quality;
+        } else {
+            init.encodeConfig->rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+            init.encodeConfig->rcParams.averageBitRate = bitrate_bps;
+            init.encodeConfig->rcParams.maxBitRate = bitrate_bps;
+            init.encodeConfig->rcParams.vbvBufferSize = bitrate_bps / fps;
+            init.encodeConfig->rcParams.vbvInitialDelay =
+                init.encodeConfig->rcParams.vbvBufferSize;
+        }
         init.encodeConfig->encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
         init.encodeConfig->encodeCodecConfig.av1Config.repeatSeqHdr = 1;
         encoder_.CreateEncoder(&init);
@@ -129,8 +138,10 @@ private:
 
 std::unique_ptr<Av1Encoder> create_nvenc_av1_encoder(
     ID3D11Device* device, std::uint32_t width, std::uint32_t height,
-    std::uint32_t fps, std::uint32_t bitrate_bps) {
-    return std::make_unique<NvencAv1Encoder>(device, width, height, fps, bitrate_bps);
+    std::uint32_t fps, std::uint32_t bitrate_bps,
+    protocol::VideoRateControl rate_control, std::uint32_t quality) {
+    return std::make_unique<NvencAv1Encoder>(
+        device, width, height, fps, bitrate_bps, rate_control, quality);
 }
 
 } // namespace remoe

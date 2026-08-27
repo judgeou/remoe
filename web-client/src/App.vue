@@ -30,6 +30,8 @@ interface StreamDescription {
   height: number;
   fpsNum: number;
   bitrateBps: number;
+  rateControl: number;
+  quality: number;
   codec: string;
 }
 
@@ -66,6 +68,8 @@ const nativeClientName = ref('remoe Windows client');
 const invite = ref('');
 const fps = ref(60);
 const bitrate = ref(20);
+const rateControl = ref<'cbr' | 'fixed-quality'>('cbr');
+const quality = ref(28);
 const scale = ref(100);
 const running = ref(false);
 const supported = ref(true);
@@ -394,6 +398,8 @@ async function connect(inviteOverride?: string) {
     const nextClient = new RemoeBrowserClient(parsedInvite, {
       fps: fps.value,
       bitrateMbps: bitrate.value,
+      rateControl: rateControl.value,
+      quality: quality.value,
       scalePercent: scale.value,
     }, {
       onStatus: (message: string) => setStatus(message),
@@ -403,8 +409,11 @@ async function connect(inviteOverride?: string) {
         const target = canvas();
         target.width = stream.width;
         target.height = stream.height;
+        const rate = stream.rateControl === 1
+          ? `固定质量 ${stream.quality}`
+          : `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps CBR`;
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
-          `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps · ${stream.codec}`;
+          `${rate} · ${stream.codec}`;
       },
       onFrame: (frame: VideoFrame) => {
         const target = canvas();
@@ -634,6 +643,8 @@ onBeforeUnmount(() => {
           v-model:invite="invite"
           v-model:fps="fps"
           v-model:bitrate="bitrate"
+          v-model:rate-control="rateControl"
+          v-model:quality="quality"
           v-model:scale="scale"
           compact
           :running="running"
@@ -668,6 +679,8 @@ onBeforeUnmount(() => {
       <DevicePanel
         v-model:fps="fps"
         v-model:bitrate="bitrate"
+        v-model:rate-control="rateControl"
+        v-model:quality="quality"
         v-model:scale="scale"
         :hosts="account.hosts"
         :passkeys="account.passkeys"

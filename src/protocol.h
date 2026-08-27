@@ -13,7 +13,7 @@ constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
-constexpr std::uint16_t kVersion = 7;
+constexpr std::uint16_t kVersion = 8;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
@@ -21,6 +21,11 @@ constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
 
 enum ClientFlags : std::uint32_t {
     kClientClipboardText = 1u << 0,
+};
+
+enum class VideoRateControl : std::uint32_t {
+    Cbr = 0,
+    FixedQuality = 1,
 };
 
 enum FrameFlags : std::uint32_t {
@@ -63,6 +68,9 @@ struct ClientConfig {
     std::uint32_t bitrate_bps = 20'000'000;
     std::uint32_t scale_percent = 100;
     std::uint32_t flags = 0;
+    VideoRateControl rate_control = VideoRateControl::Cbr;
+    // FixedQuality uses a 1..51 scale where a smaller value means higher quality.
+    std::uint32_t quality = 0;
 };
 
 struct StreamHeader {
@@ -78,6 +86,8 @@ struct StreamHeader {
     // H.264 uses the low 24 bits for profile_idc, constraint flags and level_idc.
     // AV1 leaves this field at zero.
     std::uint32_t codec_profile = 0;
+    VideoRateControl rate_control = VideoRateControl::Cbr;
+    std::uint32_t quality = 0;
 };
 
 struct StreamReady {
@@ -146,8 +156,8 @@ struct WebRtcSignalHeader {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(ClientConfig) == 28);
-static_assert(sizeof(StreamHeader) == 36);
+static_assert(sizeof(ClientConfig) == 36);
+static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(FrameHeader) == 32);
 static_assert(sizeof(VideoChunkHeader) == 36);

@@ -77,6 +77,9 @@ struct StreamSettings {
     std::uint32_t fps = 60;
     std::uint32_t bitrate_bps = 20'000'000;
     std::uint32_t scale_percent = 100;
+    remoe::protocol::VideoRateControl rate_control =
+        remoe::protocol::VideoRateControl::Cbr;
+    std::uint32_t quality = 28;
 };
 
 bool is_process_elevated() {
@@ -475,6 +478,9 @@ VideoSendResult send_packet(remoe::WebRtcTransport& transport,
 
 bool validate_client_settings(const remoe::protocol::ClientConfig& request,
                               const Options& options, StreamSettings& settings) {
+    const bool cbr = request.rate_control == remoe::protocol::VideoRateControl::Cbr;
+    const bool fixed_quality =
+        request.rate_control == remoe::protocol::VideoRateControl::FixedQuality;
     if (request.magic != remoe::protocol::kClientConfigMagic ||
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
@@ -482,18 +488,24 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
-        request.bitrate_bps < 1'000'000u ||
-        request.bitrate_bps > 1'000'000'000u ||
+        (!cbr && !fixed_quality) ||
+        (cbr && (request.bitrate_bps < 1'000'000u ||
+                 request.bitrate_bps > 1'000'000'000u)) ||
+        (fixed_quality && (request.bitrate_bps != 0 ||
+                           request.quality < 1 || request.quality > 51)) ||
+        (cbr && request.quality != 0) ||
 #if defined(REMOE_X264_HOST)
-        request.bitrate_bps > 50'000'000u ||
+        !cbr || request.bitrate_bps > 50'000'000u ||
 #endif
-        (options.max_bitrate_mbps != 0 &&
+        (cbr && options.max_bitrate_mbps != 0 &&
          request.bitrate_bps > options.max_bitrate_mbps * 1'000'000u)) {
         return false;
     }
     settings.fps = request.fps_num;
     settings.bitrate_bps = request.bitrate_bps;
     settings.scale_percent = request.scale_percent;
+    settings.rate_control = request.rate_control;
+    settings.quality = request.quality;
     return true;
 }
 
@@ -890,7 +902,7 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!validate_client_settings(request, options, settings)) {
-            std::cerr << "Client rejected: invalid protocol v7 stream request\n";
+            std::cerr << "Client rejected: invalid protocol v8 stream request\n";
             control_channel->close();
             continue;
         }
@@ -905,13 +917,18 @@ int run(const Options& options) {
 #else
         auto encoder = remoe::create_preferred_av1_encoder(
             capture.device(), encoded_width, encoded_height,
-            settings.fps, settings.bitrate_bps);
+            settings.fps, settings.bitrate_bps,
+            settings.rate_control, settings.quality);
         capture.use_device(encoder->device());
 #endif
-        std::cout << "Client requested: " << settings.fps << " fps, "
-                  << settings.bitrate_bps / 1'000'000.0 << " Mbps, "
-                  << settings.scale_percent << "% resolution (" << encoded_width << 'x'
-                  << encoded_height << ")\n";
+        std::cout << "Client requested: " << settings.fps << " fps, ";
+        if (settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality) {
+            std::cout << "fixed quality " << settings.quality;
+        } else {
+            std::cout << settings.bitrate_bps / 1'000'000.0 << " Mbps CBR";
+        }
+        std::cout << ", " << settings.scale_percent << "% resolution ("
+                  << encoded_width << 'x' << encoded_height << ")\n";
 
         remoe::protocol::StreamHeader stream_header;
 #if defined(REMOE_X264_HOST)
@@ -922,6 +939,8 @@ int run(const Options& options) {
         stream_header.height = encoded_height;
         stream_header.fps_num = settings.fps;
         stream_header.bitrate_bps = settings.bitrate_bps;
+        stream_header.rate_control = settings.rate_control;
+        stream_header.quality = settings.quality;
         if (!control_channel->send_binary(std::span<const std::uint8_t>(
                 reinterpret_cast<const std::uint8_t*>(&stream_header), sizeof(stream_header)))) {
             continue;

@@ -18,16 +18,26 @@ import { parseInvite } from '../src/core/remoe-client.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
-test('encodes protocol v7 client settings as little-endian packed bytes', () => {
+test('encodes protocol v8 CBR client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });
   const view = new DataView(bytes.buffer);
-  assert.equal(bytes.length, 28);
+  assert.equal(bytes.length, 36);
   assert.equal(view.getUint32(0, true), MAGIC.clientConfig);
-  assert.equal(view.getUint16(4, true), 7);
+  assert.equal(view.getUint16(4, true), 8);
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
   assert.equal(view.getUint32(24, true), 1);
+  assert.equal(view.getUint32(28, true), 0);
+  assert.equal(view.getUint32(32, true), 0);
+});
+
+test('encodes fixed-quality AV1 client settings', () => {
+  const bytes = encodeClientConfig({ fps: 60, rateControl: 'fixed-quality', quality: 24 });
+  const view = new DataView(bytes.buffer);
+  assert.equal(view.getUint32(16, true), 0);
+  assert.equal(view.getUint32(28, true), 1);
+  assert.equal(view.getUint32(32, true), 24);
 });
 
 test('parses bootstrap frames split across arbitrary WebSocket messages', () => {
@@ -43,11 +53,11 @@ test('parses bootstrap frames split across arbitrary WebSocket messages', () => 
 });
 
 test('decodes a valid stream header', () => {
-  const bytes = new Uint8Array(36);
+  const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 7, true);
-  view.setUint16(6, 36, true);
+  view.setUint16(4, 8, true);
+  view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 1920, true);
   view.setUint32(16, 1080, true);
@@ -57,12 +67,31 @@ test('decodes a valid stream header', () => {
   assert.equal(decodeStreamHeader(bytes).width, 1920);
 });
 
-test('decodes a valid H.264 stream header and profile', () => {
-  const bytes = new Uint8Array(36);
+test('decodes fixed-quality AV1 stream parameters', () => {
+  const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 7, true);
-  view.setUint16(6, 36, true);
+  view.setUint16(4, 8, true);
+  view.setUint16(6, 44, true);
+  view.setUint32(8, MAGIC.av1, true);
+  view.setUint32(12, 2560, true);
+  view.setUint32(16, 1440, true);
+  view.setUint32(20, 60, true);
+  view.setUint32(24, 1, true);
+  view.setUint32(36, 1, true);
+  view.setUint32(40, 28, true);
+  const header = decodeStreamHeader(bytes);
+  assert.equal(header.bitrateBps, 0);
+  assert.equal(header.rateControl, 1);
+  assert.equal(header.quality, 28);
+});
+
+test('decodes a valid H.264 stream header and profile', () => {
+  const bytes = new Uint8Array(44);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC.stream, true);
+  view.setUint16(4, 8, true);
+  view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.h264, true);
   view.setUint32(12, 1280, true);
   view.setUint32(16, 720, true);
@@ -83,7 +112,7 @@ test('reassembles an AV1 frame arriving out of chunk order', () => {
     const bytes = new Uint8Array(36 + length);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 7, true);
+    view.setUint16(4, 8, true);
     view.setUint16(6, 36, true);
     view.setUint32(8, 1, true);
     view.setBigUint64(12, 42n, true);
@@ -105,7 +134,7 @@ test('ignores delayed chunks from frames discarded during decoder recovery', () 
     const bytes = new Uint8Array(37);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 7, true);
+    view.setUint16(4, 8, true);
     view.setUint16(6, 36, true);
     view.setBigUint64(12, frameNumber, true);
     view.setBigUint64(20, frameNumber * 1_000n, true);
