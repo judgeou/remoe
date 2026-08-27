@@ -7,8 +7,10 @@ import {
   VideoDecodeGate,
   VideoFrameAssembler,
   decodeStreamHeader,
+  decodeClipboardText,
   encodeClientConfig,
   encodeInputEvent,
+  encodeClipboardText,
   encodeSignal,
   h264CodecString,
 } from '../src/core/protocol.js';
@@ -25,6 +27,7 @@ test('encodes protocol v7 client settings as little-endian packed bytes', () => 
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
+  assert.equal(view.getUint32(24, true), 1);
 });
 
 test('parses bootstrap frames split across arbitrary WebSocket messages', () => {
@@ -174,6 +177,17 @@ test('encodes keyboard input and maps extended Windows scan codes', () => {
   assert.equal(view.getUint16(10, true), 3);
   assert.equal(view.getInt32(12, true), 0x4b);
   assert.equal(view.getUint32(20, true), 17);
+});
+
+test('round-trips UTF-8 clipboard text with a bounded variable-length frame', () => {
+  const bytes = encodeClipboardText('remoe 剪贴板 🚀', 23);
+  const view = new DataView(bytes.buffer);
+  assert.equal(view.getUint32(0, true), MAGIC.clipboard);
+  assert.equal(view.getUint16(6, true), 16);
+  assert.equal(view.getUint32(8, true), bytes.length - 16);
+  assert.deepEqual(decodeClipboardText(bytes), { text: 'remoe 剪贴板 🚀', sequence: 23 });
+  assert.throws(() => decodeClipboardText(bytes.subarray(0, bytes.length - 1)), /无效/);
+  assert.throws(() => encodeClipboardText('x'.repeat(1024 * 1024 + 1)), /1 MiB/);
 });
 
 test('maps touch gestures and virtual text to the existing input protocol', () => {

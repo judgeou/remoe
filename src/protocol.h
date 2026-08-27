@@ -9,6 +9,7 @@ constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little
 constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
+constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
@@ -16,6 +17,11 @@ constexpr std::uint16_t kVersion = 7;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
+constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
+
+enum ClientFlags : std::uint32_t {
+    kClientClipboardText = 1u << 0,
+};
 
 enum FrameFlags : std::uint32_t {
     kFrameKey = 1u << 0,
@@ -116,6 +122,17 @@ struct InputEvent {
     std::uint32_t sequence = 0;
 };
 
+// Bidirectional UTF-8 clipboard text. The payload immediately follows this
+// header and is not NUL-terminated. Clipboard images/files are deliberately
+// excluded so a peer cannot accidentally transfer an unbounded object.
+struct ClipboardHeader {
+    std::uint32_t magic = kClipboardMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(ClipboardHeader);
+    std::uint32_t payload_size = 0;
+    std::uint32_t sequence = 0;
+};
+
 // Framing used only during the TCP bootstrap that precedes the video stream.
 // value/metadata contain SDP+type or candidate+mid respectively.
 struct WebRtcSignalHeader {
@@ -135,6 +152,7 @@ static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(FrameHeader) == 32);
 static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(InputEvent) == 24);
+static_assert(sizeof(ClipboardHeader) == 16);
 static_assert(sizeof(WebRtcSignalHeader) == 20);
 
 } // namespace remoe::protocol

@@ -219,7 +219,8 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 ## WebRTC 传输协议 v7
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-双 DataChannel 和 protocol v7，通过 WebCodecs 解码 NVENC AV1，并发送键鼠 `InputEvent`。连接后
+双 DataChannel 和 protocol v7，通过 WebCodecs 解码 NVENC AV1，并发送键鼠 `InputEvent` 与
+UTF-8 文本剪贴板。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
@@ -236,7 +237,8 @@ npm run build
 
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
-依次承载 `ClientConfig`、`StreamHeader`、`StreamReady` 和 `InputEvent`。无序、不重传的
+依次承载 `ClientConfig`、`StreamHeader`、`StreamReady`、`InputEvent` 和 `ClipboardHeader + text`。
+无序、不重传的
 `remoe-video` DataChannel 承载 `VideoChunkHeader + encoded video chunk`。
 
 ### ClientConfig（28 bytes）
@@ -250,7 +252,7 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | client 请求的 CBR 码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | flags | 当前必须为 0 |
+| 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；其他位必须为 0 |
 
 ### StreamHeader（36 bytes）
 
@@ -309,6 +311,21 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必须为 0。host 收到后会在下一张
 捕获画面强制生成携带 codec headers 的 IDR，用于客户端丢弃积压帧后的快速恢复。
 
+### ClipboardHeader（16 bytes + UTF-8 text）
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `CLIP` |
+| 4 | u16 | version | `7` |
+| 6 | u16 | header_size | `16` |
+| 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 1 MiB |
+| 12 | u32 | sequence | 发送方递增消息编号 |
+
+剪贴板消息可双向发送，只承载纯文本且通过可靠有序的端到端 DataChannel，不经过信令服务器。
+Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本后会尝试写入浏览器剪贴板；如果浏览器
+要求用户手势，工具栏的“接收剪贴板”会亮起，点击即可完成。工具栏的“发送剪贴板”用于把浏览器
+本地剪贴板发送到 Host。
+
 ### WebRtcSignalHeader（20 bytes，仅连接初始化阶段）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
@@ -344,6 +361,8 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
 - `SendInput` 受 Windows UIPI 限制。控制高完整性应用时 host 通常也需要 `--admin`；即使提升权限，
   `Ctrl+Alt+Del` 和 UAC 安全桌面仍不能通过普通 `SendInput` 控制。
+- 剪贴板同步当前仅支持最多 1 MiB 的纯文本，不传输图片、文件列表或富文本。网页读写剪贴板还受
+  HTTPS、安全上下文、页面焦点和浏览器用户手势策略约束。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
 - video DataChannel 使用无序、不重传策略，拥塞或丢包时会跳过旧帧并请求关键帧；当前没有自适应码率。
 
@@ -351,6 +370,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
 - `src/gdi_capture.*`：GDI BitBlt 显示器抓取与鼠标指针合成
+- `src/clipboard.*`：Windows UTF-16 剪贴板与 wire UTF-8 文本之间的转换和消息校验
 - `src/main.cpp`：采集/编码循环、键鼠注入与重连逻辑
 - `src/video_encoder.*`：AV1 编码器抽象与 Intel oneVPL → NVIDIA NVENC 选择策略
 - `src/vpl_encoder.cpp`：Intel oneVPL D3D11/NV12 AV1 硬件编码

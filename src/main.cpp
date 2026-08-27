@@ -5,6 +5,7 @@
 #include "desktop_capture.h"
 #include "video_encoder.h"
 #endif
+#include "clipboard.h"
 #include "encoded_video_frame.h"
 #include "host_identity.h"
 #include "protocol.h"
@@ -46,6 +47,12 @@ constexpr wchar_t kFirewallRuleName[] = L"remoe host WebRTC UDP";
 constexpr long kFirewallProfiles = NET_FW_PROFILE2_DOMAIN |
                                    NET_FW_PROFILE2_PRIVATE |
                                    NET_FW_PROFILE2_PUBLIC;
+
+bool send_clipboard_text(remoe::WebRtcTransport& transport, std::string_view text,
+                         std::uint32_t sequence) {
+    auto message = remoe::make_clipboard_message(text, sequence);
+    return transport.send_binary(message);
+}
 
 BOOL WINAPI console_handler(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
@@ -471,7 +478,7 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
     if (request.magic != remoe::protocol::kClientConfigMagic ||
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
-        request.flags != 0 ||
+        (request.flags & ~remoe::protocol::kClientClipboardText) != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -702,6 +709,9 @@ int run(const Options& options) {
     while (g_running) {
         std::atomic_bool session_running{true};
         std::atomic_bool key_frame_requested{false};
+        std::atomic_bool clipboard_enabled{false};
+        std::atomic<DWORD> clipboard_sequence{GetClipboardSequenceNumber()};
+        std::atomic_uint32_t outbound_clipboard_sequence{0};
         std::mutex input_mutex;
         std::unordered_set<std::uint32_t> pressed_keys;
         std::unordered_set<remoe::protocol::InputType> pressed_buttons;
@@ -735,6 +745,32 @@ int run(const Options& options) {
         control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
             std::lock_guard lock(input_mutex);
             if (!session_running) return;
+            if (message.size() >= sizeof(remoe::protocol::ClipboardHeader)) {
+                remoe::protocol::ClipboardHeader header;
+                std::memcpy(&header, message.data(), sizeof(header));
+                if (header.magic == remoe::protocol::kClipboardMagic) {
+                    const bool valid = header.version == remoe::protocol::kVersion &&
+                        header.header_size == sizeof(header) &&
+                        header.payload_size <= remoe::protocol::kMaxClipboardTextSize &&
+                        message.size() == sizeof(header) + header.payload_size &&
+                        clipboard_enabled.load();
+                    if (!valid) {
+                        std::cerr << "Invalid clipboard message over WebRTC\n";
+                        session_running = false;
+                        handshake.changed.notify_all();
+                        return;
+                    }
+                    const std::string_view text(
+                        reinterpret_cast<const char*>(message.data() + sizeof(header)),
+                        header.payload_size);
+                    if (remoe::write_clipboard_text(text)) {
+                        clipboard_sequence = GetClipboardSequenceNumber();
+                    } else {
+                        std::cerr << "Could not update the Windows clipboard\n";
+                    }
+                    return;
+                }
+            }
             if (message.size() == sizeof(remoe::protocol::ClientConfig)) {
                 remoe::protocol::ClientConfig request;
                 std::memcpy(&request, message.data(), sizeof(request));
@@ -858,6 +894,7 @@ int run(const Options& options) {
             control_channel->close();
             continue;
         }
+        clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
@@ -902,9 +939,23 @@ int run(const Options& options) {
         }
 
         bool first_input = true;
+        bool first_clipboard_poll = true;
         auto next_frame = Clock::now();
         while (g_running && session_running && control_channel->is_open()) {
             next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
+            const DWORD current_clipboard_sequence = GetClipboardSequenceNumber();
+            const DWORD previous_clipboard_sequence =
+                clipboard_sequence.exchange(current_clipboard_sequence);
+            if (clipboard_enabled && (first_clipboard_poll ||
+                current_clipboard_sequence != previous_clipboard_sequence)) {
+                first_clipboard_poll = false;
+                if (auto text = remoe::read_clipboard_text(); text &&
+                    !send_clipboard_text(*control_channel, *text,
+                                         outbound_clipboard_sequence++)) {
+                    session_running = false;
+                    break;
+                }
+            }
 #if defined(REMOE_X264_HOST)
             if (!capture.acquire(std::chrono::milliseconds(100))) continue;
 #else

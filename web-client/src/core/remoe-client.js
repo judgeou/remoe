@@ -7,10 +7,12 @@ import {
   av1CodecString,
   h264CodecString,
   MAGIC,
+  decodeClipboardText,
   decodeStreamHeader,
   encodeClientConfig,
   encodeInputEvent,
   encodeKeyFrameRequest,
+  encodeClipboardText,
   encodeSignal,
   encodeStreamReady,
 } from './protocol.js';
@@ -88,6 +90,7 @@ export class RemoeBrowserClient {
   #lastKeyFrameRequest = Number.NEGATIVE_INFINITY;
   #inputSequence = 0;
   #inputReady = false;
+  #clipboardSequence = 0;
   #statsStartedAt = 0;
   #statsBytes = 0;
   #statsFrames = 0;
@@ -128,6 +131,12 @@ export class RemoeBrowserClient {
   sendInput(event) {
     if (!this.#inputReady || this.#control?.readyState !== 'open') return false;
     this.#control.send(encodeInputEvent({ ...event, sequence: this.#inputSequence++ }));
+    return true;
+  }
+
+  sendClipboardText(text) {
+    if (!this.#inputReady || this.#control?.readyState !== 'open') return false;
+    this.#control.send(encodeClipboardText(text, this.#clipboardSequence++));
     return true;
   }
 
@@ -251,7 +260,15 @@ export class RemoeBrowserClient {
   }
 
   async #handleControl(value) {
-    const header = decodeStreamHeader(toBytes(value));
+    const bytes = toBytes(value);
+    if (bytes.byteLength >= 4 &&
+        new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true) ===
+          MAGIC.clipboard) {
+      const clipboard = decodeClipboardText(bytes);
+      this.#events.onClipboard?.(clipboard.text);
+      return;
+    }
+    const header = decodeStreamHeader(bytes);
     const isH264 = header.codec === MAGIC.h264;
     const codec = isH264 ? h264CodecString(header) : av1CodecString(header);
     const config = {

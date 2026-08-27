@@ -22,6 +22,7 @@ defineProps<{
   fullscreenActive: boolean;
   orientationLocked: boolean;
   wakeLockEnabled: boolean;
+  remoteClipboardPending: boolean;
   viewportZoom: number;
 }>();
 
@@ -33,6 +34,8 @@ const emit = defineEmits<{
   virtualModifier: [code: string];
   virtualMouse: [button: 'left' | 'right'];
   textInput: [text: string];
+  sendClipboard: [];
+  receiveClipboard: [];
   fullscreen: [];
   orientation: [];
   wakeLock: [];
@@ -144,6 +147,16 @@ defineExpose({
       >控制</button>
       <div v-show="!mobileToolbarHidden" class="remote-toolbar-main">
         <span id="remote-status" :class="{ error: statusError }">{{ status }}</span>
+        <button type="button" title="把浏览器剪贴板发送到远程电脑" @click="emit('sendClipboard')">
+          发送剪贴板
+        </button>
+        <button
+          type="button"
+          title="把远程电脑剪贴板写入浏览器"
+          :class="{ active: remoteClipboardPending }"
+          :disabled="!remoteClipboardPending"
+          @click="emit('receiveClipboard')"
+        >接收剪贴板</button>
         <label class="performance-toggle">
           <input v-model="showPerformance" type="checkbox">
           <span>性能</span>
@@ -186,13 +199,20 @@ defineExpose({
               : '点击定位 · 按住拖动；可用键盘面板中的右键按钮' }}
           </p>
           <div class="mobile-display-actions">
-          <button type="button" @click="emit('fullscreen')">{{ fullscreenActive ? '退出全屏' : '全屏' }}</button>
-          <button type="button" :class="{ active: orientationLocked }" @click="emit('orientation')">横屏</button>
-          <button type="button" :class="{ active: wakeLockEnabled }" @click="emit('wakeLock')">常亮</button>
+            <button type="button" @click="emit('fullscreen')">{{ fullscreenActive ? '退出全屏' : '全屏' }}</button>
+            <button type="button" :class="{ active: orientationLocked }" @click="emit('orientation')">横屏</button>
+            <button type="button" :class="{ active: wakeLockEnabled }" @click="emit('wakeLock')">常亮</button>
             <button type="button" :class="{ active: showPerformance }" @click="showPerformance = !showPerformance">性能</button>
             <button type="button" :disabled="viewportZoom <= 1" @click="emit('resetViewport')">
               画面 {{ Math.round(viewportZoom * 100) }}%
             </button>
+            <button type="button" @click="emit('sendClipboard')">发送剪贴板</button>
+            <button
+              type="button"
+              :class="{ active: remoteClipboardPending }"
+              :disabled="!remoteClipboardPending"
+              @click="emit('receiveClipboard')"
+            >接收剪贴板</button>
           </div>
         </div>
         <div v-show="showMobileKeyboard" class="mobile-keyboard">

@@ -1,3 +1,4 @@
+#include "clipboard.h"
 #include "protocol.h"
 #include "video_window.h"
 #include "vpl_decoder.h"
@@ -112,6 +113,12 @@ bool send_control_event(remoe::WebRtcTransport& control,
                         const remoe::protocol::InputEvent& event) {
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(&event);
     return control.send_binary(std::span<const std::uint8_t>(bytes, sizeof(event)));
+}
+
+bool send_clipboard_text(remoe::WebRtcTransport& control, std::string_view text,
+                         std::uint32_t sequence) {
+    auto message = remoe::make_clipboard_message(text, sequence);
+    return control.send_binary(message);
 }
 
 class EncodedFrameQueue {
@@ -338,6 +345,7 @@ int run(const Options& options) {
     request.fps_num = options.fps;
     request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.scale_percent = options.scale_percent;
+    request.flags = remoe::protocol::kClientClipboardText;
 
     struct ClientSessionState {
         std::mutex mutex;
@@ -353,6 +361,8 @@ int run(const Options& options) {
             std::chrono::steady_clock::now();
         std::uint64_t video_bytes = 0;
         std::uint64_t network_bytes = 0;
+        std::atomic<DWORD> clipboard_sequence{GetClipboardSequenceNumber()};
+        std::atomic_uint32_t outbound_clipboard_sequence{0};
     };
     auto state = std::make_shared<ClientSessionState>();
 
@@ -377,6 +387,22 @@ int run(const Options& options) {
         std::cout << "WebRTC video DataChannel connected\n";
     };
     control_callbacks.on_binary = [state, fail](std::vector<std::uint8_t> message) {
+        if (message.size() >= sizeof(remoe::protocol::ClipboardHeader)) {
+            remoe::protocol::ClipboardHeader clipboard;
+            std::memcpy(&clipboard, message.data(), sizeof(clipboard));
+            if (clipboard.magic == remoe::protocol::kClipboardMagic) {
+                if (!remoe::validate_clipboard_message(message)) {
+                    fail("host sent an invalid clipboard message");
+                    return;
+                }
+                if (remoe::write_clipboard_text(remoe::clipboard_message_text(message))) {
+                    state->clipboard_sequence = GetClipboardSequenceNumber();
+                } else {
+                    std::cerr << "Could not update the Windows clipboard\n";
+                }
+                return;
+            }
+        }
         if (message.size() != sizeof(remoe::protocol::StreamHeader)) {
             fail("host sent an unexpected WebRTC control message");
             return;
@@ -505,9 +531,27 @@ int run(const Options& options) {
     }
     std::thread decoder(decode_frames, std::ref(window), std::ref(queue),
                         std::ref(pipeline));
+    std::atomic_bool clipboard_running{true};
+    std::thread clipboard_monitor([&] {
+        while (clipboard_running && control_channel->is_open()) {
+            const DWORD current = GetClipboardSequenceNumber();
+            const DWORD previous = state->clipboard_sequence.exchange(current);
+            if (current != previous) {
+                if (auto text = remoe::read_clipboard_text(); text &&
+                    !send_clipboard_text(*control_channel, *text,
+                                         state->outbound_clipboard_sequence++)) {
+                    fail("failed to send clipboard text to the host");
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
     const int result = window.message_loop();
     window.stop();
     queue.stop();
+    clipboard_running = false;
+    clipboard_monitor.join();
     control_channel->close();
     decoder.join();
     {

@@ -7,6 +7,7 @@ export const MAGIC = Object.freeze({
   streamReady: 0x59445253,
   videoChunk: 0x4b484356,
   input: 0x54504e49,
+  clipboard: 0x50494c43,
   signal: 0x534d5257,
   av1: 0x31305641,
   h264: 0x34363248,
@@ -38,6 +39,7 @@ export const INPUT_TYPE = Object.freeze({
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
+export const MAX_CLIPBOARD_TEXT_SIZE = 1024 * 1024;
 
 export function encodeSignal(type, value = '', metadata = '') {
   const valueBytes = encoder.encode(value);
@@ -114,7 +116,7 @@ export function encodeClientConfig({ fps = 60, bitrateMbps = 20, scalePercent = 
   view.setUint32(12, 1, true);
   view.setUint32(16, bitrate, true);
   view.setUint32(20, scalePercent, true);
-  view.setUint32(24, 0, true);
+  view.setUint32(24, 1, true); // Supports bidirectional UTF-8 clipboard text.
   return bytes;
 }
 
@@ -177,6 +179,39 @@ export function encodeInputEvent({ type, flags = 0, value1 = 0, value2 = 0, sequ
 
 export function encodeKeyFrameRequest(sequence) {
   return encodeInputEvent({ type: INPUT_TYPE.requestKeyFrame, sequence });
+}
+
+export function encodeClipboardText(text, sequence = 0) {
+  if (typeof text !== 'string') throw new TypeError('剪贴板内容必须是文本');
+  const payload = encoder.encode(text);
+  if (payload.byteLength > MAX_CLIPBOARD_TEXT_SIZE) {
+    throw new RangeError('剪贴板文本超过 1 MiB 上限');
+  }
+  const bytes = new Uint8Array(16 + payload.byteLength);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC.clipboard, true);
+  view.setUint16(4, PROTOCOL_VERSION, true);
+  view.setUint16(6, 16, true);
+  view.setUint32(8, payload.byteLength, true);
+  view.setUint32(12, sequence >>> 0, true);
+  bytes.set(payload, 16);
+  return bytes;
+}
+
+export function decodeClipboardText(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (bytes.byteLength < 16) throw new Error('Host 发来了截断的剪贴板消息');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const payloadSize = view.getUint32(8, true);
+  if (view.getUint32(0, true) !== MAGIC.clipboard ||
+      view.getUint16(4, true) !== PROTOCOL_VERSION || view.getUint16(6, true) !== 16 ||
+      payloadSize > MAX_CLIPBOARD_TEXT_SIZE || bytes.byteLength !== 16 + payloadSize) {
+    throw new Error('Host 发来了无效的剪贴板消息');
+  }
+  return {
+    text: decoder.decode(bytes.subarray(16)),
+    sequence: view.getUint32(12, true),
+  };
 }
 
 export function decodeVideoChunk(value) {

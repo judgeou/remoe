@@ -85,6 +85,7 @@ const activeModifiers = ref<string[]>([]);
 const fullscreenActive = ref(false);
 const orientationLocked = ref(false);
 const wakeLockEnabled = ref(false);
+const remoteClipboardPending = ref(false);
 const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
 let wakeLockSentinel: WakeLockSentinel | null = null;
@@ -93,6 +94,7 @@ let fittedVideoSize: { width: number; height: number } | null = null;
 let viewportPan = { x: 0, y: 0 };
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
+let remoteClipboardText = '';
 
 function canvas(): HTMLCanvasElement {
   if (!viewer.value) throw new Error('远程画面尚未挂载');
@@ -205,6 +207,8 @@ function leaveRemoteMode() {
   delete canvasStyle.transform;
   delete canvasStyle.transformOrigin;
   Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, dataRateKBps: 0, lossEvents: 0 });
+  remoteClipboardPending.value = false;
+  remoteClipboardText = '';
   document.body.classList.remove('touch-control-active');
   releaseMobileDisplayFeatures();
   setRemoteActive(false);
@@ -248,6 +252,40 @@ function sendTextInput(text: string) {
   const unsupported = inputController?.sendText(text) ?? [];
   if (unsupported.length > 0) {
     setStatus('移动软键盘目前仅支持英文、数字和常用符号', true);
+  }
+}
+
+async function sendLocalClipboard() {
+  try {
+    if (!navigator.clipboard?.readText) throw new Error('当前浏览器不允许读取剪贴板');
+    const text = await navigator.clipboard.readText();
+    if (!client.value?.sendClipboardText(text)) throw new Error('控制连接尚未就绪');
+    setStatus('本地剪贴板已发送到远程电脑');
+  } catch (error) {
+    setStatus(`无法发送剪贴板：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+async function acceptRemoteClipboard() {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不允许写入剪贴板');
+    await navigator.clipboard.writeText(remoteClipboardText);
+    remoteClipboardPending.value = false;
+    setStatus('远程剪贴板已同步到本机');
+  } catch (error) {
+    setStatus(`无法接收剪贴板：${error instanceof Error ? error.message : String(error)}`, true);
+  }
+}
+
+async function handleRemoteClipboard(text: string) {
+  remoteClipboardText = text;
+  remoteClipboardPending.value = true;
+  if (!document.hasFocus() || !navigator.clipboard?.writeText) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    remoteClipboardPending.value = false;
+  } catch {
+    // Browsers commonly require a user gesture. Keep the toolbar action available.
   }
 }
 
@@ -389,6 +427,7 @@ async function connect(inviteOverride?: string) {
           : '画面已连接 · 点击画面接管键鼠');
       },
       onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
+      onClipboard: (text: string) => { void handleRemoteClipboard(text); },
       onError: (error: Error) => {
         leaveRemoteMode();
         setStatus(error.message, true);
@@ -632,6 +671,7 @@ onBeforeUnmount(() => {
       :fullscreen-active="fullscreenActive"
       :orientation-locked="orientationLocked"
       :wake-lock-enabled="wakeLockEnabled"
+      :remote-clipboard-pending="remoteClipboardPending"
       :viewport-zoom="viewportZoom"
       @capture="captureInput"
       @stop="stopSession"
@@ -640,6 +680,8 @@ onBeforeUnmount(() => {
       @virtual-modifier="toggleVirtualModifier"
       @virtual-mouse="sendVirtualMouse"
       @text-input="sendTextInput"
+      @send-clipboard="sendLocalClipboard"
+      @receive-clipboard="acceptRemoteClipboard"
       @fullscreen="toggleFullscreen"
       @orientation="toggleOrientation"
       @wake-lock="toggleWakeLock"

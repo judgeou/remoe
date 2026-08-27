@@ -158,6 +158,8 @@ endforeach()
 
 add_executable(remoe_host
     src/remoe_host.manifest
+    src/clipboard.cpp
+    src/clipboard.h
     src/host_identity.cpp
     src/host_identity.h
     src/main.cpp
@@ -244,6 +246,8 @@ if(REMOE_BUILD_X264_HOST)
 
     add_executable(remoe_host_x264
         src/remoe_host.manifest
+        src/clipboard.cpp
+        src/clipboard.h
         src/encoded_video_frame.h
         src/gdi_capture.cpp
         src/gdi_capture.h
@@ -283,6 +287,8 @@ endif()
 
 if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
     add_executable(remoe_client
+        src/clipboard.cpp
+        src/clipboard.h
         src/client_main.cpp
         src/protocol.h
         src/video_window.cpp
