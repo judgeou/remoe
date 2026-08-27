@@ -80,8 +80,10 @@ void VplAv1Decoder::compact_bitstream() {
     bitstream_.DataOffset = 0;
 }
 
-void VplAv1Decoder::submit(std::span<const std::uint8_t> encoded_frame) {
+void VplAv1Decoder::submit(std::span<const std::uint8_t> encoded_frame,
+                           std::uint64_t timestamp_us) {
     if (encoded_frame.empty()) return;
+    submitted_timestamps_.push_back(timestamp_us);
     compact_bitstream();
     const std::size_t required = static_cast<std::size_t>(bitstream_.DataLength) + encoded_frame.size();
     if (required > (std::numeric_limits<mfxU32>::max)()) {
@@ -159,7 +161,10 @@ void VplAv1Decoder::handle_surface(mfxFrameSurface1* surface) {
     }
     const std::uint32_t width = surface->Info.CropW ? surface->Info.CropW : surface->Info.Width;
     const std::uint32_t height = surface->Info.CropH ? surface->Info.CropH : surface->Info.Height;
-    callback_(static_cast<ID3D11Texture2D*>(resource), width, height);
+    const std::uint64_t timestamp_us = submitted_timestamps_.empty()
+        ? 0 : submitted_timestamps_.front();
+    if (!submitted_timestamps_.empty()) submitted_timestamps_.pop_front();
+    callback_(static_cast<ID3D11Texture2D*>(resource), width, height, timestamp_us);
 }
 
 void VplAv1Decoder::drain() {

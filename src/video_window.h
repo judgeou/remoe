@@ -29,6 +29,7 @@ public:
     void request_close() noexcept;
     int message_loop();
     void update_transfer_statistics(double video_mbps, double network_mb_per_second) noexcept;
+    void update_frame_age(double age_ms) noexcept;
     void set_input_callback(std::function<bool(const protocol::InputEvent&)> callback);
 
     // Called by the decoder thread. The input texture remains GPU-resident.
@@ -48,6 +49,7 @@ private:
 
     HWND window_ = nullptr;
     std::atomic_bool running_{true};
+    std::atomic<double> frame_age_ms_{0.0};
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;

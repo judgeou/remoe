@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 export const VIDEO_CHUNK_PAYLOAD_SIZE = 16 * 1024;
 
 export const MAGIC = Object.freeze({
@@ -75,7 +75,7 @@ export class SignalFrameBuffer {
       if (view.getUint32(0, true) !== MAGIC.signal ||
           view.getUint16(4, true) !== PROTOCOL_VERSION ||
           view.getUint16(6, true) !== 20 || view.getUint16(10, true) !== 0) {
-        throw new Error('信令服务器转发了无效的 protocol v8 bootstrap 帧');
+        throw new Error('信令服务器转发了无效的 protocol v9 bootstrap 帧');
       }
       const type = view.getUint16(8, true);
       const valueSize = view.getUint32(12, true);
@@ -116,7 +116,7 @@ export function encodeClientConfig({
     throw new RangeError('无效的视频请求参数');
   }
   const bitrate = fixedQuality ? 0 : Math.round(bitrateMbps * 1_000_000);
-  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v8 上限');
+  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v9 上限');
   const bytes = new Uint8Array(36);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.clientConfig, true);

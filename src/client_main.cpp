@@ -123,6 +123,77 @@ struct EncodedFrame {
     bool reset_decoder = false;
 };
 
+class FrameAgeTracker {
+public:
+    void observe_sync(const remoe::protocol::ClockSyncResponse& response,
+                      std::uint64_t client_receive_us) noexcept {
+        if (response.host_send_us < response.host_receive_us ||
+            client_receive_us < response.client_send_us) return;
+        const std::uint64_t round_trip = client_receive_us - response.client_send_us;
+        const std::uint64_t host_processing =
+            response.host_send_us - response.host_receive_us;
+        if (round_trip < host_processing) return;
+        const std::uint64_t network_round_trip = round_trip - host_processing;
+        const auto max_signed = static_cast<std::uint64_t>(
+            (std::numeric_limits<std::int64_t>::max)());
+        if (response.client_send_us > max_signed || client_receive_us > max_signed ||
+            response.host_receive_us > max_signed || response.host_send_us > max_signed) return;
+
+        const std::int64_t offset = (
+            static_cast<std::int64_t>(response.host_receive_us) -
+                static_cast<std::int64_t>(response.client_send_us) +
+            static_cast<std::int64_t>(response.host_send_us) -
+                static_cast<std::int64_t>(client_receive_us)) / 2;
+        std::lock_guard lock(mutex_);
+        samples_.push_back({network_round_trip, offset});
+        if (samples_.size() > 8) samples_.pop_front();
+        const auto best = std::min_element(samples_.begin(), samples_.end(),
+            [](const SyncSample& lhs, const SyncSample& rhs) {
+                return lhs.network_round_trip_us < rhs.network_round_trip_us;
+            });
+        host_minus_client_us_ = best->host_minus_client_us;
+        synchronized_ = true;
+    }
+
+    [[nodiscard]] double relative_age_ms(std::uint64_t host_timestamp_us) const noexcept {
+        if (host_timestamp_us > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)())) return 0.0;
+        std::lock_guard lock(mutex_);
+        if (!synchronized_) return 0.0;
+        const auto age_us = now_us_signed() + host_minus_client_us_ -
+            static_cast<std::int64_t>(host_timestamp_us);
+        return static_cast<double>((std::max<std::int64_t>)(age_us, 0)) / 1000.0;
+    }
+
+    static std::uint64_t now_us() noexcept {
+        return static_cast<std::uint64_t>(now_us_signed());
+    }
+
+private:
+    struct SyncSample {
+        std::uint64_t network_round_trip_us;
+        std::int64_t host_minus_client_us;
+    };
+
+    static std::int64_t now_us_signed() noexcept {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    mutable std::mutex mutex_;
+    std::deque<SyncSample> samples_;
+    std::int64_t host_minus_client_us_ = 0;
+    bool synchronized_ = false;
+};
+
+bool send_clock_sync(remoe::WebRtcTransport& transport, std::uint32_t sequence) {
+    remoe::protocol::ClockSyncRequest request;
+    request.sequence = sequence;
+    request.client_send_us = FrameAgeTracker::now_us();
+    return transport.send_binary(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(&request), sizeof(request)));
+}
+
 bool send_control_event(remoe::WebRtcTransport& control,
                         const remoe::protocol::InputEvent& event) {
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(&event);
@@ -327,12 +398,13 @@ private:
 };
 
 void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
-                   PipelineState& pipeline) {
+                   PipelineState& pipeline, FrameAgeTracker& frame_age) {
     try {
-        const auto create_decoder = [&window] {
+        const auto create_decoder = [&window, &frame_age] {
             return std::make_unique<remoe::VplAv1Decoder>(window.device(),
-                [&window](ID3D11Texture2D* texture, std::uint32_t width,
-                          std::uint32_t height) {
+                [&window, &frame_age](ID3D11Texture2D* texture, std::uint32_t width,
+                          std::uint32_t height, std::uint64_t timestamp_us) {
+                    window.update_frame_age(frame_age.relative_age_ms(timestamp_us));
                     window.present(texture, width, height);
                 });
         };
@@ -346,7 +418,7 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
                 decoder = create_decoder();
                 std::cerr << "Decoder reset after dropping stale frames\n";
             }
-            decoder->submit(frame.payload);
+            decoder->submit(frame.payload, frame.header.timestamp_us);
         }
         if (window.running()) decoder->drain();
     } catch (...) {
@@ -381,6 +453,8 @@ int run(const Options& options) {
         std::uint64_t network_bytes = 0;
         std::atomic<DWORD> clipboard_sequence{GetClipboardSequenceNumber()};
         std::atomic_uint32_t outbound_clipboard_sequence{0};
+        FrameAgeTracker frame_age;
+        std::atomic_uint32_t clock_sequence{0};
     };
     auto state = std::make_shared<ClientSessionState>();
 
@@ -405,6 +479,20 @@ int run(const Options& options) {
         std::cout << "WebRTC video DataChannel connected\n";
     };
     control_callbacks.on_binary = [state, fail](std::vector<std::uint8_t> message) {
+        const auto client_receive_us = FrameAgeTracker::now_us();
+        if (message.size() == sizeof(remoe::protocol::ClockSyncResponse)) {
+            remoe::protocol::ClockSyncResponse response;
+            std::memcpy(&response, message.data(), sizeof(response));
+            if (response.magic == remoe::protocol::kClockSyncMagic) {
+                if (response.version != remoe::protocol::kVersion ||
+                    response.header_size != sizeof(response) || response.reserved != 0) {
+                    fail("host sent an invalid clock synchronization response");
+                    return;
+                }
+                state->frame_age.observe_sync(response, client_receive_us);
+                return;
+            }
+        }
         if (message.size() >= sizeof(remoe::protocol::ClipboardHeader)) {
             remoe::protocol::ClipboardHeader clipboard;
             std::memcpy(&clipboard, message.data(), sizeof(clipboard));
@@ -497,7 +585,7 @@ int run(const Options& options) {
     }
     if (!control_channel->send_binary(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(&request), sizeof(request)))) {
-        throw std::runtime_error("failed to send the protocol v8 stream request");
+        throw std::runtime_error("failed to send the protocol v9 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;
@@ -528,6 +616,12 @@ int run(const Options& options) {
         std::cout << stream_header.bitrate_bps / 1'000'000.0 << " Mbps CBR\n";
     }
 
+    for (int sample = 0; sample < 8; ++sample) {
+        if (!send_clock_sync(*control_channel, state->clock_sequence++)) {
+            throw std::runtime_error("failed to synchronize clocks with the host");
+        }
+    }
+
     remoe::VideoWindow window(stream_header.width, stream_header.height);
     window.set_input_callback([&control_channel](const remoe::protocol::InputEvent& event) {
         return send_control_event(*control_channel, event);
@@ -556,7 +650,18 @@ int run(const Options& options) {
         throw std::runtime_error("failed to acknowledge the WebRTC video stream");
     }
     std::thread decoder(decode_frames, std::ref(window), std::ref(queue),
-                        std::ref(pipeline));
+                        std::ref(pipeline), std::ref(state->frame_age));
+    std::atomic_bool clock_running{true};
+    std::thread clock_monitor([&] {
+        int ticks = 0;
+        while (clock_running && control_channel->is_open()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (++ticks >= 100) {
+                ticks = 0;
+                if (!send_clock_sync(*control_channel, state->clock_sequence++)) break;
+            }
+        }
+    });
     std::atomic_bool clipboard_running{true};
     std::thread clipboard_monitor([&] {
         while (clipboard_running && control_channel->is_open()) {
@@ -577,7 +682,9 @@ int run(const Options& options) {
     window.stop();
     queue.stop();
     clipboard_running = false;
+    clock_running = false;
     clipboard_monitor.join();
+    clock_monitor.join();
     control_channel->close();
     decoder.join();
     {

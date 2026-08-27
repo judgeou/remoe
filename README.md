@@ -234,10 +234,10 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## WebRTC 传输协议 v8
+## WebRTC 传输协议 v9
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-双 DataChannel 和 protocol v8，通过 WebCodecs 解码 AV1，并发送键鼠 `InputEvent` 与
+双 DataChannel 和 protocol v9，通过 WebCodecs 解码 AV1，并发送键鼠 `InputEvent` 与
 UTF-8 文本剪贴板。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
@@ -264,7 +264,7 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
@@ -279,7 +279,7 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `44` |
 | 8 | u32 | codec | `AV01` 或 `H264` |
 | 12 | u32 | width | 编码宽度 |
@@ -296,17 +296,29 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `SRDY` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `8` |
 
 client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
+
+### ClockSyncRequest / ClockSyncResponse
+
+原生 client 在开始播放前发送多次时钟同步请求，并在播放期间定期重采样。Host 使用与视频帧
+`timestamp_us` 相同的单调时钟基准返回接收和发送时间。Client 采用 NTP 四时间戳算法，在最近 8 个
+样本的滑动窗口中选择最低 RTT
+样本估算时钟偏移；标题栏的 `Age` 表示从 Host 帧时间戳到实际提交显示的估算年龄。该估算不依赖
+系统墙上时钟，但上下行路径固有的不对称仍可能带来约为路径时延差一半的误差。
+
+`ClockSyncRequest` 为 24 bytes：`CCLK` magic、version、header size、sequence、reserved，以及
+`client_send_us`。`ClockSyncResponse` 为 40 bytes，在回显 sequence 和 `client_send_us` 后追加
+`host_receive_us` 与 `host_send_us`。
 
 ### VideoChunkHeader（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `VCHK` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
 | 12 | u64 | frame_number | 递增帧编号 |
@@ -322,7 +334,7 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `24` |
 | 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
@@ -338,7 +350,7 @@ type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `CLIP` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `16` |
 | 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 1 MiB |
 | 12 | u32 | sequence | 发送方递增消息编号 |
@@ -353,7 +365,7 @@ Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `WRMS` |
-| 4 | u16 | version | `8` |
+| 4 | u16 | version | `9` |
 | 6 | u16 | header_size | `20` |
 | 8 | u16 | type | 1=SDP；2=ICE candidate；3=DataChannel ready；4=完成确认 |
 | 10 | u16 | reserved | 0 |

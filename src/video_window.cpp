@@ -326,9 +326,13 @@ void VideoWindow::update_transfer_statistics(double video_mbps,
                                              double network_mb_per_second) noexcept {
     if (!running_ || !window_) return;
     wchar_t title[160]{};
-    swprintf_s(title, L"remoe client | AV1 %.2f Mbps | Network %.2f MB/s",
-               video_mbps, network_mb_per_second);
+    swprintf_s(title, L"remoe client | AV1 %.2f Mbps | Network %.2f MB/s | Age +%.1f ms",
+               video_mbps, network_mb_per_second, frame_age_ms_.load());
     SetWindowTextW(window_, title);
+}
+
+void VideoWindow::update_frame_age(double age_ms) noexcept {
+    frame_age_ms_ = (std::max)(age_ms, 0.0);
 }
 
 LRESULT CALLBACK VideoWindow::window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {

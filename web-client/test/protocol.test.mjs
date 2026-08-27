@@ -18,12 +18,12 @@ import { parseInvite } from '../src/core/remoe-client.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
-test('encodes protocol v8 CBR client settings as little-endian packed bytes', () => {
+test('encodes protocol v9 CBR client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });
   const view = new DataView(bytes.buffer);
   assert.equal(bytes.length, 36);
   assert.equal(view.getUint32(0, true), MAGIC.clientConfig);
-  assert.equal(view.getUint16(4, true), 8);
+  assert.equal(view.getUint16(4, true), 9);
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
@@ -56,7 +56,7 @@ test('decodes a valid stream header', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 8, true);
+  view.setUint16(4, 9, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 1920, true);
@@ -71,7 +71,7 @@ test('decodes fixed-quality AV1 stream parameters', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 8, true);
+  view.setUint16(4, 9, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 2560, true);
@@ -90,7 +90,7 @@ test('decodes a valid H.264 stream header and profile', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 8, true);
+  view.setUint16(4, 9, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.h264, true);
   view.setUint32(12, 1280, true);
@@ -112,7 +112,7 @@ test('reassembles an AV1 frame arriving out of chunk order', () => {
     const bytes = new Uint8Array(36 + length);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 8, true);
+    view.setUint16(4, 9, true);
     view.setUint16(6, 36, true);
     view.setUint32(8, 1, true);
     view.setBigUint64(12, 42n, true);
@@ -134,7 +134,7 @@ test('ignores delayed chunks from frames discarded during decoder recovery', () 
     const bytes = new Uint8Array(37);
     const view = new DataView(bytes.buffer);
     view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 8, true);
+    view.setUint16(4, 9, true);
     view.setUint16(6, 36, true);
     view.setBigUint64(12, frameNumber, true);
     view.setBigUint64(20, frameNumber * 1_000n, true);

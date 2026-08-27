@@ -20,7 +20,7 @@ const scale = defineModel<number>('scale', { required: true });
 
 <template>
   <header v-if="!compact">
-    <p class="eyebrow">REMOE · PROTOCOL V8</p>
+    <p class="eyebrow">REMOE · PROTOCOL V9</p>
     <h1>浏览器远程连接</h1>
     <p class="intro">通过 STUN-only WebRTC DataChannel 接收 AV1 画面并控制远程键鼠。</p>
   </header>

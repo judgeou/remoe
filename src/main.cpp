@@ -728,6 +728,7 @@ int run(const Options& options) {
         std::unordered_set<std::uint32_t> pressed_keys;
         std::unordered_set<remoe::protocol::InputType> pressed_buttons;
         bool injection_warning_shown = false;
+        std::atomic<remoe::WebRtcTransport*> active_transport{nullptr};
 
         struct SessionHandshake {
             std::mutex mutex;
@@ -755,8 +756,33 @@ int run(const Options& options) {
             std::cout << "WebRTC video DataChannel connected\n";
         };
         control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
+            const auto host_receive_us = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count());
             std::lock_guard lock(input_mutex);
             if (!session_running) return;
+            if (message.size() == sizeof(remoe::protocol::ClockSyncRequest)) {
+                remoe::protocol::ClockSyncRequest request;
+                std::memcpy(&request, message.data(), sizeof(request));
+                auto* transport = active_transport.load();
+                if (request.magic == remoe::protocol::kClockSyncMagic &&
+                    request.version == remoe::protocol::kVersion &&
+                    request.header_size == sizeof(request) && request.reserved == 0 &&
+                    transport) {
+                    remoe::protocol::ClockSyncResponse response;
+                    response.sequence = request.sequence;
+                    response.client_send_us = request.client_send_us;
+                    response.host_receive_us = host_receive_us;
+                    response.host_send_us = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            Clock::now() - epoch).count());
+                    if (!transport->send_binary(std::span<const std::uint8_t>(
+                            reinterpret_cast<const std::uint8_t*>(&response), sizeof(response)))) {
+                        session_running = false;
+                        handshake.changed.notify_all();
+                    }
+                    return;
+                }
+            }
             if (message.size() >= sizeof(remoe::protocol::ClipboardHeader)) {
                 remoe::protocol::ClipboardHeader header;
                 std::memcpy(&header, message.data(), sizeof(header));
@@ -878,6 +904,7 @@ int run(const Options& options) {
                     (std::chrono::milliseconds::max)(),
                     [] { return !g_running.load(); }, std::move(on_registered));
             }
+            active_transport = control_channel.get();
         } catch (const std::exception& error) {
             session_running = false;
             if (!g_running) break;
@@ -902,7 +929,7 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!validate_client_settings(request, options, settings)) {
-            std::cerr << "Client rejected: invalid protocol v8 stream request\n";
+            std::cerr << "Client rejected: invalid protocol v9 stream request\n";
             control_channel->close();
             continue;
         }

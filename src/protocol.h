@@ -13,7 +13,8 @@ constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
-constexpr std::uint16_t kVersion = 8;
+constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
+constexpr std::uint16_t kVersion = 9;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
@@ -96,6 +97,26 @@ struct StreamReady {
     std::uint16_t header_size = sizeof(StreamReady);
 };
 
+struct ClockSyncRequest {
+    std::uint32_t magic = kClockSyncMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(ClockSyncRequest);
+    std::uint32_t sequence = 0;
+    std::uint32_t reserved = 0;
+    std::uint64_t client_send_us = 0;
+};
+
+struct ClockSyncResponse {
+    std::uint32_t magic = kClockSyncMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(ClockSyncResponse);
+    std::uint32_t sequence = 0;
+    std::uint32_t reserved = 0;
+    std::uint64_t client_send_us = 0;
+    std::uint64_t host_receive_us = 0;
+    std::uint64_t host_send_us = 0;
+};
+
 struct FrameHeader {
     std::uint32_t magic = kFrameMagic;
     std::uint16_t version = kVersion;
@@ -159,6 +180,8 @@ struct WebRtcSignalHeader {
 static_assert(sizeof(ClientConfig) == 36);
 static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
+static_assert(sizeof(ClockSyncRequest) == 24);
+static_assert(sizeof(ClockSyncResponse) == 40);
 static_assert(sizeof(FrameHeader) == 32);
 static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(InputEvent) == 24);
