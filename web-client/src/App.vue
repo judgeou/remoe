@@ -6,10 +6,12 @@ import DevicePanel from './components/DevicePanel.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
 import {
   addPasskey,
+  authorizeNativeClient,
   connectHost as requestHostConnection,
   createAccount,
   deleteHost,
   getAccount,
+  getNativeClientAuthorization,
   login,
   loginWithOtherPasskey,
   logout,
@@ -58,6 +60,9 @@ const accountLoading = ref(true);
 const accountBusy = ref(false);
 const accountError = ref('');
 const recoveryCode = ref('');
+const nativeClientCode = ref(new URLSearchParams(location.search).get('clientCode') ?? '');
+const nativeClientAuthorized = ref(false);
+const nativeClientName = ref('remoe Windows client');
 const invite = ref('');
 const fps = ref(60);
 const bitrate = ref(20);
@@ -449,6 +454,10 @@ async function refreshAccount() {
     account.accountId = next.accountId;
     account.hosts = next.hosts;
     account.passkeys = next.passkeys;
+    if (next.authenticated && nativeClientCode.value && !nativeClientAuthorized.value) {
+      const authorization = await getNativeClientAuthorization(nativeClientCode.value);
+      nativeClientName.value = authorization.clientName;
+    }
   } catch (error) {
     accountError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -513,6 +522,13 @@ function logoutAccount() {
     await logout();
     recoveryCode.value = '';
     await refreshAccount();
+  });
+}
+
+function authorizeClient() {
+  return accountAction(async () => {
+    const result = await authorizeNativeClient(nativeClientCode.value);
+    nativeClientAuthorized.value = result.authorized;
   });
 }
 
@@ -628,6 +644,18 @@ onBeforeUnmount(() => {
       </details>
     </template>
     <template v-else>
+      <aside v-if="nativeClientCode && !nativeClientAuthorized" class="recovery-banner">
+        <strong>授权 {{ nativeClientName }}</strong>
+        <code>{{ nativeClientCode }}</code>
+        <span>确认后，原生 Client 可以查看并连接当前账号下的远程电脑。</span>
+        <div class="inline-actions">
+          <button :disabled="accountBusy" @click="authorizeClient">允许此 Client</button>
+        </div>
+      </aside>
+      <aside v-if="nativeClientAuthorized" class="recovery-banner">
+        <strong>Client 已获授权</strong>
+        <span>可以关闭此页面并返回 remoe_client。</span>
+      </aside>
       <aside v-if="recoveryCode" class="recovery-banner">
         <strong>请保存新的账号恢复码</strong>
         <code>{{ recoveryCode }}</code>

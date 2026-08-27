@@ -1,4 +1,5 @@
 #include "clipboard.h"
+#include "launcher_window.h"
 #include "protocol.h"
 #include "video_window.h"
 #include "vpl_decoder.h"
@@ -54,14 +55,16 @@ std::uint32_t parse_u32(std::string_view text, std::string_view name,
 }
 
 void print_help() {
-    std::cout <<
+    constexpr const char* help =
         "remoe_client - low-power Intel AV1 remote desktop viewer\n\n"
         "Usage: remoe_client [options]\n"
         "  --fps <1-240>     Requested frame rate (default: 60)\n"
         "  --bitrate <Mbps>  Requested AV1 bitrate/quality (default: 20)\n"
         "  --scale <10-100>  Requested encoding resolution percent (default: 100)\n"
-        "  --signal-url <invite-url> Host invite URL (required)\n"
+        "  --signal-url <invite-url> Compatibility mode: connect directly with an invite URL\n"
+        "Without --signal-url, the passkey login and Host selection window is shown.\n"
         "  --help            Show this help\n";
+    MessageBoxA(nullptr, help, "remoe client", MB_OK | MB_ICONINFORMATION);
 }
 
 Options parse_options(int argc, char** argv) {
@@ -82,9 +85,6 @@ Options parse_options(int argc, char** argv) {
             options.scale_percent = parse_u32(value, argument, 10, 100);
         } else if (argument == "--signal-url") options.signaling_url = value;
         else throw std::runtime_error("unknown option: " + std::string(argument));
-    }
-    if (options.signaling_url.empty()) {
-        throw std::runtime_error("--signal-url is required");
     }
     return options;
 }
@@ -570,11 +570,23 @@ int run(const Options& options) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     try {
-        return run(parse_options(argc, argv));
+        Options options = parse_options(__argc, __argv);
+        if (options.signaling_url.empty()) {
+            remoe::show_client_launcher([](const remoe::ClientLaunchSelection& selected) {
+                Options session_options;
+                session_options.signaling_url = selected.invite_url;
+                session_options.fps = selected.fps;
+                session_options.bitrate_mbps = selected.bitrate_mbps;
+                session_options.scale_percent = selected.scale_percent;
+                run(session_options);
+            });
+            return 0;
+        }
+        return run(options);
     } catch (const std::exception& error) {
-        std::cerr << "Error: " << error.what() << '\n';
+        MessageBoxA(nullptr, error.what(), "remoe client error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

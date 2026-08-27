@@ -62,6 +62,23 @@ export function openDatabase(filename) {
       database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(1, ?)').run(Date.now());
     })();
   }
+  if (version < 2) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE native_sessions (
+          refresh_hash TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          client_name TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_used_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX native_sessions_user_id ON native_sessions(user_id);
+        CREATE INDEX native_sessions_expiry ON native_sessions(expires_at);
+      `);
+      database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)').run(Date.now());
+    })();
+  }
   return database;
 }
 
@@ -96,6 +113,20 @@ export function createStore(database) {
     `),
     deleteSession: database.prepare('DELETE FROM web_sessions WHERE id_hash = ?'),
     deleteExpiredSessions: database.prepare('DELETE FROM web_sessions WHERE expires_at <= ?'),
+    insertNativeSession: database.prepare(`
+      INSERT INTO native_sessions(refresh_hash, user_id, client_name, created_at, last_used_at, expires_at)
+      VALUES(?, ?, ?, ?, ?, ?)
+    `),
+    nativeSessionByHash: database.prepare(`
+      SELECT native_sessions.*, users.id AS valid_user_id
+      FROM native_sessions JOIN users ON users.id = native_sessions.user_id
+      WHERE refresh_hash = ? AND expires_at > ?
+    `),
+    touchNativeSession: database.prepare(`
+      UPDATE native_sessions SET last_used_at = ? WHERE refresh_hash = ?
+    `),
+    deleteNativeSession: database.prepare('DELETE FROM native_sessions WHERE refresh_hash = ?'),
+    deleteExpiredNativeSessions: database.prepare('DELETE FROM native_sessions WHERE expires_at <= ?'),
     hostsForUser: database.prepare('SELECT * FROM hosts WHERE user_id = ? ORDER BY created_at'),
     hostForUser: database.prepare('SELECT * FROM hosts WHERE id = ? AND user_id = ?'),
     hostById: database.prepare('SELECT * FROM hosts WHERE id = ?'),
@@ -155,6 +186,14 @@ export function createStore(database) {
     sessionByHash: (hash) => statements.sessionByHash.get(hash, Date.now()),
     deleteSession: (hash) => statements.deleteSession.run(hash),
     deleteExpiredSessions: () => statements.deleteExpiredSessions.run(Date.now()),
+    createNativeSession(hash, userId, clientName, expiresAt) {
+      const now = Date.now();
+      statements.insertNativeSession.run(hash, userId, clientName, now, now, expiresAt);
+    },
+    nativeSessionByHash: (hash) => statements.nativeSessionByHash.get(hash, Date.now()),
+    touchNativeSession: (hash) => statements.touchNativeSession.run(Date.now(), hash),
+    deleteNativeSession: (hash) => statements.deleteNativeSession.run(hash),
+    deleteExpiredNativeSessions: () => statements.deleteExpiredNativeSessions.run(Date.now()),
     hostsForUser: (userId) => statements.hostsForUser.all(userId),
     hostForUser: (id, userId) => statements.hostForUser.get(id, userId),
     hostById: (id) => statements.hostById.get(id),

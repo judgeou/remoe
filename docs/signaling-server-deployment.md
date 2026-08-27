@@ -237,6 +237,24 @@ Host is online in the account device list
 会打印 `WebRTC STUN reflexive candidate gathered`。Host 会保持 WSS 等待 Browser。Windows 程序从系统 `ROOT` 证书库
 向 Mbed TLS 提供 CA bundle，因此 WSS 会验证证书链和域名，无效证书会被拒绝。
 
+### Windows 原生 Client 登录
+
+直接运行 `remoe_client.exe`，在“信令服务器”中填写公开 HTTPS origin，例如：
+
+```text
+https://signal.example.com
+```
+
+点击“使用 passkey 登录”。Client 会调用 `/api/client/device/start` 创建十分钟有效的一次性授权，
+使用系统默认浏览器打开网页，并轮询 `/api/client/device/poll`。在浏览器中使用 passkey 登录并确认授权
+后，Client 会取得专用的短期 access token 和可撤销 refresh token，然后通过 `/api/client/hosts` 显示
+账号下的在线 Host。用户点击连接时，`/api/client/hosts/<id>/connect` 在内部生成短期 WebRTC session；
+用户不需要处理 invite URL。
+
+refresh token 由 Windows DPAPI 绑定当前用户保存。服务端数据库 schema migration v2 会自动创建
+`native_sessions` 表；部署更新后的 `server.mjs` 与 `lib/database.mjs` 并重启服务即可迁移，无需手工执行
+SQL。浏览器批准页面属于网页客户端，因此服务端更新后也必须重新构建并部署 `web-client/dist/`。
+
 Host 凭证保存在 `%LOCALAPPDATA%\remoe\host-identity.bin` 并由当前 Windows 用户的 DPAPI 保护。
 转移账号或凭证损坏时，在 Host 本机运行相同命令并添加 `--repair`，再把新配对码填入目标账号。旧
 设备 token 会轮换，旧账号随即失去该 Host。

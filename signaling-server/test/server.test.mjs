@@ -295,3 +295,81 @@ test('refreshes an authenticated login as a browser-session cookie', async () =>
   assert.match(setCookie, /HttpOnly/);
   assert.doesNotMatch(setCookie, /Max-Age|Expires/i);
 });
+
+test('authorizes a native client through the signed-in browser', async () => {
+  const startResponse = await fetch(`http://127.0.0.1:${port}/api/client/device/start`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientName: 'Test Windows client' }),
+  });
+  assert.equal(startResponse.status, 200);
+  const started = await startResponse.json();
+  assert.match(started.userCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+  assert.equal(new URL(started.verificationUrl).searchParams.get('clientCode'), started.userCode);
+
+  const pendingResponse = await fetch(`http://127.0.0.1:${port}/api/client/device/poll`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId: started.requestId, deviceSecret: started.deviceSecret }),
+  });
+  assert.equal(pendingResponse.status, 202);
+  assert.deepEqual(await pendingResponse.json(), { status: 'pending' });
+
+  const inspectResponse = await fetch(
+    `http://127.0.0.1:${port}/api/client/device/authorization?code=${started.userCode}`, {
+      headers: { cookie: `remoe_session=${testWebSession}` },
+    });
+  assert.equal(inspectResponse.status, 200);
+  assert.equal((await inspectResponse.json()).clientName, 'Test Windows client');
+
+  const authorizeResponse = await fetch(
+    `http://127.0.0.1:${port}/api/client/device/authorize`, {
+      method: 'POST',
+      headers: {
+        cookie: `remoe_session=${testWebSession}`,
+        origin: `http://localhost:${port}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ code: started.userCode }),
+    });
+  assert.equal(authorizeResponse.status, 200);
+
+  const pollResponse = await fetch(`http://127.0.0.1:${port}/api/client/device/poll`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ requestId: started.requestId, deviceSecret: started.deviceSecret }),
+  });
+  assert.equal(pollResponse.status, 200);
+  const authorized = await pollResponse.json();
+  assert.equal(authorized.status, 'authorized');
+  assert.ok(authorized.accessToken.length >= 32);
+  assert.ok(authorized.refreshToken.length >= 32);
+
+  const hostsResponse = await fetch(`http://127.0.0.1:${port}/api/client/hosts`, {
+    headers: { authorization: `Bearer ${authorized.accessToken}` },
+  });
+  assert.equal(hostsResponse.status, 200);
+  const hosts = await hostsResponse.json();
+  assert.equal(hosts.hosts[0].id, testHostId);
+
+  const refreshResponse = await fetch(`http://127.0.0.1:${port}/api/client/token/refresh`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ refreshToken: authorized.refreshToken }),
+  });
+  assert.equal(refreshResponse.status, 200);
+  assert.ok((await refreshResponse.json()).accessToken.length >= 32);
+
+  const logoutResponse = await fetch(`http://127.0.0.1:${port}/api/client/logout`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ refreshToken: authorized.refreshToken }),
+  });
+  assert.equal(logoutResponse.status, 200);
+  const revokedResponse = await fetch(`http://127.0.0.1:${port}/api/client/token/refresh`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ refreshToken: authorized.refreshToken }),
+  });
+  assert.equal(revokedResponse.status, 401);
+});

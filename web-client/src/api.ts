@@ -206,6 +206,15 @@ export const loginWithOtherPasskey = () => authenticate(storedCredentialIds());
 
 export const logout = () => request('/api/auth/logout', { method: 'POST', body: '{}' });
 
+export const authorizeNativeClient = (code: string) =>
+  request<{ authorized: boolean; clientName: string }>('/api/client/device/authorize', {
+    method: 'POST', body: JSON.stringify({ code }),
+  });
+
+export const getNativeClientAuthorization = (code: string) =>
+  request<{ userCode: string; clientName: string; expiresAt: number }>(
+    `/api/client/device/authorization?code=${encodeURIComponent(code)}`);
+
 export const pairHost = (code: string, name: string) =>
   request('/api/hosts/pair', { method: 'POST', body: JSON.stringify({ code, name }) });
 

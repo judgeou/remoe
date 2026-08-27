@@ -8,7 +8,8 @@ client 发送码流。视频、键鼠控制和
 `remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
 回读到 CPU，呈现使用垂直同步和单帧队列，以降低 Intel GPU、CPU 与显示链路的额外功耗。
 
-当前版本提供加密的画面传输和窗口内键鼠远程控制。音频、剪贴板、文件传输与身份验证尚未实现。
+当前版本提供加密的画面传输、窗口内键鼠远程控制、双向纯文本剪贴板，以及基于 passkey 的账号、
+Host 配对和设备列表。音频与文件传输尚未实现。
 
 另有独立的 `remoe_host_x264.exe`：面向 Microsoft Basic Render Driver、Matrox G200e 等无法可靠
 使用 Desktop Duplication/硬件视频处理的服务器，使用 GDI BitBlt 抓屏、libyuv 在 CPU 上转换和缩放，
@@ -178,7 +179,21 @@ WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首�
 首次创建账号以及使用恢复码恢复账号时，页面会显示一串只显示一次的轮换恢复码；如果恢复码也丢失，
 仍可接触 Host 后使用 `--repair` 绑定到新账号。
 
-## 原生 Client 兼容模式
+## Windows 原生 Client
+
+直接启动 `remoe_client.exe` 会显示 Windows 登录窗口。输入与网页相同的 HTTPS 服务 origin（例如
+`https://signal.example.com`），点击“使用 passkey 登录”后，程序会打开系统默认浏览器。浏览器使用
+现有 passkey 账号批准原生 Client；程序通过 HTTPS 轮询一次性设备授权结果，不读取浏览器 Cookie，
+也不会接触 passkey 私钥。登录完成后可直接从“我的电脑”列表选择在线 Host，并设置 FPS、码率和缩放。
+点击连接会保留启动器，在它前方新建一个最大化播放窗口；关闭播放窗口只断开当前会话，随后可以
+回到启动器重新选择 Host。
+
+原生 Client 获得的长期 refresh token 使用当前 Windows 用户的 DPAPI 加密，保存在
+`%LOCALAPPDATA%\remoe\client-identity.bin`。短期 access token 只保存在内存；点击“退出登录”会撤销
+服务器会话并删除本地凭据。服务器仍会在用户点击连接后生成一次短期 invite，但它只作为内部 WebRTC
+bootstrap 参数传递，不再要求用户查看、复制或输入 URL。
+
+### 临时邀请兼容模式
 
 原生 client 暂时继续支持匿名邀请 URL，用于兼容和诊断。Host 需显式添加 `--legacy-invite`，然后把
 它打印的 URL 交给 client；两端都不需要 `--host` 或 `--port`：
@@ -192,7 +207,8 @@ WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首�
   --fps 60 --bitrate 20 --scale 75
 ```
 
-client 强制要求 Intel AV1 D3D11 硬件解码。如果没有匹配的 Intel GPU、驱动或 oneVPL runtime，
+兼容模式需要显式传入 `--signal-url`；正常的窗体登录不需要该参数。client 强制要求 Intel AV1 D3D11
+硬件解码。如果没有匹配的 Intel GPU、驱动或 oneVPL runtime，
 会直接报错而不会回退到软件解码。客户端窗口获得焦点后，窗口内的鼠标和键盘操作会发送给 host；
 窗口失焦、关闭或连接断开时会释放仍按下的远端按键和鼠标按钮。关闭播放窗口即可断开连接。
 

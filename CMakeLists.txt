@@ -286,11 +286,20 @@ if(REMOE_BUILD_X264_HOST)
 endif()
 
 if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
-    add_executable(remoe_client
+    add_executable(remoe_client WIN32
+        src/account_client.cpp
+        src/account_client.h
         src/clipboard.cpp
         src/clipboard.h
+        src/client_identity.cpp
+        src/client_identity.h
         src/client_main.cpp
+        src/http_client.cpp
+        src/http_client.h
+        src/launcher_window.cpp
+        src/launcher_window.h
         src/protocol.h
+        src/remoe_client.manifest
         src/video_window.cpp
         src/video_window.h
         src/vpl_decoder.cpp
@@ -309,7 +318,9 @@ if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
         remoe_webrtc_transport
         remoe_vpl_dispatcher
         d3d11
-        dxgi)
+        dxgi
+        shell32
+        winhttp)
     install(TARGETS remoe_client RUNTIME DESTINATION bin)
 elseif(REMOE_BUILD_CLIENT)
     message(STATUS "Intel oneVPL source not found at ${VPL_ROOT}; skipping remoe_client")

@@ -53,3 +53,15 @@ test('recovery adds a passkey and rotates the code in one transaction', () => {
   assert.equal(store.passkeysForUser('user_1234567890123456').length, 2);
   database.close();
 });
+
+test('native client refresh sessions expire and can be revoked', () => {
+  const database = openDatabase(':memory:');
+  const store = createStore(database);
+  const userId = 'native_user_123456789';
+  database.prepare('INSERT INTO users(id, created_at) VALUES(?, ?)').run(userId, Date.now());
+  store.createNativeSession('refresh_hash', userId, 'Test client', Date.now() + 60_000);
+  assert.equal(store.nativeSessionByHash('refresh_hash').client_name, 'Test client');
+  store.deleteNativeSession('refresh_hash');
+  assert.equal(store.nativeSessionByHash('refresh_hash'), undefined);
+  database.close();
+});

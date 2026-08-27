@@ -31,11 +31,17 @@ const sessionIdleTimeoutMs = 2 * 60 * 1000;
 const webSessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const ceremonyLifetimeMs = 5 * 60 * 1000;
 const pairingLifetimeMs = 10 * 60 * 1000;
+const deviceAuthorizationLifetimeMs = 10 * 60 * 1000;
+const nativeAccessLifetimeMs = 15 * 60 * 1000;
+const nativeRefreshLifetimeMs = 90 * 24 * 60 * 60 * 1000;
 const sessionPattern = /^[A-Za-z0-9_-]{8,64}$/;
 const idPattern = /^[A-Za-z0-9_-]{16,64}$/;
 const sessions = new Map();
 const ceremonies = new Map();
 const pairings = new Map();
+const deviceAuthorizations = new Map();
+const deviceAuthorizationCodes = new Map();
+const nativeAccessTokens = new Map();
 const managedHosts = new Map();
 let totalPendingBytes = 0;
 
@@ -112,6 +118,42 @@ function requireSameOrigin(request) {
   if (request.headers.origin !== expectedOrigin) {
     throw Object.assign(new Error('Origin rejected'), { status: 403 });
   }
+}
+
+function bearerToken(request) {
+  const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(request.headers.authorization ?? '');
+  return match?.[1] ?? null;
+}
+
+function requireNativeSession(request) {
+  const raw = bearerToken(request);
+  const hash = raw ? tokenHash(raw) : null;
+  const session = hash ? nativeAccessTokens.get(hash) : null;
+  if (!session || session.expiresAt <= Date.now()) {
+    if (hash) nativeAccessTokens.delete(hash);
+    throw Object.assign(new Error('Client authentication required'), { status: 401 });
+  }
+  return session;
+}
+
+function issueNativeAccess(userId, refreshHash) {
+  for (const [hash, session] of nativeAccessTokens) {
+    if (session.refreshHash === refreshHash) nativeAccessTokens.delete(hash);
+  }
+  const accessToken = randomToken();
+  const expiresAt = Date.now() + nativeAccessLifetimeMs;
+  nativeAccessTokens.set(tokenHash(accessToken), { userId, refreshHash, expiresAt });
+  return { accessToken, expiresIn: Math.floor(nativeAccessLifetimeMs / 1000) };
+}
+
+function normalizeDeviceCode(value) {
+  const normalized = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : null;
+}
+
+function clientName(value) {
+  const normalized = String(value ?? '').trim().replace(/[\u0000-\u001f\u007f]/g, '');
+  return normalized.slice(0, 80) || 'remoe client';
 }
 
 function createLoginSession(userId) {
@@ -214,6 +256,121 @@ function localCredentialIds(body) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/client/device/start') {
+    if (deviceAuthorizations.size >= 1024) {
+      throw Object.assign(new Error('Service is busy'), { status: 503 });
+    }
+    const body = await readJson(request);
+    const requestId = randomToken(18);
+    const deviceSecret = randomToken();
+    let userCode;
+    do userCode = createPairingCode(); while (deviceAuthorizationCodes.has(userCode));
+    const authorization = {
+      requestId,
+      secretHash: tokenHash(deviceSecret),
+      userCode,
+      clientName: clientName(body.clientName),
+      expiresAt: Date.now() + deviceAuthorizationLifetimeMs,
+      userId: null,
+    };
+    deviceAuthorizations.set(requestId, authorization);
+    deviceAuthorizationCodes.set(userCode, requestId);
+    return json(response, 200, {
+      requestId,
+      deviceSecret,
+      userCode,
+      verificationUrl: `${expectedOrigin}/?clientCode=${encodeURIComponent(userCode)}`,
+      expiresIn: Math.floor(deviceAuthorizationLifetimeMs / 1000),
+      pollInterval: 3,
+    });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/client/device/poll') {
+    const body = await readJson(request);
+    const authorization = deviceAuthorizations.get(String(body.requestId ?? ''));
+    if (!authorization || authorization.expiresAt <= Date.now() ||
+        !hashesEqual(authorization.secretHash, tokenHash(String(body.deviceSecret ?? '')))) {
+      throw Object.assign(new Error('Device authorization is invalid or expired'), { status: 400 });
+    }
+    if (!authorization.userId) return json(response, 202, { status: 'pending' });
+    deviceAuthorizations.delete(authorization.requestId);
+    deviceAuthorizationCodes.delete(authorization.userCode);
+    const refreshToken = randomToken();
+    const refreshHash = tokenHash(refreshToken);
+    store.createNativeSession(refreshHash, authorization.userId, authorization.clientName,
+                              Date.now() + nativeRefreshLifetimeMs);
+    return json(response, 200, {
+      status: 'authorized',
+      refreshToken,
+      ...issueNativeAccess(authorization.userId, refreshHash),
+    });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/client/token/refresh') {
+    const body = await readJson(request);
+    const refreshToken = String(body.refreshToken ?? '');
+    const refreshHash = tokenHash(refreshToken);
+    const session = refreshToken ? store.nativeSessionByHash(refreshHash) : null;
+    if (!session) throw Object.assign(new Error('Client session is invalid or expired'), { status: 401 });
+    store.touchNativeSession(refreshHash);
+    return json(response, 200, issueNativeAccess(session.user_id, refreshHash));
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/client/logout') {
+    const body = await readJson(request);
+    const refreshHash = tokenHash(String(body.refreshToken ?? ''));
+    store.deleteNativeSession(refreshHash);
+    for (const [hash, session] of nativeAccessTokens) {
+      if (session.refreshHash === refreshHash) nativeAccessTokens.delete(hash);
+    }
+    return json(response, 200, { ok: true });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/client/hosts') {
+    const session = requireNativeSession(request);
+    return json(response, 200, {
+      hosts: store.hostsForUser(session.userId).map(publicHost),
+    });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/client/device/authorization') {
+    requireUser(request);
+    const userCode = normalizeDeviceCode(url.searchParams.get('code'));
+    const requestId = userCode ? deviceAuthorizationCodes.get(userCode) : null;
+    const authorization = requestId ? deviceAuthorizations.get(requestId) : null;
+    if (!authorization || authorization.expiresAt <= Date.now() || authorization.userId) {
+      throw Object.assign(new Error('Device authorization is invalid or expired'), { status: 400 });
+    }
+    return json(response, 200, {
+      userCode: authorization.userCode,
+      clientName: authorization.clientName,
+      expiresAt: authorization.expiresAt,
+    });
+  }
+
+  const nativeConnectPath = url.pathname.match(
+    /^\/api\/client\/hosts\/([A-Za-z0-9_-]+)\/connect$/);
+  if (request.method === 'POST' && nativeConnectPath) {
+    const nativeSession = requireNativeSession(request);
+    const host = store.hostForUser(nativeConnectPath[1], nativeSession.userId);
+    const socket = host ? managedHosts.get(host.id) : null;
+    if (!host) throw Object.assign(new Error('Host not found'), { status: 404 });
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw Object.assign(new Error('Host is offline'), { status: 409 });
+    }
+    if (socket.managedSession) {
+      throw Object.assign(new Error('Host is already in use'), { status: 409 });
+    }
+    const sessionId = randomToken(16);
+    const signalingSession = createSession(sessionId, socket);
+    if (!signalingSession) throw Object.assign(new Error('Service is busy'), { status: 503 });
+    signalingSession.managedHostId = host.id;
+    socket.managedSession = signalingSession;
+    return json(response, 200, {
+      invite: `${expectedOrigin.replace(/^http/, 'ws')}/signal#${sessionId}`,
+    });
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/account') {
     const sessionToken = parseCookies(request).remoe_session;
     const userId = requestUser(request);
@@ -230,6 +387,22 @@ async function handleApi(request, response, url) {
 
   if (request.method === 'POST' || request.method === 'PATCH' || request.method === 'DELETE') {
     requireSameOrigin(request);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/client/device/authorize') {
+    const userId = requireUser(request);
+    const body = await readJson(request);
+    const userCode = normalizeDeviceCode(body.code);
+    const requestId = userCode ? deviceAuthorizationCodes.get(userCode) : null;
+    const authorization = requestId ? deviceAuthorizations.get(requestId) : null;
+    if (!authorization || authorization.expiresAt <= Date.now()) {
+      throw Object.assign(new Error('Device authorization is invalid or expired'), { status: 400 });
+    }
+    if (authorization.userId) {
+      throw Object.assign(new Error('Device authorization has already been approved'), { status: 409 });
+    }
+    authorization.userId = userId;
+    return json(response, 200, { authorized: true, clientName: authorization.clientName });
   }
 
   if (request.method === 'POST' && url.pathname === '/api/auth/register/options') {
@@ -715,6 +888,14 @@ const heartbeat = setInterval(() => {
   }
   const now = Date.now();
   for (const [id, ceremony] of ceremonies) if (ceremony.expiresAt <= now) ceremonies.delete(id);
+  for (const [id, authorization] of deviceAuthorizations) {
+    if (authorization.expiresAt > now) continue;
+    deviceAuthorizations.delete(id);
+    deviceAuthorizationCodes.delete(authorization.userCode);
+  }
+  for (const [hash, session] of nativeAccessTokens) {
+    if (session.expiresAt <= now) nativeAccessTokens.delete(hash);
+  }
   for (const [id, pairing] of pairings) {
     if (pairing.expiresAt > now) continue;
     pairing.socket.close(4008, 'Pairing expired');
@@ -727,6 +908,7 @@ const heartbeat = setInterval(() => {
     removeSession(session);
   }
   store.deleteExpiredSessions();
+  store.deleteExpiredNativeSessions();
 }, 30_000);
 heartbeat.unref();
 
