@@ -205,6 +205,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     transport_callbacks.on_video_keyframe_requested = [state] {
         invoke_callback(state->application_callbacks.on_video_keyframe_requested);
     };
+    transport_callbacks.on_diagnostic = [state](std::string value) {
+        invoke_callback(state->application_callbacks.on_diagnostic, std::move(value));
+    };
     transport_callbacks.on_error = [state](std::string value) {
         state->fail(std::move(value));
     };

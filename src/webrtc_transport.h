@@ -109,6 +109,8 @@ public:
                            bool key_frame)> on_video_frame;
         // Raised for RTCP PLI/FIR feedback received by a sending track.
         std::function<void()> on_video_keyframe_requested;
+        // Low-volume transport diagnostics intended for persistent client logs.
+        std::function<void(std::string)> on_diagnostic;
         std::function<void(std::string)> on_error;
     };
 

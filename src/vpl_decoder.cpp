@@ -5,6 +5,7 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -36,8 +37,10 @@ void set_filter(mfxLoader loader, const char* property, mfxU32 value) {
 
 } // namespace
 
-VplAv1Decoder::VplAv1Decoder(ID3D11Device* device, FrameCallback callback)
-    : storage_(4 * 1024 * 1024), callback_(std::move(callback)) {
+VplAv1Decoder::VplAv1Decoder(ID3D11Device* device, FrameCallback callback,
+                             DiagnosticCallback diagnostic)
+    : storage_(4 * 1024 * 1024), callback_(std::move(callback)),
+      diagnostic_(std::move(diagnostic)) {
     loader_ = MFXLoad();
     if (!loader_) {
         throw std::runtime_error("MFXLoad failed; install the Intel graphics driver/oneVPL runtime");
@@ -63,12 +66,21 @@ VplAv1Decoder::VplAv1Decoder(ID3D11Device* device, FrameCallback callback)
     bitstream_.Data = storage_.data();
     bitstream_.MaxLength = static_cast<mfxU32>(storage_.size());
     bitstream_.CodecId = MFX_CODEC_AV1;
+    diagnose("oneVPL decoder session created: " + implementation_name_);
 }
 
 VplAv1Decoder::~VplAv1Decoder() {
     if (initialized_) MFXVideoDECODE_Close(session_);
     if (session_) MFXClose(session_);
     if (loader_) MFXUnload(loader_);
+}
+
+void VplAv1Decoder::diagnose(std::string message) const noexcept {
+    if (!diagnostic_) return;
+    try {
+        diagnostic_(std::move(message));
+    } catch (...) {
+    }
 }
 
 void VplAv1Decoder::compact_bitstream() {
@@ -114,9 +126,14 @@ void VplAv1Decoder::initialize_decoder() {
     parameters_.AsyncDepth = 1;
     check_vpl(MFXVideoDECODE_Init(session_, &parameters_), "MFXVideoDECODE_Init(AV1 hardware)");
     initialized_ = true;
+    diagnose("oneVPL AV1 decoder initialized: " +
+             std::to_string(parameters_.mfx.FrameInfo.CropW) + "x" +
+             std::to_string(parameters_.mfx.FrameInfo.CropH));
 }
 
 void VplAv1Decoder::decode_available(bool draining) {
+    auto busy_since = std::chrono::steady_clock::time_point{};
+    auto last_busy_log = std::chrono::steady_clock::time_point{};
     for (;;) {
         mfxFrameSurface1* surface = nullptr;
         mfxSyncPoint sync = nullptr;
@@ -124,9 +141,20 @@ void VplAv1Decoder::decode_available(bool draining) {
             session_, draining ? nullptr : &bitstream_, nullptr, &surface, &sync);
 
         if (status == MFX_WRN_DEVICE_BUSY) {
+            const auto now = std::chrono::steady_clock::now();
+            if (busy_since == std::chrono::steady_clock::time_point{}) busy_since = now;
+            if (now - busy_since >= std::chrono::milliseconds(500) &&
+                (last_busy_log == std::chrono::steady_clock::time_point{} ||
+                 now - last_busy_log >= std::chrono::seconds(1))) {
+                last_busy_log = now;
+                diagnose("oneVPL DecodeFrameAsync remains MFX_WRN_DEVICE_BUSY for " +
+                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - busy_since).count()) + " ms");
+            }
             Sleep(1);
             continue;
         }
+        busy_since = {};
         if (status == MFX_ERR_MORE_DATA) break;
         if (status == MFX_ERR_MORE_SURFACE) continue;
         if (status < MFX_ERR_NONE) throw vpl_error("MFXVideoDECODE_DecodeFrameAsync", status);
@@ -147,8 +175,17 @@ void VplAv1Decoder::handle_surface(mfxFrameSurface1* surface) {
     } guard{surface};
 
     mfxStatus status;
+    const auto sync_started = std::chrono::steady_clock::now();
+    auto last_sync_log = sync_started;
     do {
         status = surface->FrameInterface->Synchronize(surface, 1000);
+        const auto now = std::chrono::steady_clock::now();
+        if (status == MFX_WRN_IN_EXECUTION && now - last_sync_log >= std::chrono::seconds(1)) {
+            last_sync_log = now;
+            diagnose("oneVPL surface synchronization still running for " +
+                std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - sync_started).count()) + " ms");
+        }
     } while (status == MFX_WRN_IN_EXECUTION);
     check_vpl(status, "mfxFrameSurfaceInterface::Synchronize");
 
@@ -164,7 +201,21 @@ void VplAv1Decoder::handle_surface(mfxFrameSurface1* surface) {
     const std::uint64_t timestamp_us = submitted_timestamps_.empty()
         ? 0 : submitted_timestamps_.front();
     if (!submitted_timestamps_.empty()) submitted_timestamps_.pop_front();
+    const bool periodic_diagnostic = surface_count_ < 3 || surface_count_ % 60 == 0;
+    ++surface_count_;
+    if (periodic_diagnostic) {
+        diagnose("oneVPL surface ready: " + std::to_string(width) + "x" +
+                 std::to_string(height) + ", timestamp_us=" + std::to_string(timestamp_us));
+    }
+    const auto callback_started = std::chrono::steady_clock::now();
     callback_(static_cast<ID3D11Texture2D*>(resource), width, height, timestamp_us);
+    const auto callback_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - callback_started).count();
+    if (periodic_diagnostic || callback_ms >= 50) {
+        diagnose("D3D11 presentation callback returned: timestamp_us=" +
+                 std::to_string(timestamp_us) + ", elapsed_ms=" +
+                 std::to_string(callback_ms));
+    }
 }
 
 void VplAv1Decoder::drain() {

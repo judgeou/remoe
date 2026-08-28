@@ -154,8 +154,10 @@ bool encoded_key_frame(WebRtcTransport::VideoCodec codec,
 // OBU size fields expected by the existing oneVPL decoder.
 class Av1RtpDepacketizer final : public rtc::VideoRtpDepacketizer {
 public:
-    explicit Av1RtpDepacketizer(std::function<void()> request_keyframe)
-        : request_keyframe_(std::move(request_keyframe)) {}
+    Av1RtpDepacketizer(std::function<void()> request_keyframe,
+                       std::function<void(std::string)> diagnostic)
+        : request_keyframe_(std::move(request_keyframe)),
+          diagnostic_(std::move(diagnostic)) {}
 
 private:
     struct BufferedFrame {
@@ -243,7 +245,16 @@ private:
         if (last_pli_ != std::chrono::steady_clock::time_point{} &&
             now - last_pli_ < kPliInterval) return;
         last_pli_ = now;
+        diagnose("AV1 recovery requested: sending RTCP PLI");
         if (request_keyframe_) request_keyframe_();
+    }
+
+    void diagnose(std::string message) const noexcept {
+        if (!diagnostic_) return;
+        try {
+            diagnostic_(std::move(message));
+        } catch (...) {
+        }
     }
 
     void remember_retired(std::uint32_t timestamp) {
@@ -261,6 +272,18 @@ private:
         const std::uint32_t timestamp = frame_order_.front();
         frame_order_.pop_front();
         if (const auto found = frames_.find(timestamp); found != frames_.end()) {
+            if (lost) {
+                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - found->second.first_seen).count();
+                diagnose("Dropping incomplete AV1 RTP frame: timestamp=" +
+                    std::to_string(timestamp) + ", packets=" +
+                    std::to_string(found->second.packets.size()) + ", age_ms=" +
+                    std::to_string(age_ms) + ", first=" +
+                    (found->second.first_sequence
+                        ? std::to_string(*found->second.first_sequence) : "unknown") +
+                    ", last=" + (found->second.last_sequence
+                        ? std::to_string(*found->second.last_sequence) : "unknown"));
+            }
             if (found->second.last_sequence) {
                 next_frame_sequence_ = static_cast<std::uint16_t>(
                     *found->second.last_sequence + 1u);
@@ -271,8 +294,8 @@ private:
         if (lost) request_recovery();
     }
 
-    static void send_missing_nacks(BufferedFrame& frame,
-                                   const rtc::message_callback& send) {
+    void send_missing_nacks(BufferedFrame& frame,
+                            const rtc::message_callback& send) {
         if (!send || !frame.first_sequence || !frame.last_sequence) return;
         const auto now = std::chrono::steady_clock::now();
         if (frame.last_nack != std::chrono::steady_clock::time_point{} &&
@@ -294,6 +317,10 @@ private:
         }
         if (missing.empty()) return;
         frame.last_nack = now;
+        diagnose("AV1 RTP gap: timestamp=" + std::to_string(
+            reinterpret_cast<const rtc::RtpHeader*>((*frame.packets.begin())->data())->timestamp()) +
+            ", received=" + std::to_string(frame.packets.size()) +
+            ", missing=" + std::to_string(missing.size()) + ", sending NACK");
 
         constexpr std::size_t max_nacks_per_packet = 64;
         for (std::size_t offset = 0; offset < missing.size();
@@ -331,6 +358,7 @@ private:
             }
 
             if (waiting_for_key_frame_ && !frame.key_frame) {
+                ++suppressed_frames_;
                 retire_front(false);
                 continue;
             }
@@ -339,7 +367,16 @@ private:
                 retire_front(true);
                 continue;
             }
-            if (frame.key_frame) waiting_for_key_frame_ = false;
+            if (frame.key_frame) {
+                std::size_t packet_bytes = 0;
+                for (const auto& packet : frame.packets) packet_bytes += packet->size();
+                diagnose("Complete AV1 key frame: packets=" +
+                    std::to_string(frame.packets.size()) + ", rtp_bytes=" +
+                    std::to_string(packet_bytes) + ", suppressed_delta_frames=" +
+                    std::to_string(suppressed_frames_));
+                suppressed_frames_ = 0;
+                waiting_for_key_frame_ = false;
+            }
             output.push_back(std::move(message));
             retire_front(false);
         }
@@ -469,6 +506,7 @@ private:
     }
 
     std::function<void()> request_keyframe_;
+    std::function<void(std::string)> diagnostic_;
     std::unordered_map<std::uint32_t, BufferedFrame> frames_;
     std::deque<std::uint32_t> frame_order_;
     std::unordered_set<std::uint32_t> retired_timestamps_;
@@ -476,6 +514,7 @@ private:
     std::optional<std::uint16_t> next_frame_sequence_;
     std::chrono::steady_clock::time_point last_pli_{};
     bool waiting_for_key_frame_ = false;
+    std::size_t suppressed_frames_ = 0;
 };
 
 template <typename Callback, typename... Args>
@@ -748,14 +787,20 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                 depacketizer = std::make_shared<rtc::H264RtpDepacketizer>(
                     rtc::NalUnit::Separator::StartSequence);
             } else {
-                depacketizer = std::make_shared<Av1RtpDepacketizer>([weak_self] {
-                    if (const auto self = weak_self.lock(); self && !self->closing.load()) {
-                        if (const auto video = self->current_video_track();
-                            video && video->isOpen()) {
-                            (void)video->requestKeyframe();
+                depacketizer = std::make_shared<Av1RtpDepacketizer>(
+                    [weak_self] {
+                        if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                            if (const auto video = self->current_video_track();
+                                video && video->isOpen()) {
+                                (void)video->requestKeyframe();
+                            }
                         }
-                    }
-                });
+                    },
+                    [weak_self](std::string message) {
+                        if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                            invoke_callback(self->callbacks.on_diagnostic, std::move(message));
+                        }
+                    });
             }
             // Incoming handler chains execute in reverse order: RTCP/RTP
             // accounting must see the packet before depacketization.

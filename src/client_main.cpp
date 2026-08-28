@@ -13,15 +13,20 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,6 +35,85 @@
 #include <vector>
 
 namespace {
+
+class ClientDiagnosticLog {
+public:
+    ClientDiagnosticLog() noexcept {
+        try {
+            std::wstring base(32768, L'\0');
+            const DWORD length = GetEnvironmentVariableW(
+                L"LOCALAPPDATA", base.data(), static_cast<DWORD>(base.size()));
+            std::filesystem::path directory;
+            if (length > 0 && length < base.size()) {
+                base.resize(length);
+                directory = std::filesystem::path(base) / L"Remoe" / L"logs";
+            } else {
+                directory = std::filesystem::current_path();
+            }
+            std::filesystem::create_directories(directory);
+            path_ = directory / L"remoe-client.log";
+            stream_.open(path_, std::ios::out | std::ios::trunc);
+        } catch (...) {
+        }
+    }
+
+    void write(std::string_view message) noexcept {
+        try {
+            std::lock_guard lock(mutex_);
+            if (!stream_) return;
+            const auto now = std::chrono::system_clock::now();
+            const std::time_t value = std::chrono::system_clock::to_time_t(now);
+            std::tm local{};
+            localtime_s(&local, &value);
+            const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count() % 1000;
+            stream_ << std::put_time(&local, "%Y-%m-%d %H:%M:%S") << '.'
+                    << std::setfill('0') << std::setw(3) << milliseconds
+                    << " [thread " << GetCurrentThreadId() << "] " << message << '\n';
+            stream_.flush();
+        } catch (...) {
+        }
+    }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+
+private:
+    std::mutex mutex_;
+    std::ofstream stream_;
+    std::filesystem::path path_;
+};
+
+ClientDiagnosticLog& diagnostic_log() {
+    static ClientDiagnosticLog log;
+    return log;
+}
+
+const char* state_name(remoe::WebRtcTransport::State state) noexcept {
+    using State = remoe::WebRtcTransport::State;
+    switch (state) {
+    case State::New: return "new";
+    case State::Connecting: return "connecting";
+    case State::Connected: return "connected";
+    case State::Disconnected: return "disconnected";
+    case State::Failed: return "failed";
+    case State::Closed: return "closed";
+    }
+    return "unknown";
+}
+
+const char* ice_state_name(remoe::WebRtcTransport::IceState state) noexcept {
+    using State = remoe::WebRtcTransport::IceState;
+    switch (state) {
+    case State::New: return "new";
+    case State::Checking: return "checking";
+    case State::Connected: return "connected";
+    case State::Completed: return "completed";
+    case State::Failed: return "failed";
+    case State::Disconnected: return "disconnected";
+    case State::Closed: return "closed";
+    }
+    return "unknown";
+}
 
 struct Options {
     std::uint32_t fps = 60;
@@ -231,6 +315,9 @@ public:
             }
             frame.reset_decoder = true;
             waiting_for_key_frame_ = false;
+            diagnostic_log().write("Decoder queue recovered at key frame=" +
+                std::to_string(frame.frame_number) + ", dropped_frames=" +
+                std::to_string(dropped_frames_));
             std::cerr << "Decoder queue recovered at key frame "
                       << frame.frame_number << " after dropping "
                       << dropped_frames_ << " frames\n";
@@ -240,10 +327,16 @@ public:
         if (!frames_.empty() &&
             (queued_bytes_ + frame.payload.size() > max_bytes_ ||
              frames_.size() >= max_frames_)) {
+            const std::size_t cleared_frames = frames_.size();
+            const std::size_t cleared_bytes = queued_bytes_;
             dropped_frames_ += frames_.size();
             frames_.clear();
             queued_bytes_ = 0;
             waiting_for_key_frame_ = true;
+            diagnostic_log().write("Decoder queue overflow: cleared_frames=" +
+                std::to_string(cleared_frames) + ", incoming_bytes=" +
+                std::to_string(frame.payload.size()) + ", queued_bytes=" +
+                std::to_string(cleared_bytes));
             std::cerr << "Decoder queue overflow; dropping old GOP and waiting for a key frame\n";
             if (!key_frame) {
                 ++dropped_frames_;
@@ -323,6 +416,8 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
                           std::uint32_t height, std::uint64_t timestamp_us) {
                     window.update_frame_age(frame_age.relative_age_ms(timestamp_us));
                     window.present(texture, width, height);
+                }, [](std::string message) {
+                    diagnostic_log().write(message);
                 });
         };
         auto decoder = create_decoder();
@@ -331,19 +426,47 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
         EncodedFrame frame;
         while (queue.pop(frame, *window.running_flag())) {
             if (frame.reset_decoder) {
+                diagnostic_log().write("Resetting oneVPL decoder at recovered key frame #" +
+                                       std::to_string(frame.frame_number));
                 decoder.reset();
                 decoder = create_decoder();
                 std::cerr << "Decoder reset after dropping stale frames\n";
             }
+            const bool detailed = frame.key_frame || frame.payload.size() >= 256 * 1024 ||
+                                  frame.frame_number < 3 || frame.frame_number % 120 == 0;
+            if (detailed) {
+                diagnostic_log().write("Decoder submit begin: frame=" +
+                    std::to_string(frame.frame_number) + ", bytes=" +
+                    std::to_string(frame.payload.size()) + ", key=" +
+                    (frame.key_frame ? "true" : "false") + ", timestamp_us=" +
+                    std::to_string(frame.timestamp_us));
+            }
             decoder->submit(frame.payload, frame.timestamp_us);
+            if (detailed) {
+                diagnostic_log().write("Decoder submit returned: frame=" +
+                                       std::to_string(frame.frame_number));
+            }
         }
         if (window.running()) decoder->drain();
     } catch (...) {
-        pipeline.fail(std::current_exception(), queue, window);
+        const std::exception_ptr failure = std::current_exception();
+        try {
+            std::rethrow_exception(failure);
+        } catch (const std::exception& error) {
+            diagnostic_log().write(std::string("Decoder pipeline failed: ") + error.what());
+        } catch (...) {
+            diagnostic_log().write("Decoder pipeline failed with an unknown exception");
+        }
+        pipeline.fail(failure, queue, window);
     }
 }
 
 int run(const Options& options) {
+    diagnostic_log().write("Starting client session: fps=" + std::to_string(options.fps) +
+        ", scale_percent=" + std::to_string(options.scale_percent) +
+        ", rate_control=" + (options.fixed_quality ? std::string("fixed_quality") : "cbr") +
+        ", quality=" + std::to_string(options.quality) +
+        ", bitrate_mbps=" + std::to_string(options.bitrate_mbps));
     remoe::protocol::ClientConfig request;
     request.fps_num = options.fps;
     request.bitrate_bps = options.fixed_quality ? 0 : options.bitrate_mbps * 1'000'000u;
@@ -376,6 +499,7 @@ int run(const Options& options) {
     auto state = std::make_shared<ClientSessionState>();
 
     const auto fail = [state](std::string error) {
+        diagnostic_log().write("Session failure: " + error);
         std::lock_guard lock(state->mutex);
         if (state->error.empty()) state->error = std::move(error);
         if (state->window) state->window->request_close();
@@ -384,15 +508,23 @@ int run(const Options& options) {
     };
 
     remoe::WebRtcTransport::Callbacks control_callbacks;
+    control_callbacks.on_state_changed = [](remoe::WebRtcTransport::State value) {
+        diagnostic_log().write(std::string("PeerConnection state: ") + state_name(value));
+    };
+    control_callbacks.on_ice_state_changed = [](remoe::WebRtcTransport::IceState value) {
+        diagnostic_log().write(std::string("ICE state: ") + ice_state_name(value));
+    };
     control_callbacks.on_local_candidate = [](auto candidate) {
         if (candidate.candidate.find(" typ srflx ") != std::string::npos) {
             std::cout << "WebRTC STUN reflexive candidate gathered\n";
         }
     };
     control_callbacks.on_open = [] {
+        diagnostic_log().write("Control DataChannel opened");
         std::cout << "WebRTC control DataChannel connected\n";
     };
     control_callbacks.on_video_open = [] {
+        diagnostic_log().write("Standard video track opened");
         std::cout << "WebRTC standard video track connected\n";
     };
     control_callbacks.on_binary = [state, fail](std::vector<std::uint8_t> message) {
@@ -432,6 +564,11 @@ int run(const Options& options) {
         }
         remoe::protocol::StreamHeader header;
         std::memcpy(&header, message.data(), sizeof(header));
+        diagnostic_log().write("Stream header received: codec=" +
+            std::to_string(header.codec) + ", size=" + std::to_string(header.width) + "x" +
+            std::to_string(header.height) + ", fps=" + std::to_string(header.fps_num) +
+            ", bitrate_bps=" + std::to_string(header.bitrate_bps) + ", quality=" +
+            std::to_string(header.quality));
         {
             std::lock_guard lock(state->mutex);
             if (state->stream_header) {
@@ -453,6 +590,13 @@ int run(const Options& options) {
             frame.timestamp_us = timestamp_us;
             frame.key_frame = key_frame;
             frame.payload = std::move(payload);
+            if (key_frame || frame.payload.size() >= 256 * 1024) {
+                diagnostic_log().write("Encoded AV1 frame received: frame=" +
+                    std::to_string(frame.frame_number) + ", bytes=" +
+                    std::to_string(frame.payload.size()) + ", key=" +
+                    (key_frame ? "true" : "false") + ", timestamp_us=" +
+                    std::to_string(timestamp_us));
+            }
             state->video_bytes += frame.payload.size();
             state->network_bytes += frame.payload.size();
             const auto now = std::chrono::steady_clock::now();
@@ -471,6 +615,7 @@ int run(const Options& options) {
             remoe::WebRtcTransport* transport = state->transport;
             lock.unlock();
             if (request_key_frame) {
+                diagnostic_log().write("Decoder queue requested RTCP PLI");
                 if (!transport->request_video_keyframe()) {
                     throw std::runtime_error("failed to request an AV1 key frame");
                 }
@@ -481,6 +626,7 @@ int run(const Options& options) {
         }
     };
     control_callbacks.on_closed = [state] {
+        diagnostic_log().write("WebRTC transport closed");
         std::lock_guard lock(state->mutex);
         state->closed = true;
         if (state->window) state->window->request_close();
@@ -488,8 +634,12 @@ int run(const Options& options) {
         state->changed.notify_all();
     };
     control_callbacks.on_error = [fail](std::string error) {
+        diagnostic_log().write("WebRTC error: " + error);
         std::cerr << "WebRTC error: " << error << '\n';
         fail(std::move(error));
+    };
+    control_callbacks.on_diagnostic = [](std::string message) {
+        diagnostic_log().write("Transport: " + message);
     };
 
     std::cout << "Connecting through WebRTC invite URL...\n";
@@ -622,6 +772,8 @@ int run(const Options& options) {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     try {
+        diagnostic_log().write("remoe_client process started; protocol=" +
+                               std::to_string(remoe::protocol::kVersion));
         Options options = parse_options(__argc, __argv);
         if (options.signaling_url.empty()) {
             remoe::show_client_launcher([](const remoe::ClientLaunchSelection& selected) {
@@ -638,6 +790,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         return run(options);
     } catch (const std::exception& error) {
+        diagnostic_log().write(std::string("Fatal client error: ") + error.what());
         MessageBoxA(nullptr, error.what(), "remoe client error", MB_OK | MB_ICONERROR);
         return 1;
     }
