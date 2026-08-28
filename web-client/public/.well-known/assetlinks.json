@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "top.ozaoza.remoe",
+      "sha256_cert_fingerprints": [
+        "06:A5:C2:F1:63:6A:22:76:84:64:55:FB:A5:00:D6:D0:6A:41:A6:96:03:69:45:89:F4:02:31:3A:19:20:EA:DB"
+      ]
+    }
+  }
+]

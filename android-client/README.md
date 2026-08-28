@@ -115,6 +115,18 @@ $env:REMOE_RELEASE_KEY_PASSWORD = '<from password manager>'
 
 缺少任一变量时，Release 构建会直接失败，不会悄悄生成未签名 APK。
 
+### 临时 Debug DAL
+
+2026-08-28 为真机闭环测试，生产域名临时部署了当前开发机 Debug certificate：
+
+```text
+06:A5:C2:F1:63:6A:22:76:84:64:55:FB:A5:00:D6:D0:6A:41:A6:96:03:69:45:89:F4:02:31:3A:19:20:EA:DB
+```
+
+对应配置为 `web-client/public/.well-known/assetlinks.json` 和
+`deploy/remoe-auth-debug.conf`。这两处都明确属于 Debug 测试信任；确定正式签名证书后必须替换，
+不能与 Release 长期并存。
+
 ## 本机命令
 
 ```powershell
