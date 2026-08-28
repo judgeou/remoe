@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">remoe</string>
-    <string name="environment_ready">Remoe Android\n调试环境已就绪</string>
+    <string name="codec_probe_title">WebRTC 能力探针</string>
+    <string name="codec_probe_running">正在检查 libwebrtc、硬件解码器和 EGL…</string>
+    <string name="codec_probe_retry">重新检测</string>
 </resources>

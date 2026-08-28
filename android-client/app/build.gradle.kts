@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val libwebrtcVersion = "144.7559.09"
+
 android {
     namespace = "top.ozaoza.remoe"
     compileSdk = 35
@@ -33,4 +35,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    implementation("io.github.webrtc-sdk:android:$libwebrtcVersion")
 }
