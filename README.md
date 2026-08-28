@@ -419,3 +419,6 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 WebRTC SDP/ICE 二进制帧；`deploy/` 包含生产用 systemd、Caddy 和 coturn STUN-only 配置。信令与
 STUN 服务不接触 DataChannel 或视频内容。完整服务器配置、更新和排障步骤见
 [`docs/signaling-server-deployment.md`](docs/signaling-server-deployment.md)。
+
+Android 原生客户端的架构、扫码绑定 Passkey、Digital Asset Links、WebRTC、输入、测试与分阶段
+实施方案见 [`docs/android-client-design.md`](docs/android-client-design.md)。
