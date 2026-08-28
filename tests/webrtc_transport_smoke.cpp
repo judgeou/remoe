@@ -268,9 +268,15 @@ int main() {
             std::cerr << "Timed out opening the AV1 video track\n";
             return 1;
         }
-        // Sequence Header OBU followed by a Frame OBU, both with LEB128 sizes.
-        const std::vector<std::uint8_t> av1_frame = {
-            0x0a, 0x01, 0xaa, 0x32, 0x02, 0xbb, 0xcc};
+        // A Temporal Delimiter, Sequence Header and a fragmented Frame OBU.
+        // RFC 9364 strips the delimiter on send; Remoe must restore it for the
+        // native oneVPL low-overhead AV1 decoder. The large OBU also exercises
+        // Z/Y continuation across multiple RTP packets.
+        std::vector<std::uint8_t> av1_frame = {
+            0x12, 0x00, 0x0a, 0x01, 0xaa, 0x32, 0x80, 0x20};
+        for (std::size_t index = 0; index < 4096; ++index) {
+            av1_frame.push_back(static_cast<std::uint8_t>(index));
+        }
         if (!av1_answerer.send_video_frame(av1_frame, 654'321) ||
             !pump_until(av1_state, av1_offerer, av1_answerer,
                 std::chrono::steady_clock::now() + 5s, [&] {

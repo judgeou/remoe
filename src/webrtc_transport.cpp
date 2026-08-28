@@ -194,7 +194,14 @@ private:
         const std::uint8_t payload_type = first_header->payloadType();
         const std::uint32_t timestamp = first_header->timestamp();
         std::uint16_t expected_sequence = first_header->seqNumber();
-        rtc::binary frame;
+        // RFC 9364 requires Temporal Delimiter OBUs to be removed before RTP
+        // packetization. Restore one at the start of every reassembled temporal
+        // unit: the native oneVPL decoder consumes low-overhead AV1 bitstreams
+        // and relies on this boundary when complete frames are submitted.
+        rtc::binary frame = {
+            static_cast<rtc::byte>(0x12),
+            static_cast<rtc::byte>(0x00),
+        };
         rtc::binary partial_obu;
         bool has_partial_obu = false;
 
@@ -256,7 +263,7 @@ private:
                 }
             }
         }
-        if (has_partial_obu || frame.empty()) return nullptr;
+        if (has_partial_obu || frame.size() == 2) return nullptr;
         return rtc::make_message(std::move(frame), createFrameInfo(timestamp, payload_type));
     }
 };
