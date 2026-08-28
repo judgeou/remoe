@@ -6,11 +6,14 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <limits>
 #include <mutex>
 #include <random>
 #include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace remoe {
@@ -150,7 +153,26 @@ bool encoded_key_frame(WebRtcTransport::VideoCodec codec,
 // This implements RFC 9364 aggregation/fragment reassembly and restores the
 // OBU size fields expected by the existing oneVPL decoder.
 class Av1RtpDepacketizer final : public rtc::VideoRtpDepacketizer {
+public:
+    explicit Av1RtpDepacketizer(std::function<void()> request_keyframe)
+        : request_keyframe_(std::move(request_keyframe)) {}
+
 private:
+    struct BufferedFrame {
+        message_buffer packets;
+        std::optional<std::uint16_t> first_sequence;
+        std::optional<std::uint16_t> last_sequence;
+        std::chrono::steady_clock::time_point first_seen;
+        std::chrono::steady_clock::time_point last_nack{};
+        std::uint32_t ssrc = 0;
+        bool key_frame = false;
+    };
+
+    static constexpr std::size_t kMaxBufferedFrames = 12;
+    static constexpr auto kMaxReorderDelay = std::chrono::milliseconds(300);
+    static constexpr auto kNackInterval = std::chrono::milliseconds(30);
+    static constexpr auto kPliInterval = std::chrono::milliseconds(500);
+
     static bool read_leb128(std::span<const rtc::byte> bytes, std::size_t& offset,
                             std::size_t& value) {
         value = 0;
@@ -185,6 +207,171 @@ private:
         frame.insert(frame.end(), obu.begin() + static_cast<std::ptrdiff_t>(header_size),
                      obu.end());
         return true;
+    }
+
+    static bool packet_payload(const rtc::message_ptr& packet,
+                               const rtc::RtpHeader*& rtp,
+                               std::span<const rtc::byte>& payload) {
+        if (!packet || packet->size() < sizeof(rtc::RtpHeader)) return false;
+        rtp = reinterpret_cast<const rtc::RtpHeader*>(packet->data());
+        const std::size_t header_size = rtp->getSize() + rtp->getExtensionHeaderSize();
+        const std::size_t padding_size = rtp->padding()
+            ? std::to_integer<std::uint8_t>(packet->back()) : 0;
+        if (packet->size() <= header_size + padding_size) return false;
+        payload = std::span<const rtc::byte>(
+            packet->data() + header_size,
+            packet->size() - header_size - padding_size);
+        return !payload.empty();
+    }
+
+    static bool complete(const BufferedFrame& frame) {
+        if (!frame.first_sequence || !frame.last_sequence) return false;
+        const std::size_t expected =
+            static_cast<std::uint16_t>(*frame.last_sequence - *frame.first_sequence) + 1u;
+        if (frame.packets.size() != expected) return false;
+        std::uint16_t sequence = *frame.first_sequence;
+        for (const auto& packet : frame.packets) {
+            const auto* rtp = reinterpret_cast<const rtc::RtpHeader*>(packet->data());
+            if (rtp->seqNumber() != sequence++) return false;
+        }
+        return true;
+    }
+
+    void request_recovery() {
+        waiting_for_key_frame_ = true;
+        const auto now = std::chrono::steady_clock::now();
+        if (last_pli_ != std::chrono::steady_clock::time_point{} &&
+            now - last_pli_ < kPliInterval) return;
+        last_pli_ = now;
+        if (request_keyframe_) request_keyframe_();
+    }
+
+    void remember_retired(std::uint32_t timestamp) {
+        retired_timestamps_.insert(timestamp);
+        retired_order_.push_back(timestamp);
+        constexpr std::size_t retained_timestamps = 64;
+        if (retired_order_.size() > retained_timestamps) {
+            retired_timestamps_.erase(retired_order_.front());
+            retired_order_.pop_front();
+        }
+    }
+
+    void retire_front(bool lost) {
+        if (frame_order_.empty()) return;
+        const std::uint32_t timestamp = frame_order_.front();
+        frame_order_.pop_front();
+        frames_.erase(timestamp);
+        remember_retired(timestamp);
+        if (lost) request_recovery();
+    }
+
+    static void send_missing_nacks(BufferedFrame& frame,
+                                   const rtc::message_callback& send) {
+        if (!send || !frame.first_sequence || !frame.last_sequence) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (frame.last_nack != std::chrono::steady_clock::time_point{} &&
+            now - frame.last_nack < kNackInterval) return;
+
+        std::unordered_set<std::uint16_t> received;
+        received.reserve(frame.packets.size());
+        for (const auto& packet : frame.packets) {
+            const auto* rtp = reinterpret_cast<const rtc::RtpHeader*>(packet->data());
+            received.insert(rtp->seqNumber());
+        }
+        std::vector<std::uint16_t> missing;
+        std::uint16_t sequence = *frame.first_sequence;
+        const std::size_t expected =
+            static_cast<std::uint16_t>(*frame.last_sequence - sequence) + 1u;
+        missing.reserve(expected - (std::min)(expected, received.size()));
+        for (std::size_t index = 0; index < expected; ++index, ++sequence) {
+            if (!received.contains(sequence)) missing.push_back(sequence);
+        }
+        if (missing.empty()) return;
+        frame.last_nack = now;
+
+        constexpr std::size_t max_nacks_per_packet = 64;
+        for (std::size_t offset = 0; offset < missing.size();
+             offset += max_nacks_per_packet) {
+            const auto count = static_cast<unsigned int>((std::min)(
+                max_nacks_per_packet, missing.size() - offset));
+            auto message = rtc::make_message(rtc::RtcpNack::Size(count),
+                                             rtc::Message::Control);
+            auto* nack = reinterpret_cast<rtc::RtcpNack*>(message->data());
+            nack->preparePacket(frame.ssrc, count);
+            for (unsigned int index = 0; index < count; ++index) {
+                nack->parts[index].setPid(missing[offset + index]);
+                nack->parts[index].setBlp(0);
+            }
+            send(std::move(message));
+        }
+    }
+
+    void drain_ready(rtc::message_vector& output,
+                     const rtc::message_callback& send) {
+        const auto now = std::chrono::steady_clock::now();
+        while (!frame_order_.empty()) {
+            auto found = frames_.find(frame_order_.front());
+            if (found == frames_.end()) {
+                frame_order_.pop_front();
+                continue;
+            }
+            BufferedFrame& frame = found->second;
+            if (!complete(frame)) {
+                send_missing_nacks(frame, send);
+                if (frames_.size() <= kMaxBufferedFrames &&
+                    now - frame.first_seen <= kMaxReorderDelay) break;
+                retire_front(true);
+                continue;
+            }
+
+            if (waiting_for_key_frame_ && !frame.key_frame) {
+                retire_front(false);
+                continue;
+            }
+            auto message = reassemble(frame.packets);
+            if (!message) {
+                retire_front(true);
+                continue;
+            }
+            if (frame.key_frame) waiting_for_key_frame_ = false;
+            output.push_back(std::move(message));
+            retire_front(false);
+        }
+    }
+
+    void incoming(rtc::message_vector& messages,
+                  const rtc::message_callback& send) override {
+        rtc::message_vector output;
+        for (auto& message : messages) {
+            if (message->type == rtc::Message::Control) {
+                output.push_back(std::move(message));
+                continue;
+            }
+
+            const rtc::RtpHeader* rtp = nullptr;
+            std::span<const rtc::byte> payload;
+            if (!packet_payload(message, rtp, payload)) {
+                request_recovery();
+                continue;
+            }
+            const std::uint32_t timestamp = rtp->timestamp();
+            if (retired_timestamps_.contains(timestamp)) continue;
+
+            auto [found, inserted] = frames_.try_emplace(timestamp);
+            BufferedFrame& frame = found->second;
+            if (inserted) {
+                frame.first_seen = std::chrono::steady_clock::now();
+                frame.ssrc = rtp->ssrc();
+                frame_order_.push_back(timestamp);
+            }
+            const std::uint8_t aggregation = std::to_integer<std::uint8_t>(payload.front());
+            if ((aggregation & 0x80u) == 0) frame.first_sequence = rtp->seqNumber();
+            if ((aggregation & 0x08u) != 0) frame.key_frame = true;
+            if (rtp->marker()) frame.last_sequence = rtp->seqNumber();
+            frame.packets.insert(std::move(message));
+        }
+        drain_ready(output, send);
+        messages.swap(output);
     }
 
     rtc::message_ptr reassemble(message_buffer& buffer) override {
@@ -266,6 +453,14 @@ private:
         if (has_partial_obu || frame.size() == 2) return nullptr;
         return rtc::make_message(std::move(frame), createFrameInfo(timestamp, payload_type));
     }
+
+    std::function<void()> request_keyframe_;
+    std::unordered_map<std::uint32_t, BufferedFrame> frames_;
+    std::deque<std::uint32_t> frame_order_;
+    std::unordered_set<std::uint32_t> retired_timestamps_;
+    std::deque<std::uint32_t> retired_order_;
+    std::chrono::steady_clock::time_point last_pli_{};
+    bool waiting_for_key_frame_ = false;
 };
 
 template <typename Callback, typename... Args>
@@ -519,7 +714,10 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                     rtc::AV1RtpPacketizer::Packetization::TemporalUnit, rtp);
             }
             packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtp));
-            packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+            // Fixed-quality screen changes can produce multi-megabyte AV1
+            // frames. Keep enough RTP history for the receiver's delayed NACKs
+            // instead of evicting the beginning of the burst after 512 packets.
+            packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>(8192));
             const std::weak_ptr<Impl> weak_self = weak_from_this();
             packetizer->addToChain(std::make_shared<rtc::PliHandler>([weak_self] {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
@@ -530,17 +728,24 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         } else {
             auto receiver = std::make_shared<rtc::RtcpReceivingSession>();
             std::shared_ptr<rtc::MediaHandler> depacketizer;
+            const std::weak_ptr<Impl> weak_self = weak_from_this();
             if (configuration.video_codec == VideoCodec::H264) {
                 depacketizer = std::make_shared<rtc::H264RtpDepacketizer>(
                     rtc::NalUnit::Separator::StartSequence);
             } else {
-                depacketizer = std::make_shared<Av1RtpDepacketizer>();
+                depacketizer = std::make_shared<Av1RtpDepacketizer>([weak_self] {
+                    if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                        if (const auto video = self->current_video_track();
+                            video && video->isOpen()) {
+                            (void)video->requestKeyframe();
+                        }
+                    }
+                });
             }
             // Incoming handler chains execute in reverse order: RTCP/RTP
             // accounting must see the packet before depacketization.
             depacketizer->addToChain(std::move(receiver));
             track->setMediaHandler(std::move(depacketizer));
-            const std::weak_ptr<Impl> weak_self = weak_from_this();
             track->onFrame([weak_self](rtc::binary data, rtc::FrameInfo info) {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
                     std::vector<std::uint8_t> frame(data.size());
