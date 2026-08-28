@@ -1,6 +1,8 @@
 package top.ozaoza.remoe
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
@@ -8,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
@@ -23,6 +26,9 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.GetPublicKeyCredentialOption
 import androidx.credentials.PublicKeyCredential
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import org.webrtc.RendererCommon
@@ -57,6 +63,9 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var passkeyLoginButton: Button
     private lateinit var bindingStatusView: TextView
     private lateinit var hostListView: LinearLayout
+    private lateinit var controlPanel: ScrollView
+    private lateinit var remoteStopButton: Button
+    private lateinit var developerPanel: LinearLayout
     private lateinit var bindingClient: AndroidBindingClient
     private lateinit var credentialManager: CredentialManager
     private lateinit var nativeSessionStore: NativeSessionStore
@@ -79,6 +88,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         bindingClient = AndroidBindingClient(app.httpClient)
         credentialManager = CredentialManager.create(this)
         nativeSessionStore = NativeSessionStore(this)
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
 
         renderer = SurfaceViewRenderer(this).apply {
             init(app.rtcRuntime.eglBase.eglBaseContext, this@MainActivity)
@@ -86,6 +96,13 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             setEnableHardwareScaler(true)
             setMirror(false)
             setBackgroundColor(Color.BLACK)
+            visibility = View.GONE
+        }
+
+        controlPanel = createControlPanel()
+        remoteStopButton = secondaryButton("断开").apply {
+            visibility = View.GONE
+            setOnClickListener { disconnect("用户断开") }
         }
 
         val root = FrameLayout(this).apply {
@@ -94,14 +111,18 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ))
-            addView(createControlPanel(), FrameLayout.LayoutParams(
-                dp(410),
+            addView(controlPanel, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.START,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             ))
+            addView(remoteStopButton, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END,
+            ).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
         }
         setContentView(root)
-        showStatus("粘贴 Host invite 后连接")
+        showStatus("登录后选择一台在线电脑")
         restoreNativeSession()
     }
 
@@ -117,41 +138,32 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
-        connectButton = Button(this).apply {
-            text = getString(R.string.connect)
-            setOnClickListener { connect() }
-        }
-        disconnectButton = Button(this).apply {
-            text = getString(R.string.disconnect)
+        connectButton = primaryButton(getString(R.string.connect)).apply { setOnClickListener { connect() } }
+        disconnectButton = secondaryButton(getString(R.string.disconnect)).apply {
             isEnabled = false
             setOnClickListener { disconnect("用户断开") }
         }
-        codecProbeButton = Button(this).apply {
-            text = getString(R.string.run_codec_probe)
+        codecProbeButton = secondaryButton(getString(R.string.run_codec_probe)).apply {
             setOnClickListener { runCodecProbe() }
         }
-        scanBindButton = Button(this).apply {
-            text = "扫描账号绑定二维码"
+        scanBindButton = primaryButton("扫描网页二维码").apply {
             setOnClickListener {
                 qrScannerLauncher.launch(Intent(this@MainActivity, QrScannerActivity::class.java))
             }
         }
-        passkeyLoginButton = Button(this).apply {
-            text = "使用 Passkey 登录"
+        passkeyLoginButton = secondaryButton("使用 Passkey 登录").apply {
             setOnClickListener { loginWithPasskey() }
         }
         bindingStatusView = textView(14f, Color.rgb(205, 214, 228))
         hostListView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val accountActions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(Button(this@MainActivity).apply {
-                text = "刷新电脑"
+            addView(secondaryButton("刷新").apply {
                 setOnClickListener { loadHosts() }
             }, LinearLayout.LayoutParams(0, dp(52), 1f))
-            addView(Button(this@MainActivity).apply {
-                text = "退出账号"
+            addView(secondaryButton("退出账号").apply {
                 setOnClickListener { logoutNativeSession() }
-            }, LinearLayout.LayoutParams(0, dp(52), 1f))
+            }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(8) })
         }
 
         val settings = LinearLayout(this).apply {
@@ -165,31 +177,50 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             addView(connectButton, LinearLayout.LayoutParams(0, dp(52), 1f))
             addView(disconnectButton, LinearLayout.LayoutParams(0, dp(52), 1f))
         }
-        val content = LinearLayout(this).apply {
+        developerPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(24))
-            addView(textView(22f, Color.WHITE).apply {
-                text = getString(R.string.stream_probe_title)
-                typeface = Typeface.DEFAULT_BOLD
-            })
             addView(inviteInput, matchWrap(top = 10))
             addView(settings, matchWrap(top = 6))
             addView(actions, matchWrap(top = 6))
             addView(codecProbeButton, matchWrap(top = 6))
-            addView(textView(18f, Color.WHITE).apply {
-                text = "阶段 D · 账号绑定"
-                typeface = Typeface.DEFAULT_BOLD
-            }, matchWrap(top = 18))
-            addView(scanBindButton, matchWrap(top = 6))
-            addView(passkeyLoginButton, matchWrap(top = 6))
-            addView(bindingStatusView, matchWrap(top = 8))
-            addView(accountActions, matchWrap(top = 8))
-            addView(hostListView, matchWrap(top = 6))
-            addView(statusView, matchWrap(top = 12))
             addView(diagnosticsView, matchWrap(top = 10))
+            visibility = View.GONE
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(28), dp(22), dp(36))
+            addView(textView(34f, Color.WHITE).apply {
+                text = "remoe"
+                typeface = Typeface.DEFAULT_BOLD
+            })
+            addView(textView(14f, Color.rgb(145, 154, 170)).apply {
+                text = "从手机安全连接你的电脑"
+            }, matchWrap(top = 4))
+            addView(textView(20f, Color.WHITE).apply {
+                text = "账号"
+                typeface = Typeface.DEFAULT_BOLD
+            }, matchWrap(top = 30))
+            addView(scanBindButton, matchWrap(top = 12))
+            addView(passkeyLoginButton, matchWrap(top = 8))
+            addView(bindingStatusView, matchWrap(top = 12))
+            addView(textView(20f, Color.WHITE).apply {
+                text = "我的电脑"
+                typeface = Typeface.DEFAULT_BOLD
+            }, matchWrap(top = 30))
+            addView(accountActions, matchWrap(top = 8))
+            addView(hostListView, matchWrap(top = 12))
+            addView(statusView, matchWrap(top = 20))
+            addView(secondaryButton("开发工具").apply {
+                setOnClickListener {
+                    developerPanel.visibility =
+                        if (developerPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                }
+            }, matchWrap(top = 28))
+            addView(developerPanel)
         }
         return ScrollView(this).apply {
-            setBackgroundColor(Color.argb(225, 18, 21, 27))
+            setBackgroundColor(Color.rgb(8, 11, 16))
+            isFillViewport = true
             addView(content)
         }
     }
@@ -417,8 +448,9 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                         })
                     }
                     hosts.forEach { host ->
-                        hostListView.addView(Button(this).apply {
-                            text = "${if (host.online) "●" else "○"} ${host.name}"
+                        hostListView.addView(secondaryButton(
+                            "${if (host.online) "●" else "○"} ${host.name}",
+                        ).apply {
                             isEnabled = host.online && session == null
                             setOnClickListener { connectManagedHost(host.id) }
                         }, matchWrap(top = 4))
@@ -484,6 +516,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         disconnectButton.isEnabled = true
         codecProbeButton.isEnabled = false
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        enterRemoteMode()
         session = RtcSession(
             runtime = app.rtcRuntime,
             httpClient = app.httpClient,
@@ -503,6 +536,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         codecProbeButton.isEnabled = true
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         renderer.clearImage()
+        leaveRemoteMode()
     }
 
     private fun runCodecProbe() {
@@ -545,6 +579,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         disconnectButton.isEnabled = false
         codecProbeButton.isEnabled = true
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        leaveRemoteMode()
         showStatus(message, true)
     }
 
@@ -589,12 +624,54 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         runOnUiThread { if (!isDestroyed) action() }
     }
 
+    private fun enterRemoteMode() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        controlPanel.visibility = View.GONE
+        renderer.visibility = View.VISIBLE
+        remoteStopButton.visibility = View.VISIBLE
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    private fun leaveRemoteMode() {
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        remoteStopButton.visibility = View.GONE
+        renderer.visibility = View.GONE
+        controlPanel.visibility = View.VISIBLE
+        WindowCompat.getInsetsController(window, window.decorView)
+            .show(WindowInsetsCompat.Type.systemBars())
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+    }
+
+    private fun primaryButton(label: String): Button = Button(this).apply {
+        text = label
+        textSize = 15f
+        isAllCaps = false
+        setTextColor(Color.rgb(6, 16, 13))
+        backgroundTintList = ColorStateList.valueOf(Color.rgb(73, 220, 175))
+        minHeight = dp(52)
+    }
+
+    private fun secondaryButton(label: String): Button = Button(this).apply {
+        text = label
+        textSize = 15f
+        isAllCaps = false
+        setTextColor(Color.rgb(225, 233, 240))
+        backgroundTintList = ColorStateList.valueOf(Color.rgb(37, 46, 57))
+        minHeight = dp(52)
+    }
+
     private fun editText(hintText: String, type: Int): EditText = EditText(this).apply {
         hint = hintText
         inputType = type
         setTextColor(Color.WHITE)
         setHintTextColor(Color.rgb(145, 154, 170))
         setBackgroundColor(Color.rgb(38, 44, 56))
+        backgroundTintList = ColorStateList.valueOf(Color.rgb(73, 220, 175))
         setPadding(dp(10), 0, dp(10), 0)
     }
 
