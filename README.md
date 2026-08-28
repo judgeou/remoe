@@ -67,8 +67,8 @@ Host 配对和设备列表。音频与文件传输尚未实现。
 libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
 WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed TLS，用于验证服务器证书链及
 域名；证书无效时连接会直接失败，不会退化为跳过验证。
-`src/webrtc_transport.*` 提供 host/client 共用的双 DataChannel 传输封装。可靠有序的 control channel
-承载参数协商和键鼠输入；无序、不重传的 video channel 承载编码视频分片。SDP/ICE 经 WSS 中继，
+`src/webrtc_transport.*` 提供 host/client 共用的 WebRTC 传输封装。可靠有序的 control DataChannel
+承载参数协商和键鼠输入；标准 VideoTrack 通过 RTP 承载 H.264 或 AV1 编码帧。SDP/ICE 经 WSS 中继，
 STUN 地址由信令 URL 自动派生，TURN 有意禁用。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
@@ -160,7 +160,8 @@ git push origin v0.1.0
 
 对 `remoe_host_x264.exe`，`--output` 是 GDI `EnumDisplayMonitors` 的顺序；`--check-encoder` 测试
 GDI 抓屏和 x264 H.264 软件编码。它接受同一套连接参数，但码率上限为 50 Mbps。GDI 路径会把鼠标
-指针合成到画面中。H.264 播放目前由网页 Client 的 WebCodecs 路径支持；原生 oneVPL Client 仍只解 AV1。
+指针合成到画面中。H.264 和 AV1 都通过标准 WebRTC VideoTrack 发送；浏览器使用原生 WebRTC 解码，
+Windows 原生 oneVPL Client 仍只解 AV1。
 
 兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
 每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
@@ -234,11 +235,11 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## WebRTC 传输协议 v9
+## WebRTC 传输协议 v10
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-双 DataChannel 和 protocol v9，通过 WebCodecs 解码 AV1，并发送键鼠 `InputEvent` 与
-UTF-8 文本剪贴板。连接后
+标准 H.264/AV1 VideoTrack 和 protocol v10；可靠有序的 `remoe-control` DataChannel 发送键鼠
+`InputEvent` 与 UTF-8 文本剪贴板。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
@@ -256,15 +257,15 @@ npm run build
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
 依次承载 `ClientConfig`、`StreamHeader`、`StreamReady`、`InputEvent` 和 `ClipboardHeader + text`。
-无序、不重传的
-`remoe-video` DataChannel 承载 `VideoChunkHeader + encoded video chunk`。
+编码视频由标准 RTP/SRTP VideoTrack 承载。libdatachannel 负责 H.264/AV1 RTP 分片、Sender Report、
+NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
 
 ### ClientConfig（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
@@ -279,7 +280,7 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `44` |
 | 8 | u32 | codec | `AV01` 或 `H264` |
 | 12 | u32 | width | 编码宽度 |
@@ -296,7 +297,7 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `SRDY` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `8` |
 
 client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
@@ -313,44 +314,32 @@ client 完成解码队列和窗口初始化后发送此消息；host 收到后�
 `client_send_us`。`ClockSyncResponse` 为 40 bytes，在回显 sequence 和 `client_send_us` 后追加
 `host_receive_us` 与 `host_send_us`。
 
-### VideoChunkHeader（36 bytes）
+### 标准 VideoTrack
 
-| 偏移 | 类型 | 字段 | 值/说明 |
-|---:|---|---|---|
-| 0 | u32 | magic | `VCHK` |
-| 4 | u16 | version | `9` |
-| 6 | u16 | header_size | `36` |
-| 8 | u32 | flags | bit 0 = key frame；bit 1 预留为 codec config |
-| 12 | u64 | frame_number | 递增帧编号 |
-| 20 | u64 | timestamp_us | host 启动后的单调时钟微秒数 |
-| 28 | u32 | frame_size | 完整编码 access unit 长度 |
-| 32 | u32 | chunk_offset | 此分片在帧内的字节偏移 |
-
-每条 video DataChannel 消息最多携带 16 KiB 编码数据。client 按帧号和偏移重组，丢弃长期不完整的帧
-并请求新关键帧。AV1 数据不是 IVF 容器；H.264 每帧为 Annex-B access unit，IDR 携带 SPS/PPS。
+VideoTrack 的 codec 通过 SDP 协商。H.264 Host 向 RTP packetizer 提交 Annex-B access unit，IDR 携带
+SPS/PPS；AV1 Host 提交不带 IVF 容器的 temporal unit。视频包格式遵循对应 RTP payload 规范，不再定义
+Remoe 私有的 `VideoChunkHeader`。接收端通过 RTCP PLI 请求关键帧，丢包恢复由 RTCP/NACK 和解码队列
+共同处理。
 
 ### InputEvent（24 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `24` |
-| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
+| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
 | 12 | i32 | value1 | 移动 X（0–65535）、滚轮 delta 或 Windows 扫描码 |
 | 16 | i32 | value2 | 移动 Y（0–65535），其余类型为 0 |
 | 20 | u32 | sequence | client 递增事件编号 |
-
-type 10 是控制消息而不是键鼠输入，其 flags、value1、value2 必须为 0。host 收到后会在下一张
-捕获画面强制生成携带 codec headers 的 IDR，用于客户端丢弃积压帧后的快速恢复。
 
 ### ClipboardHeader（16 bytes + UTF-8 text）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `CLIP` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `16` |
 | 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 1 MiB |
 | 12 | u32 | sequence | 发送方递增消息编号 |
@@ -365,7 +354,7 @@ Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `WRMS` |
-| 4 | u16 | version | `9` |
+| 4 | u16 | version | `10` |
 | 6 | u16 | header_size | `20` |
 | 8 | u16 | type | 1=SDP；2=ICE candidate；3=DataChannel ready；4=完成确认 |
 | 10 | u16 | reserved | 0 |
@@ -398,7 +387,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - 剪贴板同步当前仅支持最多 1 MiB 的纯文本，不传输图片、文件列表或富文本。网页读写剪贴板还受
   HTTPS、安全上下文、页面焦点和浏览器用户手势策略约束。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
-- video DataChannel 使用无序、不重传策略，拥塞或丢包时会跳过旧帧并请求关键帧；当前没有自适应码率。
+- VideoTrack 已接入 RTP、Sender Report、NACK 和 PLI；当前仍没有基于 RTCP 反馈的自动码率调节。
 
 ## 源码结构
 
@@ -411,11 +400,11 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - `src/nvenc_encoder.cpp`、`src/nvenc_api_loader.cpp`：NVENC AV1 回退与驱动 DLL 延迟加载
 - `src/x264_encoder.*`：libyuv BGRA 缩放/转 I420 与 x264 Annex-B H.264 软件编码
 - `src/host_identity.*`：Host 长期设备凭证的 Windows DPAPI 持久化
-- `src/webrtc_transport.*`：无信令依赖的 WebRTC DataChannel 传输层
+- `src/webrtc_transport.*`：无信令依赖的 WebRTC control DataChannel、VideoTrack 与 RTP/RTCP 处理
 - `src/webrtc_tcp_bootstrap.*`：信令帧编解码与协商状态机（同时供 WSS adapter 和测试复用）
 - `src/webrtc_websocket_signaling.*`：libdatachannel WebSocket/WSS 信令适配层
 - `src/protocol.h`：host/client 共用的 wire protocol 定义
-- `src/client_main.cpp`：client WebRTC 分片重组、协议校验与播放线程
+- `src/client_main.cpp`：client RTP 视频帧接收、协议校验与播放线程
 - `src/vpl_decoder.*`：Intel oneVPL AV1 D3D11 硬件解码
 - `src/video_window.*`：D3D11 Video Processor、flip-model 窗口呈现与客户端输入采集
 

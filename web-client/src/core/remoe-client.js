@@ -1,9 +1,6 @@
 import {
-  FRAME_FLAG_KEY,
   SIGNAL_TYPE,
   SignalFrameBuffer,
-  VideoDecodeGate,
-  VideoFrameAssembler,
   av1CodecString,
   h264CodecString,
   MAGIC,
@@ -11,7 +8,6 @@ import {
   decodeStreamHeader,
   encodeClientConfig,
   encodeInputEvent,
-  encodeKeyFrameRequest,
   encodeClipboardText,
   encodeSignal,
   encodeStreamReady,
@@ -70,16 +66,18 @@ export class RemoeBrowserClient {
   #websocket = null;
   #peer = null;
   #control = null;
-  #video = null;
-  #decoder = null;
-  #decoderConfig = null;
-  #assembler = new VideoFrameAssembler();
-  #decodeGate = new VideoDecodeGate();
+  #remoteVideo = null;
+  #remoteStream = null;
+  #remoteTrack = null;
+  #streamHeader = null;
+  #videoFrameCallback = 0;
+  #statsTimer = 0;
+  #lastInboundStats = null;
   #signalBuffer = new SignalFrameBuffer();
   #pendingCandidates = [];
   #remoteDescription = false;
   #controlOpen = false;
-  #videoOpen = false;
+  #videoTrackReady = false;
   #gatheringComplete = false;
   #remoteReady = false;
   #ackSent = false;
@@ -87,14 +85,9 @@ export class RemoeBrowserClient {
   #bootstrapComplete = false;
   #streamStarted = false;
   #stopped = false;
-  #lastKeyFrameRequest = Number.NEGATIVE_INFINITY;
   #inputSequence = 0;
   #inputReady = false;
   #clipboardSequence = 0;
-  #statsStartedAt = 0;
-  #statsBytes = 0;
-  #statsFrames = 0;
-  #statsLossEvents = 0;
 
   constructor(invite, settings, events = {}) {
     this.#invite = invite;
@@ -107,7 +100,6 @@ export class RemoeBrowserClient {
       throw new Error('网页客户端必须运行在 HTTPS 安全上下文中');
     }
     if (!('RTCPeerConnection' in globalThis)) throw new Error('浏览器不支持 WebRTC');
-    if (!('VideoDecoder' in globalThis)) throw new Error('浏览器不支持 WebCodecs VideoDecoder');
     this.#status('正在注册邀请…');
     await this.#connectWebSocket();
     this.#createPeerConnection();
@@ -120,9 +112,13 @@ export class RemoeBrowserClient {
   stop() {
     if (this.#stopped) return;
     this.#stopped = true;
-    try { this.#decoder?.close(); } catch { /* already closed */ }
+    if (this.#statsTimer) clearInterval(this.#statsTimer);
+    if (this.#videoFrameCallback && this.#remoteVideo?.cancelVideoFrameCallback) {
+      this.#remoteVideo.cancelVideoFrameCallback(this.#videoFrameCallback);
+    }
+    if (this.#remoteVideo) this.#remoteVideo.srcObject = null;
+    for (const track of this.#remoteStream?.getTracks?.() ?? []) track.stop();
     try { this.#control?.close(); } catch { /* already closed */ }
-    try { this.#video?.close(); } catch { /* already closed */ }
     try { this.#peer?.close(); } catch { /* already closed */ }
     try { this.#websocket?.close(1000, 'Client stopped'); } catch { /* already closed */ }
     this.#status('已停止');
@@ -193,24 +189,25 @@ export class RemoeBrowserClient {
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'failed') this.#fail(new Error('WebRTC PeerConnection 失败'));
     };
+    peer.ontrack = (event) => this.#attachRemoteTrack(event);
+
+    const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+    const capabilities = globalThis.RTCRtpReceiver?.getCapabilities?.('video');
+    if (capabilities?.codecs && transceiver.setCodecPreferences) {
+      const codecs = capabilities.codecs.filter(({ mimeType }) =>
+        /video\/(AV1|H264)/i.test(mimeType));
+      if (codecs.length > 0) transceiver.setCodecPreferences(codecs);
+    }
 
     this.#control = peer.createDataChannel('remoe-control', { ordered: true });
-    this.#video = peer.createDataChannel('remoe-video', { ordered: false, maxRetransmits: 0 });
     this.#control.binaryType = 'arraybuffer';
-    this.#video.binaryType = 'arraybuffer';
     this.#control.onopen = () => {
       this.#controlOpen = true;
       this.#sendSignal(SIGNAL_TYPE.ready);
       this.#maybeAcknowledge();
     };
-    this.#video.onopen = () => {
-      this.#videoOpen = true;
-      this.#maybeStartStream();
-    };
     this.#control.onmessage = (event) => this.#handleControl(event.data).catch((error) => this.#fail(error));
-    this.#video.onmessage = (event) => this.#handleVideo(event.data);
     this.#control.onerror = () => this.#fail(new Error('控制 DataChannel 出错'));
-    this.#video.onerror = () => this.#fail(new Error('视频 DataChannel 出错'));
     this.#control.onclose = () => {
       if (!this.#stopped) this.#fail(new Error('控制 DataChannel 已关闭'));
     };
@@ -254,9 +251,32 @@ export class RemoeBrowserClient {
   }
 
   #maybeStartStream() {
-    if (!this.#bootstrapComplete || !this.#videoOpen || this.#streamStarted) return;
+    if (!this.#bootstrapComplete || !this.#videoTrackReady || this.#streamStarted) return;
     this.#streamStarted = true;
     this.#control.send(encodeClientConfig(this.#settings));
+  }
+
+  #attachRemoteTrack(event) {
+    if (event.track.kind !== 'video') return;
+    if (this.#remoteTrack && this.#remoteTrack !== event.track) {
+      this.#fail(new Error('Host 发来了多个视频 Track'));
+      return;
+    }
+    this.#remoteTrack = event.track;
+    this.#remoteStream = event.streams[0] ?? new MediaStream([event.track]);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.srcObject = this.#remoteStream;
+    this.#remoteVideo = video;
+    event.track.onended = () => {
+      if (!this.#stopped) this.#fail(new Error('远端视频 Track 已结束'));
+    };
+    this.#videoTrackReady = true;
+    void video.play().catch((error) => this.#fail(
+      new Error(`无法启动远端视频播放：${error.message}`)));
+    this.#maybeStartStream();
   }
 
   async #handleControl(value) {
@@ -271,85 +291,57 @@ export class RemoeBrowserClient {
     const header = decodeStreamHeader(bytes);
     const isH264 = header.codec === MAGIC.h264;
     const codec = isH264 ? h264CodecString(header) : av1CodecString(header);
-    const config = {
-      codec,
-      codedWidth: header.width,
-      codedHeight: header.height,
-      hardwareAcceleration: 'prefer-hardware',
-      optimizeForLatency: true,
-    };
-    const support = await VideoDecoder.isConfigSupported(config);
-    if (!support.supported) throw new Error(`浏览器不支持此视频配置：${codec}`);
-    this.#decoder = new VideoDecoder({
-      output: (frame) => {
-        try {
-          this.#statsFrames += 1;
-          this.#maybeReportStats();
-          this.#events.onFrame?.(frame, header);
-        } finally {
-          frame.close();
-        }
-      },
-      error: (error) => this.#fail(new Error(`视频解码失败：${error.message}`)),
-    });
-    this.#decoderConfig = support.config ?? config;
-    this.#decoder.configure(this.#decoderConfig);
-    this.#statsStartedAt = performance.now();
-    this.#statsBytes = 0;
-    this.#statsFrames = 0;
-    this.#statsLossEvents = 0;
+    this.#streamHeader = header;
     this.#events.onStream?.({ ...header, codec });
     this.#control.send(encodeStreamReady());
     this.#inputReady = true;
+    this.#startVideoFrames();
+    this.#statsTimer = setInterval(() => {
+      this.#reportPeerStats().catch((error) => this.#fail(error));
+    }, 1_000);
     this.#status(`等待第一张 ${isH264 ? 'H.264' : 'AV1'} 画面…`);
   }
 
-  #handleVideo(value) {
-    try {
-      const bytes = toBytes(value);
-      this.#statsBytes += bytes.byteLength;
-      const { frame, lossDetected } = this.#assembler.consume(bytes);
-      const decision = this.#decodeGate.evaluate(frame, lossDetected);
-      if (decision.recoveryStarted) {
-        this.#statsLossEvents += 1;
-        this.#assembler.clear();
-        this.#decoder?.reset();
-        if (this.#decoder && this.#decoderConfig) this.#decoder.configure(this.#decoderConfig);
-        this.#requestKeyFrame();
-      }
-      this.#maybeReportStats();
-      if (!decision.frame || !this.#decoder) return;
-      this.#decoder.decode(new EncodedVideoChunk({
-        type: (decision.frame.flags & FRAME_FLAG_KEY) ? 'key' : 'delta',
-        timestamp: Number(decision.frame.timestampUs),
-        data: decision.frame.data,
-      }));
-    } catch (error) {
-      this.#fail(error);
+  #startVideoFrames() {
+    if (!this.#remoteVideo || !this.#streamHeader) return;
+    const video = this.#remoteVideo;
+    if (!video.requestVideoFrameCallback) {
+      this.#fail(new Error('浏览器不支持 requestVideoFrameCallback'));
+      return;
     }
+    const render = () => {
+      if (this.#stopped) return;
+      this.#events.onFrame?.(video, this.#streamHeader);
+      this.#videoFrameCallback = video.requestVideoFrameCallback(render);
+    };
+    this.#videoFrameCallback = video.requestVideoFrameCallback(render);
   }
 
-  #maybeReportStats() {
-    if (!this.#statsStartedAt) return;
-    const now = performance.now();
-    const elapsed = now - this.#statsStartedAt;
-    if (elapsed < 1_000) return;
-    this.#events.onStats?.({
-      fps: this.#statsFrames * 1_000 / elapsed,
-      bitrateMbps: this.#statsBytes * 8 / elapsed / 1_000,
-      dataRateKBps: this.#statsBytes / elapsed,
-      lossEvents: this.#statsLossEvents,
-    });
-    this.#statsStartedAt = now;
-    this.#statsBytes = 0;
-    this.#statsFrames = 0;
-  }
-
-  #requestKeyFrame() {
-    const now = performance.now();
-    if (now - this.#lastKeyFrameRequest < 500 || this.#control?.readyState !== 'open') return;
-    this.#lastKeyFrameRequest = now;
-    this.#control.send(encodeKeyFrameRequest(this.#inputSequence++));
+  async #reportPeerStats() {
+    if (!this.#peer) return;
+    const reports = await this.#peer.getStats(this.#remoteTrack ?? undefined);
+    const inbound = [...reports.values()].find((report) =>
+      report.type === 'inbound-rtp' && report.kind === 'video');
+    if (!inbound) return;
+    const current = {
+      timestamp: inbound.timestamp,
+      bytes: inbound.bytesReceived ?? 0,
+      frames: inbound.framesDecoded ?? inbound.framesReceived ?? 0,
+      lost: inbound.packetsLost ?? 0,
+    };
+    if (this.#lastInboundStats) {
+      const elapsedMs = current.timestamp - this.#lastInboundStats.timestamp;
+      if (elapsedMs > 0) {
+        const bytes = Math.max(0, current.bytes - this.#lastInboundStats.bytes);
+        this.#events.onStats?.({
+          fps: Math.max(0, current.frames - this.#lastInboundStats.frames) * 1_000 / elapsedMs,
+          bitrateMbps: bytes * 8 / elapsedMs / 1_000,
+          dataRateKBps: bytes / elapsedMs,
+          lossEvents: Math.max(0, current.lost - this.#lastInboundStats.lost),
+        });
+      }
+    }
+    this.#lastInboundStats = current;
   }
 
   #sendSignal(type, value = '', metadata = '') {

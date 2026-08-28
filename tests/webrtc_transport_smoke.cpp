@@ -38,7 +38,8 @@ struct SharedState {
     bool answerer_video_open = false;
     std::string answerer_text;
     std::vector<std::uint8_t> offerer_binary;
-    std::vector<std::uint8_t> answerer_video_binary;
+    std::vector<std::uint8_t> offerer_video_frame;
+    bool answerer_keyframe_requested = false;
     std::vector<std::string> errors;
 };
 
@@ -92,11 +93,20 @@ remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer
         }
         state.changed.notify_all();
     };
-    callbacks.on_video_binary = [&state, offerer](std::vector<std::uint8_t> message) {
+    callbacks.on_video_frame = [&state, offerer](std::vector<std::uint8_t> message,
+                                                  std::uint64_t, bool) {
+        if (!offerer) return;
+        {
+            std::lock_guard lock(state.mutex);
+            state.offerer_video_frame = std::move(message);
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_video_keyframe_requested = [&state, offerer] {
         if (offerer) return;
         {
             std::lock_guard lock(state.mutex);
-            state.answerer_video_binary = std::move(message);
+            state.answerer_keyframe_requested = true;
         }
         state.changed.notify_all();
     };
@@ -160,12 +170,14 @@ int main() {
 
         remoe::WebRtcTransport::Configuration answerer_config;
         answerer_config.role = remoe::WebRtcTransport::Role::Answerer;
-        answerer_config.enable_video_channel = true;
+        answerer_config.video_direction = remoe::WebRtcTransport::VideoDirection::SendOnly;
+        answerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::H264;
         remoe::WebRtcTransport answerer(answerer_config, callbacks_for(state, false));
 
         remoe::WebRtcTransport::Configuration offerer_config;
         offerer_config.role = remoe::WebRtcTransport::Role::Offerer;
-        offerer_config.enable_video_channel = true;
+        offerer_config.video_direction = remoe::WebRtcTransport::VideoDirection::ReceiveOnly;
+        offerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::H264;
         remoe::WebRtcTransport offerer(offerer_config, callbacks_for(state, true));
 
         answerer.start();
@@ -183,13 +195,11 @@ int main() {
 
         constexpr std::string_view text = "remoe-webrtc-smoke";
         const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};
-        std::vector<std::uint8_t> video(16 * 1024 + 36);
-        for (std::size_t index = 0; index < video.size(); ++index) {
-            video[index] = static_cast<std::uint8_t>(index & 0xff);
-        }
+        const std::vector<std::uint8_t> video = {
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x52, 0x4d, 0x4f, 0x45};
         if (!offerer.send_text(text) || !answerer.send_binary(binary) ||
-            !offerer.send_video_binary(video)) {
-            std::cerr << "DataChannel rejected an outbound message\n";
+            !answerer.send_video_frame(video, 123'456)) {
+            std::cerr << "WebRTC transport rejected an outbound message\n";
             return 1;
         }
 
@@ -197,10 +207,23 @@ int main() {
         const bool delivered = pump_until(state, offerer, answerer, message_deadline, [&] {
             return state.answerer_text == text && state.offerer_binary ==
                 std::vector<std::uint8_t>(binary.begin(), binary.end()) &&
-                state.answerer_video_binary == video;
+                state.offerer_video_frame == video;
         });
         if (!delivered) {
             std::cerr << "Timed out delivering DataChannel messages\n";
+            return 1;
+        }
+
+        if (!offerer.request_video_keyframe()) {
+            std::cerr << "Receive track rejected an RTCP PLI request\n";
+            return 1;
+        }
+        const bool pli_delivered = pump_until(state, offerer, answerer,
+            std::chrono::steady_clock::now() + 5s, [&] {
+                return state.answerer_keyframe_requested;
+            });
+        if (!pli_delivered) {
+            std::cerr << "Timed out delivering RTCP PLI feedback\n";
             return 1;
         }
 
@@ -215,6 +238,45 @@ int main() {
         const auto stats = offerer.statistics();
         if (!stats.local_candidate || !stats.remote_candidate) {
             std::cerr << "Connected DataChannel has no selected ICE candidate pair\n";
+            return 1;
+        }
+
+        // Exercise Remoe's RFC 9364 depacketizer too. libdatachannel provides
+        // AV1 packetization but does not ship an AV1 depacketizer in 0.24.x.
+        SharedState av1_state;
+        remoe::WebRtcTransport::Configuration av1_answerer_config;
+        av1_answerer_config.role = remoe::WebRtcTransport::Role::Answerer;
+        av1_answerer_config.video_direction =
+            remoe::WebRtcTransport::VideoDirection::SendOnly;
+        av1_answerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::AV1;
+        remoe::WebRtcTransport av1_answerer(
+            av1_answerer_config, callbacks_for(av1_state, false));
+        remoe::WebRtcTransport::Configuration av1_offerer_config;
+        av1_offerer_config.role = remoe::WebRtcTransport::Role::Offerer;
+        av1_offerer_config.video_direction =
+            remoe::WebRtcTransport::VideoDirection::ReceiveOnly;
+        av1_offerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::AV1;
+        remoe::WebRtcTransport av1_offerer(
+            av1_offerer_config, callbacks_for(av1_state, true));
+        av1_answerer.start();
+        av1_offerer.start();
+        if (!pump_until(av1_state, av1_offerer, av1_answerer,
+                std::chrono::steady_clock::now() + 15s, [&] {
+                    return av1_state.offerer_open && av1_state.answerer_open &&
+                        av1_state.offerer_video_open && av1_state.answerer_video_open;
+                })) {
+            std::cerr << "Timed out opening the AV1 video track\n";
+            return 1;
+        }
+        // Sequence Header OBU followed by a Frame OBU, both with LEB128 sizes.
+        const std::vector<std::uint8_t> av1_frame = {
+            0x0a, 0x01, 0xaa, 0x32, 0x02, 0xbb, 0xcc};
+        if (!av1_answerer.send_video_frame(av1_frame, 654'321) ||
+            !pump_until(av1_state, av1_offerer, av1_answerer,
+                std::chrono::steady_clock::now() + 5s, [&] {
+                    return av1_state.offerer_video_frame == av1_frame;
+                })) {
+            std::cerr << "AV1 frame changed during RTP packetization/depacketization\n";
             return 1;
         }
 

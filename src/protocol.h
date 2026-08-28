@@ -6,18 +6,15 @@
 namespace remoe::protocol {
 
 constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little-endian)
-constexpr std::uint32_t kFrameMagic = 0x4D415246;  // "FRAM"
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
 constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
-constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
 constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
-constexpr std::uint16_t kVersion = 9;
+constexpr std::uint16_t kVersion = 10;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
-constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
 constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
 
 enum ClientFlags : std::uint32_t {
@@ -27,11 +24,6 @@ enum ClientFlags : std::uint32_t {
 enum class VideoRateControl : std::uint32_t {
     Cbr = 0,
     FixedQuality = 1,
-};
-
-enum FrameFlags : std::uint32_t {
-    kFrameKey = 1u << 0,
-    kFrameConfig = 1u << 1,
 };
 
 enum class InputType : std::uint16_t {
@@ -44,7 +36,6 @@ enum class InputType : std::uint16_t {
     MouseWheel = 7,
     MouseHorizontalWheel = 8,
     Keyboard = 9,
-    RequestKeyFrame = 10,
 };
 
 enum InputFlags : std::uint16_t {
@@ -117,29 +108,6 @@ struct ClockSyncResponse {
     std::uint64_t host_send_us = 0;
 };
 
-struct FrameHeader {
-    std::uint32_t magic = kFrameMagic;
-    std::uint16_t version = kVersion;
-    std::uint16_t header_size = sizeof(FrameHeader);
-    std::uint32_t payload_size = 0;
-    std::uint32_t flags = 0;
-    std::uint64_t frame_number = 0;
-    std::uint64_t timestamp_us = 0;
-};
-
-// One unordered, non-retransmitted video DataChannel message. A frame is split
-// into fixed-size chunks so it stays below the negotiated SCTP message limit.
-struct VideoChunkHeader {
-    std::uint32_t magic = kVideoChunkMagic;
-    std::uint16_t version = kVersion;
-    std::uint16_t header_size = sizeof(VideoChunkHeader);
-    std::uint32_t flags = 0;
-    std::uint64_t frame_number = 0;
-    std::uint64_t timestamp_us = 0;
-    std::uint32_t frame_size = 0;
-    std::uint32_t chunk_offset = 0;
-};
-
 // Client-to-host input message. MouseMove values are normalized to 0..65535.
 // Keyboard value1 is a Windows scan code; value2 is unused.
 struct InputEvent {
@@ -182,8 +150,6 @@ static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(ClockSyncRequest) == 24);
 static_assert(sizeof(ClockSyncResponse) == 40);
-static_assert(sizeof(FrameHeader) == 32);
-static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(InputEvent) == 24);
 static_assert(sizeof(ClipboardHeader) == 16);
 static_assert(sizeof(WebRtcSignalHeader) == 20);

@@ -439,41 +439,17 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-enum class VideoSendResult { Sent, Dropped, Failed };
+enum class VideoSendResult { Sent, Failed };
 
 VideoSendResult send_packet(remoe::WebRtcTransport& transport,
                             const remoe::EncodedVideoFrame& packet,
-                            std::uint64_t frame_number, std::uint64_t timestamp_us) {
+                            std::uint64_t timestamp_us) {
     const std::span<const std::uint8_t> encoded_video(packet.data);
-    if (encoded_video.empty() ||
-        encoded_video.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+    if (encoded_video.empty()) {
         return VideoSendResult::Failed;
     }
-    constexpr std::size_t max_buffered_video = 4 * 1024 * 1024;
-    if (transport.video_buffered_amount() > max_buffered_video) {
-        return VideoSendResult::Dropped;
-    }
-
-    remoe::protocol::VideoChunkHeader header;
-    header.frame_size = static_cast<std::uint32_t>(encoded_video.size());
-    header.frame_number = frame_number;
-    header.timestamp_us = timestamp_us;
-    if (packet.key_frame) header.flags |= remoe::protocol::kFrameKey;
-    std::vector<std::uint8_t> message(sizeof(header) + remoe::protocol::kVideoChunkPayloadSize);
-    for (std::size_t offset = 0; offset < encoded_video.size();
-         offset += remoe::protocol::kVideoChunkPayloadSize) {
-        const std::size_t chunk_size = (std::min)(
-            remoe::protocol::kVideoChunkPayloadSize, encoded_video.size() - offset);
-        header.chunk_offset = static_cast<std::uint32_t>(offset);
-        std::memcpy(message.data(), &header, sizeof(header));
-        std::memcpy(message.data() + sizeof(header), encoded_video.data() + offset,
-                    chunk_size);
-        if (!transport.send_video_binary(
-                std::span<const std::uint8_t>(message.data(), sizeof(header) + chunk_size))) {
-            return VideoSendResult::Failed;
-        }
-    }
-    return VideoSendResult::Sent;
+    return transport.send_video_frame(encoded_video, timestamp_us)
+        ? VideoSendResult::Sent : VideoSendResult::Failed;
 }
 
 bool validate_client_settings(const remoe::protocol::ClientConfig& request,
@@ -714,7 +690,6 @@ int run(const Options& options) {
     std::cout << '\n';
     std::cout << "\nRegistering with signaling server...\n" << std::flush;
 
-    std::uint64_t frame_number = 0;
     const auto epoch = Clock::now();
     bool first_registration = true;
     bool invite_printed = false;
@@ -753,7 +728,10 @@ int run(const Options& options) {
                 handshake.video_open = true;
             }
             handshake.changed.notify_all();
-            std::cout << "WebRTC video DataChannel connected\n";
+            std::cout << "WebRTC standard video track connected\n";
+        };
+        control_callbacks.on_video_keyframe_requested = [&] {
+            key_frame_requested = true;
         };
         control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
             const auto host_receive_us = static_cast<std::uint64_t>(
@@ -851,11 +829,6 @@ int run(const Options& options) {
             const bool valid_header = event.magic == remoe::protocol::kInputMagic &&
                 event.version == remoe::protocol::kVersion &&
                 event.header_size == sizeof(event);
-            if (valid_header && event.type == remoe::protocol::InputType::RequestKeyFrame &&
-                event.flags == 0 && event.value1 == 0 && event.value2 == 0) {
-                key_frame_requested = true;
-                return;
-            }
             if (!valid_header ||
                 !inject_input_event(event, capture.left(), capture.top(), capture.width(),
                                     capture.height(), pressed_keys, pressed_buttons,
@@ -897,12 +870,22 @@ int run(const Options& options) {
                 control_channel = remoe::establish_webrtc_over_websocket(
                     remoe::WebRtcTransport::Role::Answerer, signaling_invite,
                     std::move(control_callbacks), (std::chrono::milliseconds::max)(),
-                    [] { return !g_running.load(); }, std::move(on_registered));
+                    [] { return !g_running.load(); }, std::move(on_registered),
+#if defined(REMOE_X264_HOST)
+                    remoe::WebRtcTransport::VideoCodec::H264);
+#else
+                    remoe::WebRtcTransport::VideoCodec::AV1);
+#endif
             } else {
                 control_channel = remoe::establish_managed_host_webrtc(
                     options.signaling_url, *host_identity, std::move(control_callbacks),
                     (std::chrono::milliseconds::max)(),
-                    [] { return !g_running.load(); }, std::move(on_registered));
+                    [] { return !g_running.load(); }, std::move(on_registered),
+#if defined(REMOE_X264_HOST)
+                    remoe::WebRtcTransport::VideoCodec::H264);
+#else
+                    remoe::WebRtcTransport::VideoCodec::AV1);
+#endif
             }
             active_transport = control_channel.get();
         } catch (const std::exception& error) {
@@ -929,7 +912,7 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!validate_client_settings(request, options, settings)) {
-            std::cerr << "Client rejected: invalid protocol v9 stream request\n";
+            std::cerr << "Client rejected: invalid protocol v10 stream request\n";
             control_channel->close();
             continue;
         }
@@ -1028,11 +1011,9 @@ int run(const Options& options) {
             const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count();
             bool failed = false;
             for (const auto& packet : packets) {
-                const auto result = send_packet(*control_channel, packet, frame_number++,
+                const auto result = send_packet(*control_channel, packet,
                                                 static_cast<std::uint64_t>(timestamp));
-                if (result == VideoSendResult::Dropped) {
-                    key_frame_requested = true;
-                } else if (result == VideoSendResult::Failed) {
+                if (result == VideoSendResult::Failed) {
                     failed = true;
                     break;
                 }

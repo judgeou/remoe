@@ -4,8 +4,6 @@ import {
   MAGIC,
   SIGNAL_TYPE,
   SignalFrameBuffer,
-  VideoDecodeGate,
-  VideoFrameAssembler,
   decodeStreamHeader,
   decodeClipboardText,
   encodeClientConfig,
@@ -18,12 +16,12 @@ import { parseInvite } from '../src/core/remoe-client.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
-test('encodes protocol v9 CBR client settings as little-endian packed bytes', () => {
+test('encodes protocol v10 CBR client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });
   const view = new DataView(bytes.buffer);
   assert.equal(bytes.length, 36);
   assert.equal(view.getUint32(0, true), MAGIC.clientConfig);
-  assert.equal(view.getUint16(4, true), 9);
+  assert.equal(view.getUint16(4, true), 10);
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
@@ -56,7 +54,7 @@ test('decodes a valid stream header', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 9, true);
+  view.setUint16(4, 10, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 1920, true);
@@ -71,7 +69,7 @@ test('decodes fixed-quality AV1 stream parameters', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 9, true);
+  view.setUint16(4, 10, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 2560, true);
@@ -90,7 +88,7 @@ test('decodes a valid H.264 stream header and profile', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 9, true);
+  view.setUint16(4, 10, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.h264, true);
   view.setUint32(12, 1280, true);
@@ -103,83 +101,6 @@ test('decodes a valid H.264 stream header and profile', () => {
   assert.equal(header.codec, MAGIC.h264);
   assert.equal(header.codecProfile, 0x42e02a);
   assert.equal(h264CodecString(header), 'avc1.42E02A');
-});
-
-test('reassembles an AV1 frame arriving out of chunk order', () => {
-  const assembler = new VideoFrameAssembler();
-  const frame = new Uint8Array(20_000).map((_, index) => index & 0xff);
-  const makeChunk = (offset, length) => {
-    const bytes = new Uint8Array(36 + length);
-    const view = new DataView(bytes.buffer);
-    view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 9, true);
-    view.setUint16(6, 36, true);
-    view.setUint32(8, 1, true);
-    view.setBigUint64(12, 42n, true);
-    view.setBigUint64(20, 123456n, true);
-    view.setUint32(28, frame.length, true);
-    view.setUint32(32, offset, true);
-    bytes.set(frame.subarray(offset, offset + length), 36);
-    return bytes;
-  };
-  assert.equal(assembler.consume(makeChunk(16_384, frame.length - 16_384)).frame, null);
-  const result = assembler.consume(makeChunk(0, 16_384)).frame;
-  assert.equal(result.frameNumber, 42n);
-  assert.deepEqual(result.data, frame);
-});
-
-test('ignores delayed chunks from frames discarded during decoder recovery', () => {
-  const assembler = new VideoFrameAssembler();
-  const chunk = (frameNumber) => {
-    const bytes = new Uint8Array(37);
-    const view = new DataView(bytes.buffer);
-    view.setUint32(0, MAGIC.videoChunk, true);
-    view.setUint16(4, 9, true);
-    view.setUint16(6, 36, true);
-    view.setBigUint64(12, frameNumber, true);
-    view.setBigUint64(20, frameNumber * 1_000n, true);
-    view.setUint32(28, 1, true);
-    bytes[36] = Number(frameNumber);
-    return bytes;
-  };
-
-  assert.equal(assembler.consume(chunk(10n)).frame.frameNumber, 10n);
-  assembler.clear();
-  assert.deepEqual(assembler.consume(chunk(9n)), { frame: null, lossDetected: false });
-  assert.equal(assembler.consume(chunk(11n)).frame.frameNumber, 11n);
-});
-
-test('stops delta-frame decoding across loss until a key frame arrives', () => {
-  const gate = new VideoDecodeGate();
-  const frame = (frameNumber, key = false) => ({
-    frameNumber,
-    flags: key ? 1 : 0,
-  });
-
-  assert.equal(gate.evaluate(frame(40n, true)).frame.frameNumber, 40n);
-  assert.equal(gate.evaluate(frame(41n)).frame.frameNumber, 41n);
-
-  const gap = gate.evaluate(frame(43n));
-  assert.equal(gap.frame, null);
-  assert.equal(gap.recoveryStarted, true);
-  assert.deepEqual(gate.evaluate(frame(44n)), { frame: null, recoveryStarted: false });
-
-  const recovered = gate.evaluate(frame(45n, true));
-  assert.equal(recovered.frame.frameNumber, 45n);
-  assert.equal(gate.evaluate(frame(46n)).frame.frameNumber, 46n);
-});
-
-test('treats an evicted incomplete frame as loss even without a number gap', () => {
-  const gate = new VideoDecodeGate();
-  const key = { frameNumber: 1n, flags: 1 };
-  const delta = { frameNumber: 2n, flags: 0 };
-
-  assert.equal(gate.evaluate(key).frame, key);
-  assert.deepEqual(gate.evaluate(delta, true), { frame: null, recoveryStarted: true });
-  assert.deepEqual(gate.evaluate({ frameNumber: 3n, flags: 0 }), {
-    frame: null,
-    recoveryStarted: false,
-  });
 });
 
 test('accepts native and browser-shaped invite URLs without exposing the fragment', () => {

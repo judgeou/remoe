@@ -415,7 +415,7 @@ async function connect(inviteOverride?: string) {
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
           `${rate} · ${stream.codec}`;
       },
-      onFrame: (frame: VideoFrame) => {
+      onFrame: (frame: CanvasImageSource) => {
         const target = canvas();
         const context = target.getContext('2d', { alpha: false });
         if (!context) throw new Error('浏览器无法创建 Canvas 2D context');
@@ -598,9 +598,10 @@ async function captureInput() {
 
 onMounted(() => {
   if (location.hash.length > 1) invite.value = location.href;
-  if (!globalThis.VideoDecoder) {
+  if (!globalThis.RTCPeerConnection ||
+      !HTMLVideoElement.prototype.requestVideoFrameCallback) {
     supported.value = false;
-    setStatus('当前浏览器没有 WebCodecs VideoDecoder，请使用最新版 Chrome 或 Edge', true);
+    setStatus('当前浏览器不支持标准 WebRTC 视频播放，请使用最新版浏览器', true);
   }
   window.addEventListener('resize', fitRemoteVideo);
   window.visualViewport?.addEventListener('resize', fitRemoteVideo);

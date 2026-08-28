@@ -1,11 +1,9 @@
-export const PROTOCOL_VERSION = 9;
-export const VIDEO_CHUNK_PAYLOAD_SIZE = 16 * 1024;
+export const PROTOCOL_VERSION = 10;
 
 export const MAGIC = Object.freeze({
   clientConfig: 0x46434d52,
   stream: 0x454f4d52,
   streamReady: 0x59445253,
-  videoChunk: 0x4b484356,
   input: 0x54504e49,
   clipboard: 0x50494c43,
   signal: 0x534d5257,
@@ -20,7 +18,6 @@ export const SIGNAL_TYPE = Object.freeze({
   acknowledged: 4,
 });
 
-export const FRAME_FLAG_KEY = 1;
 export const RATE_CONTROL = Object.freeze({ cbr: 0, fixedQuality: 1 });
 export const INPUT_FLAG_RELEASE = 1;
 export const INPUT_FLAG_EXTENDED_KEY = 2;
@@ -35,7 +32,6 @@ export const INPUT_TYPE = Object.freeze({
   mouseWheel: 7,
   mouseHorizontalWheel: 8,
   keyboard: 9,
-  requestKeyFrame: 10,
 });
 
 const encoder = new TextEncoder();
@@ -75,7 +71,7 @@ export class SignalFrameBuffer {
       if (view.getUint32(0, true) !== MAGIC.signal ||
           view.getUint16(4, true) !== PROTOCOL_VERSION ||
           view.getUint16(6, true) !== 20 || view.getUint16(10, true) !== 0) {
-        throw new Error('信令服务器转发了无效的 protocol v9 bootstrap 帧');
+        throw new Error('信令服务器转发了无效的 protocol v10 bootstrap 帧');
       }
       const type = view.getUint16(8, true);
       const valueSize = view.getUint32(12, true);
@@ -116,7 +112,7 @@ export function encodeClientConfig({
     throw new RangeError('无效的视频请求参数');
   }
   const bitrate = fixedQuality ? 0 : Math.round(bitrateMbps * 1_000_000);
-  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v9 上限');
+  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v10 上限');
   const bytes = new Uint8Array(36);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.clientConfig, true);
@@ -178,7 +174,7 @@ export function encodeStreamReady() {
 
 export function encodeInputEvent({ type, flags = 0, value1 = 0, value2 = 0, sequence = 0 }) {
   if (!Number.isInteger(type) || type < INPUT_TYPE.mouseMove ||
-      type > INPUT_TYPE.requestKeyFrame || !Number.isInteger(flags) || flags < 0 || flags > 3 ||
+      type > INPUT_TYPE.keyboard || !Number.isInteger(flags) || flags < 0 || flags > 3 ||
       !Number.isInteger(value1) || !Number.isInteger(value2)) {
     throw new RangeError('无效的键鼠输入事件');
   }
@@ -193,10 +189,6 @@ export function encodeInputEvent({ type, flags = 0, value1 = 0, value2 = 0, sequ
   view.setInt32(16, value2, true);
   view.setUint32(20, sequence >>> 0, true);
   return bytes;
-}
-
-export function encodeKeyFrameRequest(sequence) {
-  return encodeInputEvent({ type: INPUT_TYPE.requestKeyFrame, sequence });
 }
 
 export function encodeClipboardText(text, sequence = 0) {
@@ -230,125 +222,6 @@ export function decodeClipboardText(value) {
     text: decoder.decode(bytes.subarray(16)),
     sequence: view.getUint32(12, true),
   };
-}
-
-export function decodeVideoChunk(value) {
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  if (bytes.byteLength <= 36) throw new Error('Host 发来了截断的视频分片');
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const result = {
-    flags: view.getUint32(8, true),
-    frameNumber: view.getBigUint64(12, true),
-    timestampUs: view.getBigUint64(20, true),
-    frameSize: view.getUint32(28, true),
-    chunkOffset: view.getUint32(32, true),
-    payload: bytes.subarray(36),
-  };
-  if (view.getUint32(0, true) !== MAGIC.videoChunk ||
-      view.getUint16(4, true) !== PROTOCOL_VERSION || view.getUint16(6, true) !== 36 ||
-      result.frameSize === 0 || result.frameSize > 64 * 1024 * 1024 ||
-      result.chunkOffset % VIDEO_CHUNK_PAYLOAD_SIZE !== 0 ||
-      result.payload.length > VIDEO_CHUNK_PAYLOAD_SIZE ||
-      result.chunkOffset + result.payload.length > result.frameSize ||
-      (result.chunkOffset + result.payload.length !== result.frameSize &&
-       result.payload.length !== VIDEO_CHUNK_PAYLOAD_SIZE)) {
-    throw new Error('Host 发来了无效的视频分片');
-  }
-  return result;
-}
-
-export class VideoFrameAssembler {
-  #frames = new Map();
-  #newest = 0n;
-  #discardThrough = -1n;
-
-  clear() {
-    this.#frames.clear();
-    this.#discardThrough = this.#newest;
-  }
-
-  consume(value) {
-    const chunk = decodeVideoChunk(value);
-    if (chunk.frameNumber > this.#newest) this.#newest = chunk.frameNumber;
-    if (chunk.frameNumber <= this.#discardThrough) {
-      return { frame: null, lossDetected: false };
-    }
-    let assembly = this.#frames.get(chunk.frameNumber);
-    const chunkCount = Math.ceil(chunk.frameSize / VIDEO_CHUNK_PAYLOAD_SIZE);
-    if (!assembly) {
-      assembly = {
-        flags: chunk.flags,
-        timestampUs: chunk.timestampUs,
-        data: new Uint8Array(chunk.frameSize),
-        received: new Uint8Array(chunkCount),
-        receivedCount: 0,
-      };
-      this.#frames.set(chunk.frameNumber, assembly);
-    } else if (assembly.data.length !== chunk.frameSize || assembly.flags !== chunk.flags ||
-               assembly.timestampUs !== chunk.timestampUs) {
-      throw new Error('同一帧的视频分片元数据不一致');
-    }
-    const index = chunk.chunkOffset / VIDEO_CHUNK_PAYLOAD_SIZE;
-    if (!assembly.received[index]) {
-      assembly.data.set(chunk.payload, chunk.chunkOffset);
-      assembly.received[index] = 1;
-      assembly.receivedCount += 1;
-    }
-
-    let lossDetected = false;
-    for (const [number] of this.#frames) {
-      if (number + 8n < this.#newest) {
-        this.#frames.delete(number);
-        lossDetected = true;
-      }
-    }
-    if (assembly.receivedCount !== assembly.received.length) return { frame: null, lossDetected };
-    this.#frames.delete(chunk.frameNumber);
-    return {
-      frame: {
-        flags: assembly.flags,
-        frameNumber: chunk.frameNumber,
-        timestampUs: assembly.timestampUs,
-        data: assembly.data,
-      },
-      lossDetected,
-    };
-  }
-}
-
-// Inter-frame video depends on earlier reference frames. Once a frame is missing,
-// feeding later delta frames to WebCodecs can produce visible corruption instead
-// of a decode error, so hold them until the host supplies a fresh key frame.
-export class VideoDecodeGate {
-  #lastFrame = -1n;
-  #waitingForKeyFrame = true;
-
-  evaluate(frame, lossDetected = false) {
-    let recoveryStarted = false;
-    if (lossDetected && !this.#waitingForKeyFrame) {
-      this.#waitingForKeyFrame = true;
-      recoveryStarted = true;
-    }
-
-    if (!frame || frame.frameNumber <= this.#lastFrame) {
-      return { frame: null, recoveryStarted };
-    }
-
-    if (this.#lastFrame >= 0n && frame.frameNumber !== this.#lastFrame + 1n &&
-        !this.#waitingForKeyFrame) {
-      this.#waitingForKeyFrame = true;
-      recoveryStarted = true;
-    }
-
-    const keyFrame = (frame.flags & FRAME_FLAG_KEY) !== 0;
-    if (this.#waitingForKeyFrame) {
-      if (!keyFrame) return { frame: null, recoveryStarted };
-      this.#waitingForKeyFrame = false;
-    }
-
-    this.#lastFrame = frame.frameNumber;
-    return { frame, recoveryStarted };
-  }
 }
 
 export function av1CodecString({ width, height, fpsNum, fpsDen = 1 }) {

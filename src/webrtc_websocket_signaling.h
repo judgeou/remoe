@@ -29,16 +29,17 @@ ManagedHostIdentity pair_managed_webrtc_host(
 // Nano ID in its fragment. The base URL must not already have a fragment.
 std::string create_webrtc_signaling_invite(std::string signaling_url);
 
-// Establishes reliable control and low-latency video DataChannels, relaying
-// only the framed SDP/ICE bootstrap through a WebSocket server. A STUN-only URL
-// is derived from the signaling host; TURN is never configured.
+// Establishes a reliable control DataChannel and standards-based video track,
+// relaying only the framed SDP/ICE bootstrap through a WebSocket server. A
+// STUN-only URL is derived from the signaling host; TURN is never configured.
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role,
     std::string signaling_invite_url,
     WebRtcTransport::Callbacks callbacks,
     std::chrono::milliseconds timeout = std::chrono::seconds(15),
     std::function<bool()> stop_requested = {},
-    std::function<void()> on_signaling_open = {});
+    std::function<void()> on_signaling_open = {},
+    WebRtcTransport::VideoCodec video_codec = WebRtcTransport::VideoCodec::AV1);
 
 // Registers a paired Host and waits on the same WebSocket until an authorized
 // browser client is assigned by the account service.
@@ -48,6 +49,7 @@ std::unique_ptr<WebRtcTransport> establish_managed_host_webrtc(
     WebRtcTransport::Callbacks callbacks,
     std::chrono::milliseconds timeout = std::chrono::seconds(15),
     std::function<bool()> stop_requested = {},
-    std::function<void()> on_signaling_open = {});
+    std::function<void()> on_signaling_open = {},
+    WebRtcTransport::VideoCodec video_codec = WebRtcTransport::VideoCodec::AV1);
 
 } // namespace remoe

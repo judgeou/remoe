@@ -457,7 +457,8 @@ ManagedHostIdentity pair_managed_webrtc_host(
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
     WebRtcTransport::Role role, std::string signaling_invite_url,
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
-    std::function<bool()> stop_requested, std::function<void()> on_signaling_open) {
+    std::function<bool()> stop_requested, std::function<void()> on_signaling_open,
+    WebRtcTransport::VideoCodec video_codec) {
     auto stream = std::make_shared<WebSocketSignalingStream>();
     auto [signaling_url, session_id] = split_invite(std::move(signaling_invite_url));
     const std::string stun_url = derive_stun_url(signaling_url);
@@ -476,13 +477,14 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_websocket(
         return stream->receive_all(data, size, deadline);
     };
     return establish_webrtc_over_tcp(
-        role, std::move(io), std::move(callbacks), timeout, {stun_url}, true);
+        role, std::move(io), std::move(callbacks), timeout, {stun_url}, video_codec);
 }
 
 std::unique_ptr<WebRtcTransport> establish_managed_host_webrtc(
     std::string signaling_url, const ManagedHostIdentity& identity,
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
-    std::function<bool()> stop_requested, std::function<void()> on_signaling_open) {
+    std::function<bool()> stop_requested, std::function<void()> on_signaling_open,
+    WebRtcTransport::VideoCodec video_codec) {
     if (!valid_managed_host_identity(identity)) {
         throw std::invalid_argument("Managed Host identity is invalid; run with --repair");
     }
@@ -506,7 +508,7 @@ std::unique_ptr<WebRtcTransport> establish_managed_host_webrtc(
     };
     return establish_webrtc_over_tcp(
         WebRtcTransport::Role::Answerer, std::move(io), std::move(callbacks),
-        timeout, {stun_url}, true);
+        timeout, {stun_url}, video_codec);
 }
 
 } // namespace remoe

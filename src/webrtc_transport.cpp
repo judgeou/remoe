@@ -3,9 +3,13 @@
 #include <rtc/rtc.hpp>
 
 #include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -53,6 +57,210 @@ WebRtcTransport::IceCandidate to_public_candidate(const rtc::Candidate& candidat
     return {std::string(candidate), candidate.mid()};
 }
 
+std::string upper_ascii(std::string value) {
+    for (char& character : value) {
+        character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+    }
+    return value;
+}
+
+std::string_view codec_name(WebRtcTransport::VideoCodec codec) noexcept {
+    switch (codec) {
+    case WebRtcTransport::VideoCodec::H264: return "H264";
+    case WebRtcTransport::VideoCodec::AV1: return "AV1";
+    }
+    return "";
+}
+
+std::optional<std::uint8_t> find_payload_type(
+    const rtc::Description::Media& media, WebRtcTransport::VideoCodec codec) {
+    const std::string expected(codec_name(codec));
+    for (const int payload_type : media.payloadTypes()) {
+        const auto* map = media.rtpMap(payload_type);
+        if (map && upper_ascii(map->format) == expected && payload_type >= 0 &&
+            payload_type <= (std::numeric_limits<std::uint8_t>::max)()) {
+            return static_cast<std::uint8_t>(payload_type);
+        }
+    }
+    return std::nullopt;
+}
+
+std::uint32_t random_ssrc() {
+    std::random_device random;
+    std::uint32_t value = 0;
+    while (value == 0) {
+        value = (static_cast<std::uint32_t>(random()) << 16) ^
+                static_cast<std::uint32_t>(random());
+    }
+    return value;
+}
+
+bool h264_is_key_frame(std::span<const std::uint8_t> frame) noexcept {
+    for (std::size_t index = 0; index + 4 < frame.size(); ++index) {
+        std::size_t header = std::string_view::npos;
+        if (frame[index] == 0 && frame[index + 1] == 0 && frame[index + 2] == 1) {
+            header = index + 3;
+        } else if (index + 4 < frame.size() && frame[index] == 0 &&
+                   frame[index + 1] == 0 && frame[index + 2] == 0 &&
+                   frame[index + 3] == 1) {
+            header = index + 4;
+        }
+        if (header != std::string_view::npos && header < frame.size() &&
+            (frame[header] & 0x1fu) == 5) return true;
+    }
+    return false;
+}
+
+bool av1_has_sequence_header(std::span<const std::uint8_t> frame) noexcept {
+    std::size_t offset = 0;
+    while (offset < frame.size()) {
+        const std::uint8_t header = frame[offset++];
+        if ((header & 0x81u) != 0) return false;
+        const std::uint8_t type = (header >> 3) & 0x0fu;
+        if ((header & 0x04u) != 0 && offset++ >= frame.size()) return false;
+        if ((header & 0x02u) == 0) return false;
+        std::size_t payload_size = 0;
+        unsigned shift = 0;
+        bool complete = false;
+        for (unsigned index = 0; index < 8 && offset < frame.size(); ++index) {
+            const std::uint8_t current = frame[offset++];
+            if (shift < sizeof(std::size_t) * 8) {
+                payload_size |= static_cast<std::size_t>(current & 0x7fu) << shift;
+            }
+            if ((current & 0x80u) == 0) {
+                complete = true;
+                break;
+            }
+            shift += 7;
+        }
+        if (!complete || payload_size > frame.size() - offset) return false;
+        if (type == 1) return true;
+        offset += payload_size;
+    }
+    return false;
+}
+
+bool encoded_key_frame(WebRtcTransport::VideoCodec codec,
+                       std::span<const std::uint8_t> frame) noexcept {
+    return codec == WebRtcTransport::VideoCodec::H264
+        ? h264_is_key_frame(frame) : av1_has_sequence_header(frame);
+}
+
+// libdatachannel 0.24 has an AV1 RTP packetizer but no matching depacketizer.
+// This implements RFC 9364 aggregation/fragment reassembly and restores the
+// OBU size fields expected by the existing oneVPL decoder.
+class Av1RtpDepacketizer final : public rtc::VideoRtpDepacketizer {
+private:
+    static bool read_leb128(std::span<const rtc::byte> bytes, std::size_t& offset,
+                            std::size_t& value) {
+        value = 0;
+        for (unsigned index = 0; index < 8 && offset < bytes.size(); ++index) {
+            const auto current = std::to_integer<std::uint8_t>(bytes[offset++]);
+            if (index >= sizeof(std::size_t) && (current & 0x7fu) != 0) return false;
+            if (index * 7 < sizeof(std::size_t) * 8) {
+                value |= static_cast<std::size_t>(current & 0x7fu) << (index * 7);
+            }
+            if ((current & 0x80u) == 0) return true;
+        }
+        return false;
+    }
+
+    static void append_leb128(rtc::binary& output, std::size_t value) {
+        do {
+            std::uint8_t current = static_cast<std::uint8_t>(value & 0x7fu);
+            value >>= 7;
+            if (value != 0) current |= 0x80u;
+            output.push_back(static_cast<rtc::byte>(current));
+        } while (value != 0);
+    }
+
+    static bool append_obu_with_size(rtc::binary& frame, const rtc::binary& obu) {
+        if (obu.empty()) return false;
+        const auto header = std::to_integer<std::uint8_t>(obu.front());
+        const std::size_t header_size = (header & 0x04u) != 0 ? 2 : 1;
+        if (obu.size() < header_size) return false;
+        frame.push_back(static_cast<rtc::byte>(header | 0x02u));
+        if (header_size == 2) frame.push_back(obu[1]);
+        append_leb128(frame, obu.size() - header_size);
+        frame.insert(frame.end(), obu.begin() + static_cast<std::ptrdiff_t>(header_size),
+                     obu.end());
+        return true;
+    }
+
+    rtc::message_ptr reassemble(message_buffer& buffer) override {
+        if (buffer.empty()) return nullptr;
+        const auto first = *buffer.begin();
+        const auto* first_header = reinterpret_cast<const rtc::RtpHeader*>(first->data());
+        const std::uint8_t payload_type = first_header->payloadType();
+        const std::uint32_t timestamp = first_header->timestamp();
+        std::uint16_t expected_sequence = first_header->seqNumber();
+        rtc::binary frame;
+        rtc::binary partial_obu;
+        bool has_partial_obu = false;
+
+        for (const auto& packet : buffer) {
+            const auto* rtp = reinterpret_cast<const rtc::RtpHeader*>(packet->data());
+            if (rtp->seqNumber() != expected_sequence++) return nullptr;
+            const std::size_t header_size = rtp->getSize() + rtp->getExtensionHeaderSize();
+            const std::size_t padding_size = rtp->padding()
+                ? std::to_integer<std::uint8_t>(packet->back()) : 0;
+            if (packet->size() <= header_size + padding_size) return nullptr;
+
+            const std::span<const rtc::byte> payload(
+                packet->data() + header_size,
+                packet->size() - header_size - padding_size);
+            const std::uint8_t aggregation = std::to_integer<std::uint8_t>(payload[0]);
+            const bool continues_previous = (aggregation & 0x80u) != 0;
+            const bool continues_next = (aggregation & 0x40u) != 0;
+            const unsigned obu_count = (aggregation >> 4) & 0x03u;
+            std::size_t offset = 1;
+            std::vector<std::span<const rtc::byte>> elements;
+
+            if (obu_count == 0) {
+                while (offset < payload.size()) {
+                    std::size_t length = 0;
+                    if (!read_leb128(payload, offset, length) ||
+                        length > payload.size() - offset) return nullptr;
+                    elements.emplace_back(payload.data() + offset, length);
+                    offset += length;
+                }
+            } else {
+                elements.reserve(obu_count);
+                for (unsigned index = 0; index < obu_count; ++index) {
+                    std::size_t length = payload.size() - offset;
+                    if (index + 1 < obu_count &&
+                        (!read_leb128(payload, offset, length) ||
+                         length > payload.size() - offset)) return nullptr;
+                    elements.emplace_back(payload.data() + offset, length);
+                    offset += length;
+                }
+                if (offset != payload.size()) return nullptr;
+            }
+            if (elements.empty()) return nullptr;
+
+            for (std::size_t index = 0; index < elements.size(); ++index) {
+                const bool continuation = index == 0 && continues_previous;
+                const bool fragmented = index + 1 == elements.size() && continues_next;
+                const auto element = elements[index];
+                if (continuation) {
+                    if (!has_partial_obu) return nullptr;
+                    partial_obu.insert(partial_obu.end(), element.begin(), element.end());
+                } else {
+                    if (has_partial_obu) return nullptr;
+                    partial_obu.assign(element.begin(), element.end());
+                }
+                has_partial_obu = fragmented;
+                if (!fragmented) {
+                    if (!append_obu_with_size(frame, partial_obu)) return nullptr;
+                    partial_obu.clear();
+                }
+            }
+        }
+        if (has_partial_obu || frame.empty()) return nullptr;
+        return rtc::make_message(std::move(frame), createFrameInfo(timestamp, payload_type));
+    }
+};
+
 template <typename Callback, typename... Args>
 void invoke_callback(const Callback& callback, Args&&... args) noexcept {
     if (!callback) return;
@@ -70,8 +278,12 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     Callbacks callbacks;
     std::shared_ptr<rtc::PeerConnection> peer_connection;
     std::shared_ptr<rtc::DataChannel> data_channel;
-    std::shared_ptr<rtc::DataChannel> video_channel;
+    std::shared_ptr<rtc::Track> video_track;
     mutable std::mutex channel_mutex;
+    std::mutex video_timestamp_mutex;
+    std::uint32_t last_video_timestamp = 0;
+    std::uint64_t video_timestamp_wraps = 0;
+    bool have_video_timestamp = false;
     std::atomic<State> connection_state{State::New};
     std::atomic<IceState> current_ice_state{IceState::New};
     std::atomic<GatheringState> current_gathering_state{GatheringState::New};
@@ -88,10 +300,13 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         if (configuration.data_channel_label.empty()) {
             throw std::invalid_argument("WebRTC data channel label must not be empty");
         }
-        if (configuration.enable_video_channel &&
-            (configuration.video_channel_label.empty() ||
-             configuration.video_channel_label == configuration.data_channel_label)) {
-            throw std::invalid_argument("WebRTC video data channel label is invalid");
+        if (configuration.video_direction == VideoDirection::SendOnly &&
+            configuration.role != Role::Answerer) {
+            throw std::invalid_argument("WebRTC sending video track must use the answerer role");
+        }
+        if (configuration.video_direction == VideoDirection::ReceiveOnly &&
+            configuration.role != Role::Offerer) {
+            throw std::invalid_argument("WebRTC receiving video track must use the offerer role");
         }
         if (configuration.port_range_begin > configuration.port_range_end) {
             throw std::invalid_argument("WebRTC ICE port range is invalid");
@@ -157,12 +372,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                     return;
                 }
                 if (channel->label() == self->configuration.data_channel_label) {
-                    self->attach_data_channel(std::move(channel), false);
-                    return;
-                }
-                if (self->configuration.enable_video_channel &&
-                    channel->label() == self->configuration.video_channel_label) {
-                    self->attach_data_channel(std::move(channel), true);
+                    self->attach_data_channel(std::move(channel));
                     return;
                 }
                 {
@@ -172,32 +382,45 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                 }
             }
         });
+        peer_connection->onTrack([weak_self](std::shared_ptr<rtc::Track> track) {
+            if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                if (self->configuration.video_direction != VideoDirection::SendOnly ||
+                    track->description().type() != "video") {
+                    track->close();
+                    self->report_error("Unexpected remote-created WebRTC media track");
+                    return;
+                }
+                self->attach_video_track(std::move(track), true);
+            }
+        });
     }
 
     void start() {
         if (closing.load()) throw std::logic_error("WebRTC transport is closed");
         if (started.exchange(true)) throw std::logic_error("WebRTC transport is already started");
         if (configuration.role == Role::Offerer) {
-            attach_data_channel(peer_connection->createDataChannel(configuration.data_channel_label), false);
-            if (configuration.enable_video_channel) {
-                rtc::DataChannelInit init;
-                init.reliability.unordered = true;
-                init.reliability.maxRetransmits = 0;
-                attach_data_channel(peer_connection->createDataChannel(
-                    configuration.video_channel_label, std::move(init)), true);
+            if (configuration.video_direction == VideoDirection::ReceiveOnly) {
+                rtc::Description::Video media(
+                    "video", rtc::Description::Direction::RecvOnly);
+                if (configuration.video_codec == VideoCodec::H264) {
+                    media.addH264Codec(96);
+                } else {
+                    media.addAV1Codec(96);
+                }
+                attach_video_track(peer_connection->addTrack(std::move(media)), false);
             }
+            attach_data_channel(peer_connection->createDataChannel(configuration.data_channel_label));
         }
     }
 
-    void attach_data_channel(std::shared_ptr<rtc::DataChannel> channel, bool video) {
+    void attach_data_channel(std::shared_ptr<rtc::DataChannel> channel) {
         bool already_attached = false;
         {
             std::lock_guard lock(channel_mutex);
-            auto& target = video ? video_channel : data_channel;
-            if (target && !target->isClosed()) {
+            if (data_channel && !data_channel->isClosed()) {
                 already_attached = true;
             } else {
-                target = channel;
+                data_channel = channel;
             }
         }
         if (already_attached) {
@@ -207,21 +430,15 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         }
 
         const std::weak_ptr<Impl> weak_self = weak_from_this();
-        channel->onOpen([weak_self, video] {
+        channel->onOpen([weak_self] {
             if (const auto self = weak_self.lock(); self && !self->closing.load()) {
-                if (video) {
-                    self->video_open.store(true);
-                    invoke_callback(self->callbacks.on_video_open);
-                } else {
-                    self->open.store(true);
-                    invoke_callback(self->callbacks.on_open);
-                }
+                self->open.store(true);
+                invoke_callback(self->callbacks.on_open);
             }
         });
-        channel->onClosed([weak_self, video] {
+        channel->onClosed([weak_self] {
             if (const auto self = weak_self.lock()) {
-                if (video) self->video_open.store(false);
-                else self->open.store(false);
+                self->open.store(false);
                 self->notify_closed();
             }
         });
@@ -229,29 +446,135 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
             if (const auto self = weak_self.lock()) self->report_error(std::move(error));
         });
         channel->onMessage(
-            [weak_self, video](rtc::binary data) {
+            [weak_self](rtc::binary data) {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
                     std::vector<std::uint8_t> message(data.size());
                     if (!data.empty()) std::memcpy(message.data(), data.data(), data.size());
-                    if (video) invoke_callback(self->callbacks.on_video_binary, std::move(message));
-                    else invoke_callback(self->callbacks.on_binary, std::move(message));
+                    invoke_callback(self->callbacks.on_binary, std::move(message));
                 }
             },
-            [weak_self, video](std::string data) {
+            [weak_self](std::string data) {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
-                    if (!video) invoke_callback(self->callbacks.on_text, std::move(data));
-                    else self->report_error("Video DataChannel received a text message");
+                    invoke_callback(self->callbacks.on_text, std::move(data));
                 }
             });
 
         if (channel->isOpen() && !closing.load()) {
-            if (video) {
-                video_open.store(true);
-                invoke_callback(callbacks.on_video_open);
-            } else {
-                open.store(true);
-                invoke_callback(callbacks.on_open);
+            open.store(true);
+            invoke_callback(callbacks.on_open);
+        }
+    }
+
+    void attach_video_track(std::shared_ptr<rtc::Track> track, bool sending) {
+        auto description = track->description();
+        const auto payload_type = find_payload_type(description, configuration.video_codec);
+        if (!payload_type) {
+            track->close();
+            report_error("Peer did not offer the configured " +
+                         std::string(codec_name(configuration.video_codec)) + " video codec");
+            return;
+        }
+
+        bool already_attached = false;
+        {
+            std::lock_guard lock(channel_mutex);
+            if (video_track && !video_track->isClosed()) already_attached = true;
+            else video_track = track;
+        }
+        if (already_attached) {
+            track->close();
+            report_error("WebRTC transport already has a video track");
+            return;
+        }
+
+        if (sending) {
+            for (const int candidate : description.payloadTypes()) {
+                if (candidate != *payload_type) description.removeRtpMap(candidate);
             }
+            const std::uint32_t ssrc = random_ssrc();
+            description.clearSSRCs();
+            description.addSSRC(ssrc, "remoe-video", "remoe-stream", "remoe-video");
+            track->setDescription(std::move(description));
+
+            auto rtp = std::make_shared<rtc::RtpPacketizationConfig>(
+                ssrc, "remoe-video", *payload_type, rtc::RtpPacketizer::VideoClockRate);
+            // Preserve the sender's monotonic timestamp epoch in RTP rather than
+            // adding libdatachannel's random offset. The receiver unwraps the
+            // 32-bit RTP clock across long sessions.
+            rtp->startTimestamp = 0;
+            rtp->timestamp = 0;
+            std::shared_ptr<rtc::MediaHandler> packetizer;
+            if (configuration.video_codec == VideoCodec::H264) {
+                packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+                    rtc::NalUnit::Separator::StartSequence, rtp);
+            } else {
+                packetizer = std::make_shared<rtc::AV1RtpPacketizer>(
+                    rtc::AV1RtpPacketizer::Packetization::TemporalUnit, rtp);
+            }
+            packetizer->addToChain(std::make_shared<rtc::RtcpSrReporter>(rtp));
+            packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+            const std::weak_ptr<Impl> weak_self = weak_from_this();
+            packetizer->addToChain(std::make_shared<rtc::PliHandler>([weak_self] {
+                if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                    invoke_callback(self->callbacks.on_video_keyframe_requested);
+                }
+            }));
+            track->setMediaHandler(std::move(packetizer));
+        } else {
+            auto receiver = std::make_shared<rtc::RtcpReceivingSession>();
+            std::shared_ptr<rtc::MediaHandler> depacketizer;
+            if (configuration.video_codec == VideoCodec::H264) {
+                depacketizer = std::make_shared<rtc::H264RtpDepacketizer>(
+                    rtc::NalUnit::Separator::StartSequence);
+            } else {
+                depacketizer = std::make_shared<Av1RtpDepacketizer>();
+            }
+            // Incoming handler chains execute in reverse order: RTCP/RTP
+            // accounting must see the packet before depacketization.
+            depacketizer->addToChain(std::move(receiver));
+            track->setMediaHandler(std::move(depacketizer));
+            const std::weak_ptr<Impl> weak_self = weak_from_this();
+            track->onFrame([weak_self](rtc::binary data, rtc::FrameInfo info) {
+                if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                    std::vector<std::uint8_t> frame(data.size());
+                    if (!data.empty()) std::memcpy(frame.data(), data.data(), data.size());
+                    std::uint64_t extended_timestamp = info.timestamp;
+                    {
+                        std::lock_guard lock(self->video_timestamp_mutex);
+                        if (self->have_video_timestamp && info.timestamp < self->last_video_timestamp &&
+                            self->last_video_timestamp - info.timestamp > 0x80000000u) {
+                            self->video_timestamp_wraps += (std::uint64_t{1} << 32);
+                        }
+                        self->last_video_timestamp = info.timestamp;
+                        self->have_video_timestamp = true;
+                        extended_timestamp += self->video_timestamp_wraps;
+                    }
+                    const std::uint64_t timestamp_us = extended_timestamp * 1'000'000u /
+                        rtc::RtpPacketizer::VideoClockRate;
+                    const bool key_frame = encoded_key_frame(
+                        self->configuration.video_codec, frame);
+                    invoke_callback(self->callbacks.on_video_frame,
+                                    std::move(frame), timestamp_us, key_frame);
+                }
+            });
+        }
+
+        const std::weak_ptr<Impl> weak_self = weak_from_this();
+        track->onOpen([weak_self] {
+            if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                self->video_open.store(true);
+                invoke_callback(self->callbacks.on_video_open);
+            }
+        });
+        track->onClosed([weak_self] {
+            if (const auto self = weak_self.lock()) self->video_open.store(false);
+        });
+        track->onError([weak_self](std::string error) {
+            if (const auto self = weak_self.lock()) self->report_error(std::move(error));
+        });
+        if (track->isOpen() && !closing.load()) {
+            video_open.store(true);
+            invoke_callback(callbacks.on_video_open);
         }
     }
 
@@ -260,9 +583,9 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         return data_channel;
     }
 
-    std::shared_ptr<rtc::DataChannel> current_video_channel() const {
+    std::shared_ptr<rtc::Track> current_video_track() const {
         std::lock_guard lock(channel_mutex);
-        return video_channel;
+        return video_track;
     }
 
     void report_error(std::string error) const noexcept {
@@ -283,9 +606,9 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                 channel->resetCallbacks();
                 channel->close();
             }
-            if (const auto channel = current_video_channel()) {
-                channel->resetCallbacks();
-                channel->close();
+            if (const auto track = current_video_track()) {
+                track->resetCallbacks();
+                track->close();
             }
             if (peer_connection) {
                 peer_connection->resetCallbacks();
@@ -353,12 +676,27 @@ bool WebRtcTransport::send_binary(std::span<const std::uint8_t> message) noexcep
     }
 }
 
-bool WebRtcTransport::send_video_binary(std::span<const std::uint8_t> message) noexcept {
+bool WebRtcTransport::send_video_frame(std::span<const std::uint8_t> frame,
+                                       std::uint64_t timestamp_us) noexcept {
     try {
-        const auto channel = impl_->current_video_channel();
-        if (!channel || !channel->isOpen()) return false;
-        (void)channel->send(reinterpret_cast<const rtc::byte*>(message.data()), message.size());
+        const auto track = impl_->current_video_track();
+        if (!track || !track->isOpen() ||
+            impl_->configuration.video_direction != VideoDirection::SendOnly) return false;
+        track->sendFrame(reinterpret_cast<const rtc::byte*>(frame.data()), frame.size(),
+            rtc::FrameInfo(std::chrono::duration<double, std::micro>(timestamp_us)));
         return true;
+    } catch (const std::exception& error) {
+        impl_->report_error(error.what());
+        return false;
+    }
+}
+
+bool WebRtcTransport::request_video_keyframe() noexcept {
+    try {
+        const auto track = impl_->current_video_track();
+        return track && track->isOpen() &&
+            impl_->configuration.video_direction == VideoDirection::ReceiveOnly &&
+            track->requestKeyframe();
     } catch (const std::exception& error) {
         impl_->report_error(error.what());
         return false;
@@ -395,14 +733,8 @@ std::size_t WebRtcTransport::buffered_amount() const noexcept {
     }
 }
 
-std::size_t WebRtcTransport::video_buffered_amount() const noexcept {
-    if (!impl_) return 0;
-    try {
-        const auto channel = impl_->current_video_channel();
-        return channel ? channel->bufferedAmount() : 0;
-    } catch (...) {
-        return 0;
-    }
+bool WebRtcTransport::is_video_open() const noexcept {
+    return impl_ && impl_->video_open.load();
 }
 
 WebRtcTransport::Statistics WebRtcTransport::statistics() const {

@@ -79,13 +79,6 @@ int main(int argc, char** argv) {
             host_video_open = true;
             received.notify_all();
         };
-        host_callbacks.on_video_binary = [&](std::vector<std::uint8_t> message) {
-            {
-                std::lock_guard lock(mutex);
-                received_video = std::move(message);
-            }
-            received.notify_all();
-        };
 
         auto host_future = std::async(std::launch::async, [&] {
             return remoe::establish_webrtc_over_websocket(
@@ -93,7 +86,7 @@ int main(int argc, char** argv) {
                 std::move(host_callbacks), 15s, {}, [&] {
                     host_registered = true;
                     received.notify_all();
-                });
+                }, remoe::WebRtcTransport::VideoCodec::H264);
         });
         {
             std::unique_lock lock(mutex);
@@ -111,10 +104,19 @@ int main(int argc, char** argv) {
             client_video_open = true;
             received.notify_all();
         };
+        client_callbacks.on_video_frame = [&](std::vector<std::uint8_t> frame,
+                                               std::uint64_t, bool) {
+            {
+                std::lock_guard lock(mutex);
+                received_video = std::move(frame);
+            }
+            received.notify_all();
+        };
         auto client_future = std::async(std::launch::async, [&] {
             return remoe::establish_webrtc_over_websocket(
                 remoe::WebRtcTransport::Role::Offerer, invite,
-                std::move(client_callbacks), 15s);
+                std::move(client_callbacks), 15s, {}, {},
+                remoe::WebRtcTransport::VideoCodec::H264);
         });
 
         auto host = host_future.get();
@@ -124,7 +126,7 @@ int main(int argc, char** argv) {
             if (!received.wait_for(lock, 5s, [&] {
                     return host_video_open.load() && client_video_open.load();
                 })) {
-                throw std::runtime_error("Timed out opening the WebRTC video DataChannel");
+                throw std::runtime_error("Timed out opening the WebRTC video track");
             }
         }
         if (!host_srflx.load() || !client_srflx.load()) {
@@ -134,9 +136,10 @@ int main(int argc, char** argv) {
         if (!client->send_binary(expected)) {
             throw std::runtime_error("WebRTC DataChannel rejected the smoke message");
         }
-        const std::vector<std::uint8_t> expected_video{0x56, 0x49, 0x44, 0x45, 0x4f};
-        if (!client->send_video_binary(expected_video)) {
-            throw std::runtime_error("WebRTC video DataChannel rejected the smoke message");
+        const std::vector<std::uint8_t> expected_video{
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x56, 0x49, 0x44, 0x45, 0x4f};
+        if (!host->send_video_frame(expected_video, 123'456)) {
+            throw std::runtime_error("WebRTC video track rejected the smoke frame");
         }
         {
             std::unique_lock lock(mutex);

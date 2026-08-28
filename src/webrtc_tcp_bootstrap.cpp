@@ -140,7 +140,8 @@ void validate_signal_header(const protocol::WebRtcSignalHeader& header) {
 std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Role role, WebRtcTcpBootstrapIo io,
     WebRtcTransport::Callbacks callbacks, std::chrono::milliseconds timeout,
-    std::vector<std::string> ice_servers, bool enable_video_channel) {
+    std::vector<std::string> ice_servers,
+    std::optional<WebRtcTransport::VideoCodec> video_codec) {
     if (!io.send_all || !io.receive_all) {
         throw std::invalid_argument("WebRTC TCP bootstrap requires send and receive functions");
     }
@@ -195,8 +196,14 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     transport_callbacks.on_binary = [state](std::vector<std::uint8_t> value) {
         invoke_callback(state->application_callbacks.on_binary, std::move(value));
     };
-    transport_callbacks.on_video_binary = [state](std::vector<std::uint8_t> value) {
-        invoke_callback(state->application_callbacks.on_video_binary, std::move(value));
+    transport_callbacks.on_video_frame = [state](std::vector<std::uint8_t> value,
+                                                  std::uint64_t timestamp_us,
+                                                  bool key_frame) {
+        invoke_callback(state->application_callbacks.on_video_frame,
+                        std::move(value), timestamp_us, key_frame);
+    };
+    transport_callbacks.on_video_keyframe_requested = [state] {
+        invoke_callback(state->application_callbacks.on_video_keyframe_requested);
     };
     transport_callbacks.on_error = [state](std::string value) {
         state->fail(std::move(value));
@@ -205,7 +212,12 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Configuration configuration;
     configuration.role = role;
     configuration.ice_servers = std::move(ice_servers);
-    configuration.enable_video_channel = enable_video_channel;
+    if (video_codec) {
+        configuration.video_codec = *video_codec;
+        configuration.video_direction = role == WebRtcTransport::Role::Offerer
+            ? WebRtcTransport::VideoDirection::ReceiveOnly
+            : WebRtcTransport::VideoDirection::SendOnly;
+    }
     auto transport = std::make_unique<WebRtcTransport>(
         std::move(configuration), std::move(transport_callbacks));
 

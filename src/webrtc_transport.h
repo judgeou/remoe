@@ -13,14 +13,27 @@
 
 namespace remoe {
 
-// A signaling-agnostic WebRTC DataChannel transport. The caller is responsible
-// for carrying LocalDescription and IceCandidate values to the remote peer.
+// A signaling-agnostic WebRTC transport with one reliable control DataChannel
+// and an optional standards-based receive/send video track. The caller is
+// responsible for carrying LocalDescription and IceCandidate values to the
+// remote peer.
 // Callbacks run on libdatachannel worker threads and must return promptly.
 class WebRtcTransport final {
 public:
     enum class Role {
         Offerer,
         Answerer,
+    };
+
+    enum class VideoCodec {
+        H264,
+        AV1,
+    };
+
+    enum class VideoDirection {
+        Disabled,
+        SendOnly,
+        ReceiveOnly,
     };
 
     enum class State {
@@ -51,8 +64,8 @@ public:
     struct Configuration {
         Role role = Role::Answerer;
         std::string data_channel_label = "remoe-control";
-        bool enable_video_channel = false;
-        std::string video_channel_label = "remoe-video";
+        VideoDirection video_direction = VideoDirection::Disabled;
+        VideoCodec video_codec = VideoCodec::H264;
         // Only explicit stun: URLs are accepted; TURN is intentionally disabled.
         std::vector<std::string> ice_servers;
         std::optional<std::string> bind_address;
@@ -90,7 +103,12 @@ public:
         std::function<void()> on_closed;
         std::function<void(std::string)> on_text;
         std::function<void(std::vector<std::uint8_t>)> on_binary;
-        std::function<void(std::vector<std::uint8_t>)> on_video_binary;
+        // Receives one complete encoded video access unit after RTP
+        // depacketization. timestamp_us is derived from the 90 kHz RTP clock.
+        std::function<void(std::vector<std::uint8_t>, std::uint64_t timestamp_us,
+                           bool key_frame)> on_video_frame;
+        // Raised for RTCP PLI/FIR feedback received by a sending track.
+        std::function<void()> on_video_keyframe_requested;
         std::function<void(std::string)> on_error;
     };
 
@@ -113,7 +131,11 @@ public:
     // internally for SCTP backpressure; that is still considered success.
     [[nodiscard]] bool send_text(std::string_view message) noexcept;
     [[nodiscard]] bool send_binary(std::span<const std::uint8_t> message) noexcept;
-    [[nodiscard]] bool send_video_binary(std::span<const std::uint8_t> message) noexcept;
+    // Sends one complete encoded access unit through the configured RTP
+    // packetizer. The timestamp is expressed in the caller's monotonic epoch.
+    [[nodiscard]] bool send_video_frame(std::span<const std::uint8_t> frame,
+                                        std::uint64_t timestamp_us) noexcept;
+    [[nodiscard]] bool request_video_keyframe() noexcept;
 
     void close() noexcept;
 
@@ -122,7 +144,7 @@ public:
     [[nodiscard]] IceState ice_state() const noexcept;
     [[nodiscard]] GatheringState gathering_state() const noexcept;
     [[nodiscard]] std::size_t buffered_amount() const noexcept;
-    [[nodiscard]] std::size_t video_buffered_amount() const noexcept;
+    [[nodiscard]] bool is_video_open() const noexcept;
     [[nodiscard]] Statistics statistics() const;
 
 private:

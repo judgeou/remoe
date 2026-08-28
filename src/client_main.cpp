@@ -26,7 +26,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -118,8 +117,10 @@ void validate_stream_header(const remoe::protocol::StreamHeader& header) {
 }
 
 struct EncodedFrame {
-    remoe::protocol::FrameHeader header;
     std::vector<std::uint8_t> payload;
+    std::uint64_t frame_number = 0;
+    std::uint64_t timestamp_us = 0;
+    bool key_frame = false;
     bool reset_decoder = false;
 };
 
@@ -222,7 +223,7 @@ public:
         std::lock_guard lock(mutex_);
         if (stopped_) return PushResult::Stopped;
 
-        const bool key_frame = (frame.header.flags & remoe::protocol::kFrameKey) != 0;
+        const bool key_frame = frame.key_frame;
         if (waiting_for_key_frame_) {
             if (!key_frame) {
                 ++dropped_frames_;
@@ -231,7 +232,7 @@ public:
             frame.reset_decoder = true;
             waiting_for_key_frame_ = false;
             std::cerr << "Decoder queue recovered at key frame "
-                      << frame.header.frame_number << " after dropping "
+                      << frame.frame_number << " after dropping "
                       << dropped_frames_ << " frames\n";
             dropped_frames_ = 0;
         }
@@ -313,90 +314,6 @@ private:
     std::exception_ptr error_;
 };
 
-class VideoFrameAssembler {
-public:
-    std::optional<EncodedFrame> consume(std::span<const std::uint8_t> message) {
-        if (message.size() <= sizeof(remoe::protocol::VideoChunkHeader)) {
-            throw std::runtime_error("host sent a truncated WebRTC video chunk");
-        }
-        remoe::protocol::VideoChunkHeader header;
-        std::memcpy(&header, message.data(), sizeof(header));
-        constexpr std::uint32_t max_frame_size = 64 * 1024 * 1024;
-        const std::size_t payload_size = message.size() - sizeof(header);
-        if (header.magic != remoe::protocol::kVideoChunkMagic ||
-            header.version != remoe::protocol::kVersion ||
-            header.header_size != sizeof(header) || header.frame_size == 0 ||
-            header.frame_size > max_frame_size ||
-            header.chunk_offset % remoe::protocol::kVideoChunkPayloadSize != 0 ||
-            payload_size > remoe::protocol::kVideoChunkPayloadSize ||
-            header.chunk_offset + payload_size > header.frame_size ||
-            (header.chunk_offset + payload_size != header.frame_size &&
-             payload_size != remoe::protocol::kVideoChunkPayloadSize)) {
-            throw std::runtime_error("host sent an invalid WebRTC video chunk");
-        }
-
-        const std::size_t chunk_count =
-            (header.frame_size + remoe::protocol::kVideoChunkPayloadSize - 1) /
-            remoe::protocol::kVideoChunkPayloadSize;
-        auto [it, inserted] = frames_.try_emplace(header.frame_number);
-        Assembly& assembly = it->second;
-        if (inserted) {
-            assembly.frame.header.payload_size = header.frame_size;
-            assembly.frame.header.flags = header.flags;
-            assembly.frame.header.frame_number = header.frame_number;
-            assembly.frame.header.timestamp_us = header.timestamp_us;
-            assembly.frame.payload.resize(header.frame_size);
-            assembly.received.assign(chunk_count, false);
-        } else if (assembly.frame.payload.size() != header.frame_size ||
-                   assembly.frame.header.flags != header.flags ||
-                   assembly.frame.header.timestamp_us != header.timestamp_us) {
-            throw std::runtime_error("host sent inconsistent WebRTC video chunks");
-        }
-
-        const std::size_t chunk_index =
-            header.chunk_offset / remoe::protocol::kVideoChunkPayloadSize;
-        if (!assembly.received[chunk_index]) {
-            std::memcpy(assembly.frame.payload.data() + header.chunk_offset,
-                        message.data() + sizeof(header), payload_size);
-            assembly.received[chunk_index] = true;
-            ++assembly.received_count;
-        }
-        if (assembly.received_count != assembly.received.size()) {
-            prune(header.frame_number);
-            return std::nullopt;
-        }
-
-        EncodedFrame completed = std::move(assembly.frame);
-        frames_.erase(it);
-        prune(header.frame_number);
-        return completed;
-    }
-
-    bool take_loss_detected() noexcept {
-        return std::exchange(loss_detected_, false);
-    }
-
-private:
-    struct Assembly {
-        EncodedFrame frame;
-        std::vector<bool> received;
-        std::size_t received_count = 0;
-    };
-
-    void prune(std::uint64_t newest) {
-        constexpr std::uint64_t retained_frames = 8;
-        for (auto it = frames_.begin(); it != frames_.end();) {
-            if (it->first + retained_frames < newest) {
-                loss_detected_ = true;
-                it = frames_.erase(it);
-            } else ++it;
-        }
-    }
-
-    std::unordered_map<std::uint64_t, Assembly> frames_;
-    bool loss_detected_ = false;
-};
-
 void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
                    PipelineState& pipeline, FrameAgeTracker& frame_age) {
     try {
@@ -418,7 +335,7 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
                 decoder = create_decoder();
                 std::cerr << "Decoder reset after dropping stale frames\n";
             }
-            decoder->submit(frame.payload, frame.header.timestamp_us);
+            decoder->submit(frame.payload, frame.timestamp_us);
         }
         if (window.running()) decoder->drain();
     } catch (...) {
@@ -446,7 +363,7 @@ int run(const Options& options) {
         remoe::VideoWindow* window = nullptr;
         EncodedFrameQueue* queue = nullptr;
         remoe::WebRtcTransport* transport = nullptr;
-        VideoFrameAssembler assembler;
+        std::uint64_t next_frame_number = 0;
         std::chrono::steady_clock::time_point statistics_epoch =
             std::chrono::steady_clock::now();
         std::uint64_t video_bytes = 0;
@@ -476,7 +393,7 @@ int run(const Options& options) {
         std::cout << "WebRTC control DataChannel connected\n";
     };
     control_callbacks.on_video_open = [] {
-        std::cout << "WebRTC video DataChannel connected\n";
+        std::cout << "WebRTC standard video track connected\n";
     };
     control_callbacks.on_binary = [state, fail](std::vector<std::uint8_t> message) {
         const auto client_receive_us = FrameAgeTracker::now_us();
@@ -525,39 +442,39 @@ int run(const Options& options) {
         }
         state->changed.notify_all();
     };
-    control_callbacks.on_video_binary = [state, fail](std::vector<std::uint8_t> message) {
+    control_callbacks.on_video_frame = [state, fail](std::vector<std::uint8_t> payload,
+                                                      std::uint64_t timestamp_us,
+                                                      bool key_frame) {
         try {
             std::unique_lock lock(state->mutex);
             if (!state->queue || !state->window || !state->transport) return;
-            auto frame = state->assembler.consume(message);
-            const bool chunk_loss = state->assembler.take_loss_detected();
-            state->network_bytes += message.size();
-            bool request_key_frame = chunk_loss;
-            if (frame) {
-                state->video_bytes += frame->payload.size();
-                const auto now = std::chrono::steady_clock::now();
-                const double elapsed =
-                    std::chrono::duration<double>(now - state->statistics_epoch).count();
-                if (elapsed >= 1.0) {
-                    state->window->update_transfer_statistics(
-                        static_cast<double>(state->video_bytes) * 8.0 / elapsed / 1'000'000.0,
-                        static_cast<double>(state->network_bytes) / elapsed / 1'000'000.0);
-                    state->statistics_epoch = now;
-                    state->video_bytes = 0;
-                    state->network_bytes = 0;
-                }
-                request_key_frame = state->queue->push(std::move(*frame)) ==
-                    EncodedFrameQueue::PushResult::RequestKeyFrame || request_key_frame;
+            EncodedFrame frame;
+            frame.frame_number = state->next_frame_number++;
+            frame.timestamp_us = timestamp_us;
+            frame.key_frame = key_frame;
+            frame.payload = std::move(payload);
+            state->video_bytes += frame.payload.size();
+            state->network_bytes += frame.payload.size();
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed =
+                std::chrono::duration<double>(now - state->statistics_epoch).count();
+            if (elapsed >= 1.0) {
+                state->window->update_transfer_statistics(
+                    static_cast<double>(state->video_bytes) * 8.0 / elapsed / 1'000'000.0,
+                    static_cast<double>(state->network_bytes) / elapsed / 1'000'000.0);
+                state->statistics_epoch = now;
+                state->video_bytes = 0;
+                state->network_bytes = 0;
             }
+            const bool request_key_frame = state->queue->push(std::move(frame)) ==
+                EncodedFrameQueue::PushResult::RequestKeyFrame;
             remoe::WebRtcTransport* transport = state->transport;
             lock.unlock();
             if (request_key_frame) {
-                remoe::protocol::InputEvent key_frame;
-                key_frame.type = remoe::protocol::InputType::RequestKeyFrame;
-                if (!send_control_event(*transport, key_frame)) {
+                if (!transport->request_video_keyframe()) {
                     throw std::runtime_error("failed to request an AV1 key frame");
                 }
-                std::cerr << "Requested an immediate key frame from the host\n";
+                std::cerr << "Requested an immediate key frame with RTCP PLI\n";
             }
         } catch (const std::exception& error) {
             fail(error.what());
@@ -585,7 +502,7 @@ int run(const Options& options) {
     }
     if (!control_channel->send_binary(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(&request), sizeof(request)))) {
-        throw std::runtime_error("failed to send the protocol v9 stream request");
+        throw std::runtime_error("failed to send the protocol v10 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;

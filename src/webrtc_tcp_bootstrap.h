@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,6 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Callbacks callbacks,
     std::chrono::milliseconds timeout = std::chrono::seconds(15),
     std::vector<std::string> ice_servers = {},
-    bool enable_video_channel = false);
+    std::optional<WebRtcTransport::VideoCodec> video_codec = std::nullopt);
 
 } // namespace remoe
