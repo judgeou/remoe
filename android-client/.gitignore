@@ -7,3 +7,7 @@
 captures/
 .externalNativeBuild/
 .cxx/
+/private/
+*.jks
+*.keystore
+*.p12

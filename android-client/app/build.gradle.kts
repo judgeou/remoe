@@ -6,6 +6,21 @@ plugins {
 val libwebrtcVersion = "144.7559.09"
 val okhttpVersion = "5.3.0"
 val cameraXVersion = "1.5.3"
+val releaseStoreFile = providers.environmentVariable("REMOE_RELEASE_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("REMOE_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("REMOE_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("REMOE_RELEASE_KEY_PASSWORD").orNull
+val releaseSigningConfigured = listOf(
+    releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
+if (gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) } &&
+    !releaseSigningConfigured) {
+    throw GradleException(
+        "Release signing requires REMOE_RELEASE_STORE_FILE, REMOE_RELEASE_STORE_PASSWORD, " +
+            "REMOE_RELEASE_KEY_ALIAS, and REMOE_RELEASE_KEY_PASSWORD",
+    )
+}
 
 android {
     namespace = "top.ozaoza.remoe"
@@ -19,9 +34,26 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("remoeRelease") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("remoeRelease")
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

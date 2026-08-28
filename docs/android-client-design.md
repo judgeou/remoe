@@ -41,6 +41,7 @@ Android 端业务代码使用 Kotlin。允许引入预编译 `libwebrtc.aar`；�
 | 网页与 APK 关联 | Digital Asset Links |
 | 本地凭据 | Android Keystore 支持的加密存储，不明文保存 refresh token |
 | 最低系统 | API 26；Passkey 功能实际要求 API 28+，低版本需给出明确提示/降级路径 |
+| 发布签名 | 不使用 Google Play；自行保管固定 Release keystore，直接分发签名 APK |
 
 ## 3. 当前工程与环境状态
 

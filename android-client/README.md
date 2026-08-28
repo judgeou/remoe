@@ -89,6 +89,32 @@ Host 会通过受认证接口领取一次性 WSS invite，再复用阶段 C 的 
 本阶段的 API、单测、lint 与 APK 构建已通过；真实账号列表和正式连接需在阶段 E 的 DAL/服务端部署
 完成后做真机验收。
 
+## 自行管理 Release 签名
+
+项目不使用 Google Play / Play App Signing。Release APK 必须始终使用同一枚自行保管的密钥；密钥
+丢失后，已安装用户无法升级到新版本。运行以下脚本交互式创建密钥，密码只在 `keytool` 中输入：
+
+```powershell
+.\create-release-keystore.ps1
+.\export-release-identity.ps1 -KeystorePath .\private\remoe-release.p12
+```
+
+第二个脚本会生成 `web-client/public/.well-known/assetlinks.json`，并打印服务端所需的
+`REMOE_ANDROID_ORIGINS`。确认指纹后再提交和部署该公开 JSON。`private/` 与常见 keystore 后缀已被
+Git 忽略；仍应在密码管理器保存密码，并把 keystore 加密备份到至少两个独立位置。
+
+Release 构建只从进程环境读取签名配置：
+
+```powershell
+$env:REMOE_RELEASE_STORE_FILE = 'C:\secure\remoe-release.p12'
+$env:REMOE_RELEASE_STORE_PASSWORD = '<from password manager>'
+$env:REMOE_RELEASE_KEY_ALIAS = 'remoe-release'
+$env:REMOE_RELEASE_KEY_PASSWORD = '<from password manager>'
+.\gradlew.bat assembleRelease
+```
+
+缺少任一变量时，Release 构建会直接失败，不会悄悄生成未签名 APK。
+
 ## 本机命令
 
 ```powershell
