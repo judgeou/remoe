@@ -4,6 +4,7 @@ plugins {
 }
 
 val libwebrtcVersion = "144.7559.09"
+val okhttpVersion = "5.3.0"
 
 android {
     namespace = "top.ozaoza.remoe"
@@ -39,5 +40,6 @@ android {
 
 dependencies {
     implementation("io.github.webrtc-sdk:android:$libwebrtcVersion")
+    implementation("com.squareup.okhttp3:okhttp:$okhttpVersion")
     testImplementation("junit:junit:4.13.2")
 }

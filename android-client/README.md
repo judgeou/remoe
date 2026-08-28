@@ -31,6 +31,27 @@ EGL renderer: Adreno (TM) 840
 .\gradlew.bat testDebugUnitTest
 ```
 
+## 阶段 C 开发连接页
+
+启动 APK 后可粘贴临时 Host invite，建立 STUN-only WebRTC 会话。Android 作为 offerer 创建
+recv-only AV1/H.264 transceiver 和可靠有序的 `remoe-control` DataChannel，完成 WRMS
+ready/ack、ClientConfig、StreamHeader、StreamReady 后把远端 VideoTrack 连接到
+`SurfaceViewRenderer`。
+
+连接期间每秒采集 inbound RTP stats，并把脱敏诊断写入应用私有目录的
+`files/diagnostics/latest.log`。日志只记录候选类型和传输协议，不记录 IP、端口、SDP、ICE
+candidate、invite session 或其他 token。首版进入后台会立即断开并按 DataChannel、
+PeerConnection、WSS 的顺序释放会话资源。
+
+个人热点场景需要启用 libwebrtc 的 any-address candidate gathering，使未被 Android
+`ConnectivityManager` 枚举的 tethering 接口也能形成 peer-reflexive ICE 路径。未启用时双方
+可以交换 candidate 和 STUN 检查，但无法选出成功的 candidate pair。
+
+2026-08-28 在 HONOR AAP-AN00 与连接其个人热点的 Windows Host 上完成真实闭环：ICE 进入
+`COMPLETED`，DataChannel ready/ack 成功，`c2.qti.av1.decoder` 解码 2880×1800 AV1 VideoTrack。
+按开发指令在约 6 分钟时主动结束长稳测试；结束前累计接收约 398 MB、333572 个 RTP 包，网络
+丢包为 0，解码 9418 帧、丢弃 31 帧。设计文档要求的完整 10 分钟长稳验收仍留待阶段 H 补跑。
+
 ## 本机命令
 
 ```powershell
