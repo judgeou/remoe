@@ -16,6 +16,10 @@ constexpr std::uint16_t kVersion = 10;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
+// Identifies Windows input synthesized by a remoe host. A client connected to
+// a host on the same machine must not send that input back to the host.
+constexpr std::uintptr_t kInjectedInputMarker =
+    static_cast<std::uintptr_t>(UINT64_C(0x524D4F45494E5054)); // "RMOEINPT"
 
 enum ClientFlags : std::uint32_t {
     kClientClipboardText = 1u << 0,

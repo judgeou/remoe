@@ -13,6 +13,8 @@
 namespace remoe {
 namespace {
 
+constexpr UINT_PTR kTitleTimer = 1;
+
 void check_hr(HRESULT hr, const char* operation) {
     if (FAILED(hr)) {
         char code[16]{};
@@ -83,6 +85,7 @@ VideoWindow::VideoWindow(std::uint32_t width, std::uint32_t height) {
     create_device_and_swapchain(width, height);
     ShowWindow(window_, SW_SHOWMAXIMIZED);
     UpdateWindow(window_);
+    SetTimer(window_, kTitleTimer, 1000, nullptr);
 }
 
 VideoWindow::~VideoWindow() {
@@ -324,10 +327,15 @@ void VideoWindow::release_local_inputs() {
 
 void VideoWindow::update_transfer_statistics(double video_mbps,
                                              double network_mb_per_second) noexcept {
+    video_mbps_ = video_mbps;
+    network_mb_per_second_ = network_mb_per_second;
+}
+
+void VideoWindow::refresh_title() noexcept {
     if (!running_ || !window_) return;
     wchar_t title[160]{};
     swprintf_s(title, L"remoe client | AV1 %.2f Mbps | Network %.2f MB/s | Age +%.1f ms",
-               video_mbps, network_mb_per_second, frame_age_ms_.load());
+               video_mbps_.load(), network_mb_per_second_.load(), frame_age_ms_.load());
     SetWindowTextW(window_, title);
 }
 
@@ -355,7 +363,26 @@ LRESULT CALLBACK VideoWindow::window_proc(HWND window, UINT message, WPARAM wpar
     }
     if (message == WM_ERASEBKGND) return 1;
     if (self) {
+        if (static_cast<std::uintptr_t>(GetMessageExtraInfo()) ==
+            protocol::kInjectedInputMarker) {
+            switch (message) {
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+            case WM_XBUTTONDOWN:
+            case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
+            case WM_XBUTTONUP:
+            case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+            case WM_KEYDOWN: case WM_SYSKEYDOWN:
+            case WM_KEYUP: case WM_SYSKEYUP:
+                return 0;
+            default:
+                break;
+            }
+        }
         switch (message) {
+        case WM_TIMER:
+            if (wparam == kTitleTimer) self->refresh_title();
+            return 0;
         case WM_MOUSEMOVE:
             self->send_mouse_move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam));
             return 0;

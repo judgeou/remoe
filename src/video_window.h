@@ -46,10 +46,13 @@ private:
     void send_keyboard(LPARAM key_data, bool release);
     void release_local_inputs();
     bool send_input(protocol::InputEvent event);
+    void refresh_title() noexcept;
 
     HWND window_ = nullptr;
     std::atomic_bool running_{true};
     std::atomic<double> frame_age_ms_{0.0};
+    std::atomic<double> video_mbps_{0.0};
+    std::atomic<double> network_mb_per_second_{0.0};
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;

@@ -561,6 +561,8 @@ bool inject_input_event(const remoe::protocol::InputEvent& event,
     } else {
         return false;
     }
+    input.mi.dwExtraInfo = static_cast<ULONG_PTR>(
+        remoe::protocol::kInjectedInputMarker);
     if (SendInput(1, &input, sizeof(input)) != 1 && !injection_warning_shown) {
         std::cerr << "Warning: Windows rejected remote input injection; run the host with "
                      "--admin when controlling elevated applications\n";
@@ -578,6 +580,8 @@ void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
         input.type = INPUT_KEYBOARD;
         input.ki.wScan = static_cast<WORD>(key & 0xFFFFu);
         input.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+        input.ki.dwExtraInfo = static_cast<ULONG_PTR>(
+            remoe::protocol::kInjectedInputMarker);
         if (key & 0x10000u) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
         inputs.push_back(input);
     }
@@ -585,6 +589,8 @@ void release_remote_inputs(std::unordered_set<std::uint32_t>& pressed_keys,
         INPUT input{};
         input.type = INPUT_MOUSE;
         input.mi.dwFlags = mouse_button_flag(button, true);
+        input.mi.dwExtraInfo = static_cast<ULONG_PTR>(
+            remoe::protocol::kInjectedInputMarker);
         if (button == remoe::protocol::InputType::MouseX1) input.mi.mouseData = XBUTTON1;
         if (button == remoe::protocol::InputType::MouseX2) input.mi.mouseData = XBUTTON2;
         inputs.push_back(input);
