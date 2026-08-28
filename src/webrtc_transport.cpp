@@ -174,6 +174,8 @@ private:
     static constexpr auto kMaxReorderDelay = std::chrono::milliseconds(300);
     static constexpr auto kNackInterval = std::chrono::milliseconds(30);
     static constexpr auto kPliInterval = std::chrono::milliseconds(500);
+    static constexpr auto kLossDiagnosticInterval = std::chrono::seconds(1);
+    static constexpr std::size_t kMaxNackSequenceSpan = 8192;
 
     static bool read_leb128(std::span<const rtc::byte> bytes, std::size_t& offset,
                             std::size_t& value) {
@@ -257,6 +259,22 @@ private:
         }
     }
 
+    void diagnose_packet_loss(std::string message) {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_loss_diagnostic_ != std::chrono::steady_clock::time_point{} &&
+            now - last_loss_diagnostic_ < kLossDiagnosticInterval) {
+            ++suppressed_loss_diagnostics_;
+            return;
+        }
+        if (suppressed_loss_diagnostics_ != 0) {
+            message += "; suppressed_events=" +
+                std::to_string(suppressed_loss_diagnostics_);
+            suppressed_loss_diagnostics_ = 0;
+        }
+        last_loss_diagnostic_ = now;
+        diagnose(std::move(message));
+    }
+
     void remember_retired(std::uint32_t timestamp) {
         retired_timestamps_.insert(timestamp);
         retired_order_.push_back(timestamp);
@@ -275,7 +293,7 @@ private:
             if (lost) {
                 const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - found->second.first_seen).count();
-                diagnose("Dropping incomplete AV1 RTP frame: timestamp=" +
+                diagnose_packet_loss("Dropping incomplete AV1 RTP frame: timestamp=" +
                     std::to_string(timestamp) + ", packets=" +
                     std::to_string(found->second.packets.size()) + ", age_ms=" +
                     std::to_string(age_ms) + ", first=" +
@@ -311,13 +329,20 @@ private:
         std::uint16_t sequence = *frame.first_sequence;
         const std::size_t expected =
             static_cast<std::uint16_t>(*frame.last_sequence - sequence) + 1u;
+        if (expected > kMaxNackSequenceSpan) {
+            diagnose_packet_loss("Ignoring implausible AV1 RTP sequence span: packets=" +
+                std::to_string(frame.packets.size()) + ", span=" +
+                std::to_string(expected));
+            request_recovery();
+            return;
+        }
         missing.reserve(expected - (std::min)(expected, received.size()));
         for (std::size_t index = 0; index < expected; ++index, ++sequence) {
             if (!received.contains(sequence)) missing.push_back(sequence);
         }
         if (missing.empty()) return;
         frame.last_nack = now;
-        diagnose("AV1 RTP gap: timestamp=" + std::to_string(
+        diagnose_packet_loss("AV1 RTP gap: timestamp=" + std::to_string(
             reinterpret_cast<const rtc::RtpHeader*>((*frame.packets.begin())->data())->timestamp()) +
             ", received=" + std::to_string(frame.packets.size()) +
             ", missing=" + std::to_string(missing.size()) + ", sending NACK");
@@ -384,6 +409,10 @@ private:
 
     void incoming(rtc::message_vector& messages,
                   const rtc::message_callback& send) override {
+        // libdatachannel may dispatch packets belonging to one track from
+        // several receive threads. This handler owns mutable frame assembly
+        // state, so preserve packet callback order and prevent container races.
+        std::lock_guard incoming_lock(incoming_mutex_);
         rtc::message_vector output;
         for (auto& message : messages) {
             if (message->type == rtc::Message::Control) {
@@ -507,14 +536,17 @@ private:
 
     std::function<void()> request_keyframe_;
     std::function<void(std::string)> diagnostic_;
+    std::mutex incoming_mutex_;
     std::unordered_map<std::uint32_t, BufferedFrame> frames_;
     std::deque<std::uint32_t> frame_order_;
     std::unordered_set<std::uint32_t> retired_timestamps_;
     std::deque<std::uint32_t> retired_order_;
     std::optional<std::uint16_t> next_frame_sequence_;
     std::chrono::steady_clock::time_point last_pli_{};
+    std::chrono::steady_clock::time_point last_loss_diagnostic_{};
     bool waiting_for_key_frame_ = false;
     std::size_t suppressed_frames_ = 0;
+    std::size_t suppressed_loss_diagnostics_ = 0;
 };
 
 template <typename Callback, typename... Args>
