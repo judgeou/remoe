@@ -260,7 +260,13 @@ private:
         if (frame_order_.empty()) return;
         const std::uint32_t timestamp = frame_order_.front();
         frame_order_.pop_front();
-        frames_.erase(timestamp);
+        if (const auto found = frames_.find(timestamp); found != frames_.end()) {
+            if (found->second.last_sequence) {
+                next_frame_sequence_ = static_cast<std::uint16_t>(
+                    *found->second.last_sequence + 1u);
+            }
+            frames_.erase(found);
+        }
         remember_retired(timestamp);
         if (lost) request_recovery();
     }
@@ -362,11 +368,19 @@ private:
             if (inserted) {
                 frame.first_seen = std::chrono::steady_clock::now();
                 frame.ssrc = rtp->ssrc();
+                frame.first_sequence = next_frame_sequence_;
                 frame_order_.push_back(timestamp);
             }
             const std::uint8_t aggregation = std::to_integer<std::uint8_t>(payload.front());
-            if ((aggregation & 0x80u) == 0) frame.first_sequence = rtp->seqNumber();
-            if ((aggregation & 0x08u) != 0) frame.key_frame = true;
+            const bool starts_obu = (aggregation & 0x80u) == 0;
+            const bool starts_sequence = (aggregation & 0x08u) != 0;
+            // Z=0 means "not a continuation of the previous OBU", not
+            // "first packet of the temporal unit". A temporal unit may contain
+            // several OBUs, so never overwrite an established frame boundary.
+            if (starts_sequence || (!frame.first_sequence && starts_obu)) {
+                frame.first_sequence = rtp->seqNumber();
+            }
+            if (starts_sequence) frame.key_frame = true;
             if (rtp->marker()) frame.last_sequence = rtp->seqNumber();
             frame.packets.insert(std::move(message));
         }
@@ -459,6 +473,7 @@ private:
     std::deque<std::uint32_t> frame_order_;
     std::unordered_set<std::uint32_t> retired_timestamps_;
     std::deque<std::uint32_t> retired_order_;
+    std::optional<std::uint16_t> next_frame_sequence_;
     std::chrono::steady_clock::time_point last_pli_{};
     bool waiting_for_key_frame_ = false;
 };
