@@ -79,6 +79,31 @@ export function openDatabase(filename) {
       database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)').run(Date.now());
     })();
   }
+  if (version < 3) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE android_bindings (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          qr_token_hash TEXT NOT NULL UNIQUE,
+          client_secret_hash TEXT UNIQUE,
+          state TEXT NOT NULL CHECK(state IN
+            ('CREATED', 'CLAIMED', 'APPROVED', 'PASSKEY_CREATED', 'COMPLETED',
+             'REJECTED', 'EXPIRED')),
+          device_name TEXT,
+          device_model TEXT,
+          comparison_code TEXT,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          claimed_at INTEGER,
+          decided_at INTEGER
+        );
+        CREATE INDEX android_bindings_user_id ON android_bindings(user_id, created_at);
+        CREATE INDEX android_bindings_expiry ON android_bindings(expires_at);
+      `);
+      database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)').run(Date.now());
+    })();
+  }
   return database;
 }
 
@@ -140,6 +165,32 @@ export function createStore(database) {
     touchHost: database.prepare('UPDATE hosts SET last_seen_at = ? WHERE id = ?'),
     renameHost: database.prepare('UPDATE hosts SET name = ? WHERE id = ? AND user_id = ?'),
     deleteHost: database.prepare('DELETE FROM hosts WHERE id = ? AND user_id = ?'),
+    insertAndroidBinding: database.prepare(`
+      INSERT INTO android_bindings(id, user_id, qr_token_hash, state, created_at, expires_at)
+      VALUES(?, ?, ?, 'CREATED', ?, ?)
+    `),
+    expireAndroidBindings: database.prepare(`
+      UPDATE android_bindings SET state = 'EXPIRED'
+      WHERE expires_at <= ? AND state IN ('CREATED', 'CLAIMED', 'APPROVED')
+    `),
+    androidBindingByQrToken: database.prepare(
+      'SELECT * FROM android_bindings WHERE qr_token_hash = ?'),
+    androidBindingForUser: database.prepare(`
+      SELECT * FROM android_bindings WHERE id = ? AND user_id = ?
+    `),
+    claimAndroidBinding: database.prepare(`
+      UPDATE android_bindings
+      SET client_secret_hash = ?, device_name = ?, device_model = ?, comparison_code = ?,
+          state = 'CLAIMED', claimed_at = ?
+      WHERE qr_token_hash = ? AND state = 'CREATED' AND expires_at > ?
+    `),
+    androidBindingByClient: database.prepare(`
+      SELECT * FROM android_bindings WHERE id = ? AND client_secret_hash = ?
+    `),
+    decideAndroidBinding: database.prepare(`
+      UPDATE android_bindings SET state = ?, decided_at = ?
+      WHERE id = ? AND user_id = ? AND state = 'CLAIMED' AND expires_at > ?
+    `),
   };
 
   return {
@@ -204,5 +255,38 @@ export function createStore(database) {
     touchHost: (id) => statements.touchHost.run(Date.now(), id),
     renameHost: (id, userId, name) => statements.renameHost.run(name, id, userId).changes === 1,
     deleteHost: (id, userId) => statements.deleteHost.run(id, userId).changes === 1,
+    createAndroidBinding(id, userId, qrTokenHash, expiresAt) {
+      const now = Date.now();
+      statements.insertAndroidBinding.run(id, userId, qrTokenHash, now, expiresAt);
+    },
+    expireAndroidBindings(now = Date.now()) {
+      return statements.expireAndroidBindings.run(now).changes;
+    },
+    androidBindingForUser(id, userId) {
+      statements.expireAndroidBindings.run(Date.now());
+      return statements.androidBindingForUser.get(id, userId);
+    },
+    claimAndroidBinding(qrTokenHash, clientSecretHash, deviceName, deviceModel, comparisonCode) {
+      const now = Date.now();
+      return database.transaction(() => {
+        statements.expireAndroidBindings.run(now);
+        const result = statements.claimAndroidBinding.run(
+          clientSecretHash, deviceName, deviceModel, comparisonCode, now, qrTokenHash, now);
+        if (result.changes !== 1) return null;
+        return statements.androidBindingByQrToken.get(qrTokenHash);
+      })();
+    },
+    androidBindingByClient(id, clientSecretHash) {
+      statements.expireAndroidBindings.run(Date.now());
+      return statements.androidBindingByClient.get(id, clientSecretHash);
+    },
+    decideAndroidBinding(id, userId, decision) {
+      if (decision !== 'APPROVED' && decision !== 'REJECTED') return false;
+      const now = Date.now();
+      return database.transaction(() => {
+        statements.expireAndroidBindings.run(now);
+        return statements.decideAndroidBinding.run(decision, now, id, userId, now).changes === 1;
+      })();
+    },
   };
 }

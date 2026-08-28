@@ -1,9 +1,12 @@
 package top.ozaoza.remoe
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.WindowManager
@@ -17,6 +20,11 @@ import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoTrack
 import top.ozaoza.remoe.protocol.ClientConfig
+import top.ozaoza.remoe.binding.ActiveBinding
+import top.ozaoza.remoe.binding.AndroidBindingClient
+import top.ozaoza.remoe.binding.BindInviteParser
+import top.ozaoza.remoe.binding.BindingState
+import top.ozaoza.remoe.binding.QrScannerActivity
 import top.ozaoza.remoe.rtc.RtcCodecProbe
 import top.ozaoza.remoe.rtc.RtcSession
 import top.ozaoza.remoe.signaling.InviteParser
@@ -35,12 +43,19 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
     private lateinit var connectButton: Button
     private lateinit var disconnectButton: Button
     private lateinit var codecProbeButton: Button
+    private lateinit var scanBindButton: Button
+    private lateinit var bindingStatusView: TextView
+    private lateinit var bindingClient: AndroidBindingClient
+    private val bindingHandler = Handler(Looper.getMainLooper())
+    private var activeBinding: ActiveBinding? = null
+    private var bindingForeground = false
     private var session: RtcSession? = null
     private var remoteTrack: VideoTrack? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         app = application as RemoeApplication
+        bindingClient = AndroidBindingClient(app.httpClient)
 
         renderer = SurfaceViewRenderer(this).apply {
             init(app.rtcRuntime.eglBase.eglBaseContext, this@MainActivity)
@@ -91,6 +106,16 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
             text = getString(R.string.run_codec_probe)
             setOnClickListener { runCodecProbe() }
         }
+        scanBindButton = Button(this).apply {
+            text = "扫描账号绑定二维码"
+            setOnClickListener {
+                startActivityForResult(
+                    Intent(this@MainActivity, QrScannerActivity::class.java),
+                    REQUEST_BIND_QR,
+                )
+            }
+        }
+        bindingStatusView = textView(14f, Color.rgb(205, 214, 228))
 
         val settings = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -114,6 +139,12 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
             addView(settings, matchWrap(top = 6))
             addView(actions, matchWrap(top = 6))
             addView(codecProbeButton, matchWrap(top = 6))
+            addView(textView(18f, Color.WHITE).apply {
+                text = "阶段 D · 账号绑定"
+                typeface = Typeface.DEFAULT_BOLD
+            }, matchWrap(top = 18))
+            addView(scanBindButton, matchWrap(top = 6))
+            addView(bindingStatusView, matchWrap(top = 8))
             addView(statusView, matchWrap(top = 12))
             addView(diagnosticsView, matchWrap(top = 10))
         }
@@ -121,6 +152,86 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
             setBackgroundColor(Color.argb(225, 18, 21, 27))
             addView(content)
         }
+    }
+
+    @Deprecated("Activity result compatibility for the current programmatic Activity UI")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_BIND_QR || resultCode != RESULT_OK) return
+        val raw = data?.getStringExtra(QrScannerActivity.EXTRA_RESULT).orEmpty()
+        val invite = try {
+            BindInviteParser.parse(raw)
+        } catch (error: IllegalArgumentException) {
+            bindingStatusView.setTextColor(Color.rgb(255, 130, 130))
+            bindingStatusView.text = error.message
+            return
+        }
+        scanBindButton.isEnabled = false
+        bindingStatusView.setTextColor(Color.rgb(205, 214, 228))
+        bindingStatusView.text = "正在安全认领绑定…"
+        bindingClient.claim(invite) { result ->
+            postUi {
+                result.onSuccess { (active, state) ->
+                    activeBinding = active
+                    renderBindingState(state)
+                    scheduleBindingPoll()
+                }.onFailure { error ->
+                    scanBindButton.isEnabled = true
+                    bindingStatusView.setTextColor(Color.rgb(255, 130, 130))
+                    bindingStatusView.text = "绑定失败：${error.message}"
+                }
+            }
+        }
+    }
+
+    private fun scheduleBindingPoll(delayMs: Long = 1_500) {
+        bindingHandler.removeCallbacks(bindingPoll)
+        if (activeBinding != null && bindingForeground && !isFinishing) {
+            bindingHandler.postDelayed(bindingPoll, delayMs)
+        }
+    }
+
+    private val bindingPoll = object : Runnable {
+        override fun run() {
+            val binding = activeBinding ?: return
+            bindingClient.status(binding) { result ->
+                postUi {
+                    result.onSuccess(::renderBindingState).onFailure { error ->
+                        bindingStatusView.setTextColor(Color.rgb(255, 130, 130))
+                        bindingStatusView.text = "检查绑定状态失败：${error.message}"
+                    }
+                    if (activeBinding != null) scheduleBindingPoll(2_000)
+                }
+            }
+        }
+    }
+
+    private fun renderBindingState(state: BindingState) {
+        bindingStatusView.setTextColor(Color.rgb(205, 214, 228))
+        when (state.status) {
+            "claimed" -> bindingStatusView.text =
+                "请在网页核对并批准：\n${state.comparisonCode ?: "核对码不可用"}"
+            "approved" -> {
+                bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
+                bindingStatusView.text = "网页已批准。阶段 E 将在此创建本机 passkey。"
+                finishBindingPolling()
+            }
+            "rejected" -> {
+                bindingStatusView.text = "网页已拒绝本次绑定。"
+                finishBindingPolling()
+            }
+            "expired" -> {
+                bindingStatusView.text = "绑定已过期，请重新扫描。"
+                finishBindingPolling()
+            }
+            else -> bindingStatusView.text = "等待网页确认…"
+        }
+    }
+
+    private fun finishBindingPolling() {
+        activeBinding = null
+        bindingHandler.removeCallbacks(bindingPoll)
+        scanBindButton.isEnabled = true
     }
 
     private fun connect() {
@@ -217,14 +328,23 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
     }
 
     override fun onStop() {
+        bindingForeground = false
+        bindingHandler.removeCallbacks(bindingPoll)
         if (session != null) disconnect("进入后台，连接已断开")
         super.onStop()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        bindingForeground = true
+        if (activeBinding != null) scheduleBindingPoll(0)
     }
 
     override fun onDestroy() {
         detachRemoteTrack()
         renderer.release()
         probeExecutor.shutdownNow()
+        bindingHandler.removeCallbacks(bindingPoll)
         super.onDestroy()
     }
 
@@ -262,4 +382,8 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
     ).apply { topMargin = dp(top) }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    companion object {
+        private const val REQUEST_BIND_QR = 4101
+    }
 }

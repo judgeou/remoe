@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, type CSSProperties } from 'vue';
 import AccountPanel from './components/AccountPanel.vue';
+import AndroidBindPanel from './components/AndroidBindPanel.vue';
 import ConnectPanel from './components/ConnectPanel.vue';
 import DevicePanel from './components/DevicePanel.vue';
 import RemoteViewer from './components/RemoteViewer.vue';
@@ -697,6 +698,7 @@ onBeforeUnmount(() => {
         @rename="updateHostName"
         @remove="removeHost"
       />
+      <AndroidBindPanel />
     </template>
     <RemoteViewer
       ref="viewer"

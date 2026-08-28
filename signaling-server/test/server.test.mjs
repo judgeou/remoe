@@ -83,6 +83,34 @@ async function expectRejected(role, session, expected) {
   await closed;
 }
 
+async function startAndroidBinding() {
+  const response = await fetch(`http://127.0.0.1:${port}/api/android/bind/start`, {
+    method: 'POST',
+    headers: {
+      cookie: `remoe_session=${testWebSession}`,
+      origin: `http://localhost:${port}`,
+      'content-type': 'application/json',
+    },
+    body: '{}',
+  });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function claimAndroidBinding(started, clientSecret, deviceName = 'Test phone') {
+  const token = new URL(started.qrUri).searchParams.get('token');
+  return fetch(`http://127.0.0.1:${port}/api/android/bind/claim`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      token,
+      clientSecret,
+      deviceName,
+      deviceModel: 'HONOR test model',
+    }),
+  });
+}
+
 test('relays binary messages in both directions', async () => {
   const host = await connectRegistered('host');
   const client = await connectRegistered('client');
@@ -372,4 +400,114 @@ test('authorizes a native client through the signed-in browser', async () => {
     body: JSON.stringify({ refreshToken: authorized.refreshToken }),
   });
   assert.equal(revokedResponse.status, 401);
+});
+
+test('binds Android only after the browser confirms matching device details', async () => {
+  const started = await startAndroidBinding();
+  const qr = new URL(started.qrUri);
+  assert.equal(qr.protocol, 'remoe:');
+  assert.equal(qr.hostname, 'bind');
+  assert.equal(qr.searchParams.get('server'), `http://localhost:${port}`);
+  assert.equal(started.qrUri.includes(testUserId), false);
+  assert.ok(started.expiresAt > Date.now());
+
+  const clientSecret = 'android_client_secret_abcdefghijklmnopqrstuvwxyz123456';
+  const claimResponse = await claimAndroidBinding(started, clientSecret, 'Alice phone');
+  assert.equal(claimResponse.status, 200);
+  const claimed = await claimResponse.json();
+  assert.equal(claimed.status, 'claimed');
+  assert.equal(claimed.deviceName, 'Alice phone');
+  assert.match(claimed.comparisonCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+  const database = openDatabase(databasePath);
+  const storedBinding = database.prepare('SELECT * FROM android_bindings WHERE id = ?')
+    .get(started.bindingId);
+  database.close();
+  assert.notEqual(storedBinding.client_secret_hash, clientSecret);
+  assert.equal(JSON.stringify(storedBinding).includes(new URL(started.qrUri).searchParams.get('token')), false);
+
+  const webStatusResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/bind/status?id=${started.bindingId}`, {
+      headers: { cookie: `remoe_session=${testWebSession}` },
+    });
+  assert.equal(webStatusResponse.status, 200);
+  const webStatus = await webStatusResponse.json();
+  assert.equal(webStatus.deviceModel, 'HONOR test model');
+  assert.equal(webStatus.comparisonCode, claimed.comparisonCode);
+
+  const approveResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/bind/approve`, {
+      method: 'POST',
+      headers: {
+        cookie: `remoe_session=${testWebSession}`,
+        origin: `http://localhost:${port}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ bindingId: started.bindingId }),
+    });
+  assert.equal(approveResponse.status, 200);
+  assert.equal((await approveResponse.json()).status, 'approved');
+
+  const androidStatusResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/bind/status?id=${started.bindingId}`, {
+      headers: { authorization: `Bearer ${clientSecret}` },
+    });
+  assert.equal(androidStatusResponse.status, 200);
+  assert.equal((await androidStatusResponse.json()).status, 'approved');
+});
+
+test('allows only one Android claimant and rejects QR reuse', async () => {
+  const started = await startAndroidBinding();
+  const secrets = [
+    'first_android_secret_abcdefghijklmnopqrstuvwxyz123456',
+    'second_android_secret_abcdefghijklmnopqrstuvwxyz123456',
+  ];
+  const responses = await Promise.all(secrets.map((secret) =>
+    claimAndroidBinding(started, secret)));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+
+  const reuse = await claimAndroidBinding(
+    started, 'third_android_secret_abcdefghijklmnopqrstuvwxyz123456');
+  assert.equal(reuse.status, 409);
+});
+
+test('reports rejected and expired Android bindings as terminal states', async () => {
+  const rejected = await startAndroidBinding();
+  const clientSecret = 'rejected_android_secret_abcdefghijklmnopqrstuvwxyz123456';
+  assert.equal((await claimAndroidBinding(rejected, clientSecret)).status, 200);
+  const rejectResponse = await fetch(`http://127.0.0.1:${port}/api/android/bind/reject`, {
+    method: 'POST',
+    headers: {
+      cookie: `remoe_session=${testWebSession}`,
+      origin: `http://localhost:${port}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ bindingId: rejected.bindingId }),
+  });
+  assert.equal(rejectResponse.status, 200);
+  assert.equal((await rejectResponse.json()).status, 'rejected');
+
+  const approveRejected = await fetch(`http://127.0.0.1:${port}/api/android/bind/approve`, {
+    method: 'POST',
+    headers: {
+      cookie: `remoe_session=${testWebSession}`,
+      origin: `http://localhost:${port}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ bindingId: rejected.bindingId }),
+  });
+  assert.equal(approveRejected.status, 409);
+
+  const expired = await startAndroidBinding();
+  const database = openDatabase(databasePath);
+  database.prepare('UPDATE android_bindings SET expires_at = ? WHERE id = ?')
+    .run(Date.now() - 1, expired.bindingId);
+  database.close();
+  const expiredStatusResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/bind/status?id=${expired.bindingId}`, {
+      headers: { cookie: `remoe_session=${testWebSession}` },
+    });
+  assert.equal(expiredStatusResponse.status, 200);
+  assert.equal((await expiredStatusResponse.json()).status, 'expired');
+  assert.equal((await claimAndroidBinding(
+    expired, 'expired_android_secret_abcdefghijklmnopqrstuvwxyz123456')).status, 409);
 });

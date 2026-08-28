@@ -32,6 +32,7 @@ const webSessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const ceremonyLifetimeMs = 5 * 60 * 1000;
 const pairingLifetimeMs = 10 * 60 * 1000;
 const deviceAuthorizationLifetimeMs = 10 * 60 * 1000;
+const androidBindingLifetimeMs = 2 * 60 * 1000;
 const nativeAccessLifetimeMs = 15 * 60 * 1000;
 const nativeRefreshLifetimeMs = 90 * 24 * 60 * 60 * 1000;
 const sessionPattern = /^[A-Za-z0-9_-]{8,64}$/;
@@ -156,6 +157,22 @@ function clientName(value) {
   return normalized.slice(0, 80) || 'remoe client';
 }
 
+function deviceLabel(value, fallback) {
+  const normalized = String(value ?? '').trim().replace(/[\u0000-\u001f\u007f]/g, '');
+  return normalized.slice(0, 80) || fallback;
+}
+
+function publicAndroidBinding(binding) {
+  return {
+    bindingId: binding.id,
+    status: binding.state.toLowerCase(),
+    expiresAt: binding.expires_at,
+    ...(binding.device_name ? { deviceName: binding.device_name } : {}),
+    ...(binding.device_model ? { deviceModel: binding.device_model } : {}),
+    ...(binding.comparison_code ? { comparisonCode: binding.comparison_code } : {}),
+  };
+}
+
 function createLoginSession(userId) {
   const value = randomToken();
   store.createSession(tokenHash(value), userId, Date.now() + webSessionLifetimeMs);
@@ -256,6 +273,27 @@ function localCredentialIds(body) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/android/bind/claim') {
+    const body = await readJson(request);
+    const qrToken = String(body.token ?? '');
+    const clientSecret = String(body.clientSecret ?? '');
+    if (!/^[A-Za-z0-9_-]{32,256}$/.test(qrToken) ||
+        !/^[A-Za-z0-9_-]{32,256}$/.test(clientSecret)) {
+      throw Object.assign(new Error('Binding credentials are invalid'), { status: 400 });
+    }
+    const binding = store.claimAndroidBinding(
+      tokenHash(qrToken),
+      tokenHash(clientSecret),
+      deviceLabel(body.deviceName, 'Android device'),
+      deviceLabel(body.deviceModel, 'Android'),
+      createPairingCode(),
+    );
+    if (!binding) {
+      throw Object.assign(new Error('Binding is invalid, expired, or already claimed'), { status: 409 });
+    }
+    return json(response, 200, publicAndroidBinding(binding));
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/client/device/start') {
     if (deviceAuthorizations.size >= 1024) {
       throw Object.assign(new Error('Service is busy'), { status: 503 });
@@ -385,8 +423,51 @@ async function handleApi(request, response, url) {
     });
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/android/bind/status') {
+    const bindingId = url.searchParams.get('id') ?? '';
+    if (!idPattern.test(bindingId)) {
+      throw Object.assign(new Error('Binding id is invalid'), { status: 400 });
+    }
+    const userId = requestUser(request);
+    const clientSecret = bearerToken(request);
+    const binding = userId
+      ? store.androidBindingForUser(bindingId, userId)
+      : clientSecret
+        ? store.androidBindingByClient(bindingId, tokenHash(clientSecret))
+        : null;
+    if (!binding) throw Object.assign(new Error('Binding not found'), { status: 404 });
+    return json(response, 200, publicAndroidBinding(binding));
+  }
+
   if (request.method === 'POST' || request.method === 'PATCH' || request.method === 'DELETE') {
     requireSameOrigin(request);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/android/bind/start') {
+    const userId = requireUser(request);
+    const bindingId = randomToken(18);
+    const qrToken = randomToken();
+    const expiresAt = Date.now() + androidBindingLifetimeMs;
+    store.createAndroidBinding(bindingId, userId, tokenHash(qrToken), expiresAt);
+    const qrUri = `remoe://bind?v=1&server=${encodeURIComponent(expectedOrigin)}&token=${qrToken}`;
+    return json(response, 200, { bindingId, qrUri, expiresAt });
+  }
+
+  if (request.method === 'POST' &&
+      (url.pathname === '/api/android/bind/approve' ||
+       url.pathname === '/api/android/bind/reject')) {
+    const userId = requireUser(request);
+    const body = await readJson(request);
+    const bindingId = String(body.bindingId ?? '');
+    if (!idPattern.test(bindingId)) {
+      throw Object.assign(new Error('Binding id is invalid'), { status: 400 });
+    }
+    const decision = url.pathname.endsWith('/approve') ? 'APPROVED' : 'REJECTED';
+    if (!store.decideAndroidBinding(bindingId, userId, decision)) {
+      throw Object.assign(new Error('Binding cannot be changed in its current state'), { status: 409 });
+    }
+    const binding = store.androidBindingForUser(bindingId, userId);
+    return json(response, 200, publicAndroidBinding(binding));
   }
 
   if (request.method === 'POST' && url.pathname === '/api/client/device/authorize') {

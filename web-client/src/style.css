@@ -95,6 +95,27 @@ button:disabled { opacity: .45; cursor: default; }
 .pair-form h2 { margin-top: 0; font-size: 18px; }
 .pair-fields { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 12px; }
 .security-panel { margin-top: 18px; padding: 16px 18px; border: 1px solid #26303b; border-radius: 13px; color: #9aa7b5; }
+.android-bind-panel {
+  max-width: 860px;
+  margin: 22px auto 0;
+  padding: 20px;
+  border: 1px solid #26303b;
+  border-radius: 16px;
+  background: rgba(15, 20, 27, .88);
+}
+.android-bind-heading { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.android-bind-heading h2 { margin: 5px 0 0; }
+.android-bind-heading .help { margin-bottom: 0; }
+.android-bind-content { margin-top: 18px; }
+.qr-card { display: flex; align-items: center; gap: 24px; }
+.qr-card img { width: min(240px, 42vw); border-radius: 12px; image-rendering: pixelated; }
+.qr-card p { max-width: 340px; color: #8d99a8; line-height: 1.6; }
+.bind-confirmation { display: grid; gap: 18px; }
+.bind-confirmation > div:first-child { display: grid; gap: 4px; }
+.bind-confirmation small, .comparison-code span { color: #8d99a8; }
+.comparison-code { display: grid; gap: 8px; }
+.comparison-code code { color: #ffe19a; font-size: clamp(24px, 5vw, 38px); letter-spacing: .1em; }
+.bind-success { color: #77dfb5; background: rgba(30, 105, 78, .22); }
 .recovery-banner {
   max-width: 860px;
   display: grid;
@@ -164,6 +185,7 @@ body.remote-active .account-panel,
 body.remote-active .device-panel,
 body.remote-active .legacy-connect,
 body.remote-active .recovery-banner,
+body.remote-active .android-bind-panel,
 body.remote-active .loading-state,
 body.remote-active .telemetry { display: none; }
 body.remote-active .viewer {
@@ -258,6 +280,8 @@ body.touch-control-active canvas { touch-action: none; }
   .host-card .icon-button { display: none; }
   .pair-fields, .recovery-form { grid-template-columns: 1fr; }
   .account-actions { align-items: stretch; flex-direction: column; }
+  .android-bind-heading, .qr-card { align-items: stretch; flex-direction: column; }
+  .qr-card img { align-self: center; width: min(280px, 100%); }
   .diagnostics-page { padding: 30px 16px; }
   .diagnostics-grid { grid-template-columns: 1fr; }
 }

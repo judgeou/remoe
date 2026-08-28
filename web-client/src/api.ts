@@ -29,6 +29,24 @@ export interface CredentialActionResult {
   credentialStored: boolean;
 }
 
+export type AndroidBindingStatus =
+  | 'created' | 'claimed' | 'approved' | 'rejected' | 'expired';
+
+export interface AndroidBindingStart {
+  bindingId: string;
+  qrUri: string;
+  expiresAt: number;
+}
+
+export interface AndroidBindingState {
+  bindingId: string;
+  status: AndroidBindingStatus;
+  expiresAt: number;
+  deviceName?: string;
+  deviceModel?: string;
+  comparisonCode?: string;
+}
+
 export interface RegistrationResult extends CredentialActionResult {
   verified: boolean;
   recoveryCode: string | null;
@@ -45,6 +63,8 @@ const errorMessages: Record<string, string> = {
   'Pairing code is invalid or expired': '配对码无效或已经过期',
   'The last passkey cannot be removed': '不能删除账号最后一个 passkey',
   'Passkey is not registered': '当前 passkey 不属于这个服务，请尝试“使用其他 passkey”或账号恢复码',
+  'Binding cannot be changed in its current state': '绑定状态已改变，请重新开始',
+  'Binding not found': '找不到这次绑定，请重新开始',
 };
 
 const credentialIdsKey = 'remoe_credential_ids';
@@ -239,3 +259,15 @@ export const renameHost = (id: string, name: string) =>
 
 export const deleteHost = (id: string) =>
   request(`/api/hosts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+export const startAndroidBinding = () =>
+  request<AndroidBindingStart>('/api/android/bind/start', { method: 'POST', body: '{}' });
+
+export const getAndroidBinding = (bindingId: string) =>
+  request<AndroidBindingState>(
+    `/api/android/bind/status?id=${encodeURIComponent(bindingId)}`);
+
+export const decideAndroidBinding = (bindingId: string, approve: boolean) =>
+  request<AndroidBindingState>(`/api/android/bind/${approve ? 'approve' : 'reject'}`, {
+    method: 'POST', body: JSON.stringify({ bindingId }),
+  });

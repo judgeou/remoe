@@ -5,6 +5,9 @@
 > 对应仓库：`C:\Users\judge\projects\remoe`  
 > Android 工程：`android-client/`
 
+> 实施进度：阶段 A–D 已完成代码与自动化测试；阶段 C 的完整 10 分钟长稳测试延后至阶段 H，
+> 阶段 D 尚未部署生产环境或做真机端到端绑定。下一步从阶段 E 开始。
+
 ## 1. 目标
 
 开发一个原生 Android 客户端，功能与 Windows `remoe_client` 和网页客户端基本一致：

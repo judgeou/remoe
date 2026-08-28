@@ -4,7 +4,7 @@
     <string name="codec_probe_title">WebRTC 能力探针</string>
     <string name="codec_probe_running">正在检查 libwebrtc、硬件解码器和 EGL…</string>
     <string name="codec_probe_retry">重新检测</string>
-    <string name="stream_probe_title">阶段 C · VideoTrack</string>
+    <string name="stream_probe_title">阶段 D · Android 绑定</string>
     <string name="invite_hint">wss://remoe.oza-oza.top/signal#invite</string>
     <string name="connect">连接</string>
     <string name="disconnect">断开</string>
