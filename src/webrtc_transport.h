@@ -137,6 +137,9 @@ public:
     // packetizer. The timestamp is expressed in the caller's monotonic epoch.
     [[nodiscard]] bool send_video_frame(std::span<const std::uint8_t> frame,
                                         std::uint64_t timestamp_us) noexcept;
+    // Installs the sender-side RTP pacer before the first video frame. The
+    // supplied rate is the actual wire pacing rate, not the encoder target.
+    [[nodiscard]] bool configure_video_pacing(std::uint64_t bitrate_bps) noexcept;
     [[nodiscard]] bool request_video_keyframe() noexcept;
 
     void close() noexcept;

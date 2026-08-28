@@ -467,13 +467,14 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         (!cbr && !fixed_quality) ||
         (cbr && (request.bitrate_bps < 1'000'000u ||
                  request.bitrate_bps > 1'000'000'000u)) ||
-        (fixed_quality && (request.bitrate_bps != 0 ||
+        (fixed_quality && (request.bitrate_bps < 1'000'000u ||
+                           request.bitrate_bps > 1'000'000'000u ||
                            request.quality < 1 || request.quality > 51)) ||
         (cbr && request.quality != 0) ||
 #if defined(REMOE_X264_HOST)
         !cbr || request.bitrate_bps > 50'000'000u ||
 #endif
-        (cbr && options.max_bitrate_mbps != 0 &&
+        (options.max_bitrate_mbps != 0 &&
          request.bitrate_bps > options.max_bitrate_mbps * 1'000'000u)) {
         return false;
     }
@@ -918,11 +919,23 @@ int run(const Options& options) {
 
         StreamSettings settings;
         if (!validate_client_settings(request, options, settings)) {
-            std::cerr << "Client rejected: invalid protocol v10 stream request\n";
+            std::cerr << "Client rejected: invalid protocol v11 stream request\n";
             control_channel->close();
             continue;
         }
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
+
+        // libwebrtc paces at a multiple of the nominal media rate so encoder
+        // overshoot drains without turning each frame into a UDP microburst.
+        // Its long-standing default multiplier is 2.5.
+        const std::uint64_t pacing_bitrate_bps =
+            static_cast<std::uint64_t>(settings.bitrate_bps) * 5u / 2u;
+        if (!control_channel->configure_video_pacing(pacing_bitrate_bps)) {
+            std::cerr << "Could not configure the WebRTC RTP video pacer\n";
+            control_channel->close();
+            continue;
+        }
+        std::cout << "RTP pacing: " << pacing_bitrate_bps / 1'000'000.0 << " Mbps\n";
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);

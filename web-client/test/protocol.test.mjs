@@ -16,12 +16,12 @@ import { parseInvite } from '../src/core/remoe-client.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
 
-test('encodes protocol v10 CBR client settings as little-endian packed bytes', () => {
+test('encodes protocol v11 CBR client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });
   const view = new DataView(bytes.buffer);
   assert.equal(bytes.length, 36);
   assert.equal(view.getUint32(0, true), MAGIC.clientConfig);
-  assert.equal(view.getUint16(4, true), 10);
+  assert.equal(view.getUint16(4, true), 11);
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
@@ -31,9 +31,11 @@ test('encodes protocol v10 CBR client settings as little-endian packed bytes', (
 });
 
 test('encodes fixed-quality AV1 client settings', () => {
-  const bytes = encodeClientConfig({ fps: 60, rateControl: 'fixed-quality', quality: 24 });
+  const bytes = encodeClientConfig({
+    fps: 60, bitrateMbps: 40, rateControl: 'fixed-quality', quality: 24,
+  });
   const view = new DataView(bytes.buffer);
-  assert.equal(view.getUint32(16, true), 0);
+  assert.equal(view.getUint32(16, true), 40_000_000);
   assert.equal(view.getUint32(28, true), 1);
   assert.equal(view.getUint32(32, true), 24);
 });
@@ -54,7 +56,7 @@ test('decodes a valid stream header', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 10, true);
+  view.setUint16(4, 11, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 1920, true);
@@ -69,17 +71,18 @@ test('decodes fixed-quality AV1 stream parameters', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 10, true);
+  view.setUint16(4, 11, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.av1, true);
   view.setUint32(12, 2560, true);
   view.setUint32(16, 1440, true);
   view.setUint32(20, 60, true);
   view.setUint32(24, 1, true);
+  view.setUint32(28, 20_000_000, true);
   view.setUint32(36, 1, true);
   view.setUint32(40, 28, true);
   const header = decodeStreamHeader(bytes);
-  assert.equal(header.bitrateBps, 0);
+  assert.equal(header.bitrateBps, 20_000_000);
   assert.equal(header.rateControl, 1);
   assert.equal(header.quality, 28);
 });
@@ -88,7 +91,7 @@ test('decodes a valid H.264 stream header and profile', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.stream, true);
-  view.setUint16(4, 10, true);
+  view.setUint16(4, 11, true);
   view.setUint16(6, 44, true);
   view.setUint32(8, MAGIC.h264, true);
   view.setUint32(12, 1280, true);

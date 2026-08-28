@@ -226,7 +226,7 @@ libwebrtc 的原生 C++ API 存在变动，部分编码器工厂接口明确处�
 - 将键鼠迁移到 DataChannel；
 - 暂时保留当前 TCP 视频，以便分别定位控制和视频问题。
 
-> 实施状态（协议 v10）：工程最终采用 libdatachannel，并已完成 WSS 信令、STUN-only、键鼠 control
+> 实施状态（协议 v11）：工程最终采用 libdatachannel，并已完成 WSS 信令、STUN-only、键鼠 control
 > DataChannel，以及标准 H.264/AV1 VideoTrack。视频路径现已使用 RTP、RTCP NACK、Sender Report 和
 > PLI；运行时已移除 TCP 视频及 host IP/端口参数。自适应码率与完整拥塞控制仍属于后续工作。
 

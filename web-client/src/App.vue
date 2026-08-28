@@ -410,7 +410,7 @@ async function connect(inviteOverride?: string) {
         target.width = stream.width;
         target.height = stream.height;
         const rate = stream.rateControl === 1
-          ? `固定质量 ${stream.quality}`
+          ? `固定质量 ${stream.quality} · 网络 ${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps`
           : `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps CBR`;
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
           `${rate} · ${stream.codec}`;

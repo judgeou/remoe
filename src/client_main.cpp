@@ -191,7 +191,8 @@ void validate_stream_header(const remoe::protocol::StreamHeader& header) {
         header.bitrate_bps >= 1'000'000u && header.quality == 0;
     const bool fixed_quality =
         header.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
-        header.bitrate_bps == 0 && header.quality >= 1 && header.quality <= 51;
+        header.bitrate_bps >= 1'000'000u &&
+        header.quality >= 1 && header.quality <= 51;
     if (!cbr && !fixed_quality) {
         throw std::runtime_error("host sent invalid AV1 rate-control parameters");
     }
@@ -469,7 +470,7 @@ int run(const Options& options) {
         ", bitrate_mbps=" + std::to_string(options.bitrate_mbps));
     remoe::protocol::ClientConfig request;
     request.fps_num = options.fps;
-    request.bitrate_bps = options.fixed_quality ? 0 : options.bitrate_mbps * 1'000'000u;
+    request.bitrate_bps = options.bitrate_mbps * 1'000'000u;
     request.rate_control = options.fixed_quality
         ? remoe::protocol::VideoRateControl::FixedQuality
         : remoe::protocol::VideoRateControl::Cbr;
@@ -652,7 +653,7 @@ int run(const Options& options) {
     }
     if (!control_channel->send_binary(std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(&request), sizeof(request)))) {
-        throw std::runtime_error("failed to send the protocol v10 stream request");
+        throw std::runtime_error("failed to send the protocol v11 stream request");
     }
 
     remoe::protocol::StreamHeader stream_header;
@@ -678,7 +679,8 @@ int run(const Options& options) {
     std::cout << "Stream: " << stream_header.width << 'x' << stream_header.height << ", "
               << stream_header.fps_num << '/' << stream_header.fps_den << " fps, ";
     if (stream_header.rate_control == remoe::protocol::VideoRateControl::FixedQuality) {
-        std::cout << "fixed quality " << stream_header.quality << '\n';
+        std::cout << "fixed quality " << stream_header.quality << ", network target "
+                  << stream_header.bitrate_bps / 1'000'000.0 << " Mbps\n";
     } else {
         std::cout << stream_header.bitrate_bps / 1'000'000.0 << " Mbps CBR\n";
     }
@@ -695,10 +697,8 @@ int run(const Options& options) {
     });
     constexpr std::size_t minimum_queue_bytes = 8 * 1024 * 1024;
     constexpr std::size_t maximum_queue_bytes = 64 * 1024 * 1024;
-    const std::size_t two_seconds_of_stream = stream_header.rate_control ==
-        remoe::protocol::VideoRateControl::FixedQuality
-            ? maximum_queue_bytes
-            : static_cast<std::size_t>(stream_header.bitrate_bps) / 8 * 2;
+    const std::size_t two_seconds_of_stream =
+        static_cast<std::size_t>(stream_header.bitrate_bps) / 8 * 2;
     const std::size_t queue_bytes = (std::clamp)(two_seconds_of_stream,
                                                  minimum_queue_bytes,
                                                  maximum_queue_bytes);

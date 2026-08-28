@@ -174,7 +174,7 @@ private:
                                   20, 90, 575, 245, kHostList);
         add_control(L"STATIC", L"FPS", 0, 20, 355, 35, 22);
         fps_ = add_control(L"EDIT", L"60", WS_BORDER | ES_NUMBER, 55, 352, 55, 25, kFpsEdit);
-        add_control(L"STATIC", L"码率 Mbps", 0, 130, 355, 75, 22);
+        add_control(L"STATIC", L"网络 Mbps", 0, 130, 355, 75, 22);
         bitrate_ = add_control(L"EDIT", L"20", WS_BORDER | ES_NUMBER, 210, 352, 65, 25, kBitrateEdit);
         add_control(L"STATIC", L"缩放 %", 0, 295, 355, 55, 22);
         scale_ = add_control(L"EDIT", L"100", WS_BORDER | ES_NUMBER, 355, 352, 60, 25, kScaleEdit);
@@ -209,7 +209,7 @@ private:
         EnableWindow(connect_, idle && identity_.has_value() && host_online);
         const bool fixed_quality =
             SendMessageW(fixed_quality_, BM_GETCHECK, 0, 0) == BST_CHECKED;
-        EnableWindow(bitrate_, idle && !fixed_quality);
+        EnableWindow(bitrate_, idle);
         EnableWindow(quality_, idle && fixed_quality);
     }
 

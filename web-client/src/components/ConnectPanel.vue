@@ -20,9 +20,9 @@ const scale = defineModel<number>('scale', { required: true });
 
 <template>
   <header v-if="!compact">
-    <p class="eyebrow">REMOE · PROTOCOL V9</p>
+    <p class="eyebrow">REMOE · PROTOCOL V11</p>
     <h1>浏览器远程连接</h1>
-    <p class="intro">通过 STUN-only WebRTC DataChannel 接收 AV1 画面并控制远程键鼠。</p>
+    <p class="intro">通过 STUN-only WebRTC VideoTrack 接收画面，并用 DataChannel 控制远程键鼠。</p>
   </header>
 
   <form id="connect-form" @submit.prevent="$emit('connect')">
@@ -44,8 +44,8 @@ const scale = defineModel<number>('scale', { required: true });
     <div class="settings">
       <label><span>FPS</span><input v-model.number="fps" type="number" min="1" max="240"></label>
       <label><span>码控</span><select v-model="rateControl"><option value="cbr">CBR</option><option value="fixed-quality">固定质量</option></select></label>
-      <label v-if="rateControl === 'cbr'"><span>码率 Mbps</span><input v-model.number="bitrate" type="number" min="1" max="1000"></label>
-      <label v-else><span>质量（小=好）</span><input v-model.number="quality" type="number" min="1" max="51"></label>
+      <label><span>网络 Mbps</span><input v-model.number="bitrate" type="number" min="1" max="1000"></label>
+      <label v-if="rateControl === 'fixed-quality'"><span>质量（小=好）</span><input v-model.number="quality" type="number" min="1" max="51"></label>
       <label><span>缩放 %</span><input v-model.number="scale" type="number" min="10" max="100"></label>
     </div>
     <div class="actions">

@@ -150,7 +150,8 @@ bool encoded_key_frame(WebRtcTransport::VideoCodec codec,
 }
 
 // libdatachannel 0.24 has an AV1 RTP packetizer but no matching depacketizer.
-// This implements RFC 9364 aggregation/fragment reassembly and restores the
+// This implements the AOMedia AV1 RTP Payload Format v1.0 aggregation/fragment
+// reassembly and restores the
 // OBU size fields expected by the existing oneVPL decoder.
 class Av1RtpDepacketizer final : public rtc::VideoRtpDepacketizer {
 public:
@@ -461,7 +462,8 @@ private:
         const std::uint8_t payload_type = first_header->payloadType();
         const std::uint32_t timestamp = first_header->timestamp();
         std::uint16_t expected_sequence = first_header->seqNumber();
-        // RFC 9364 requires Temporal Delimiter OBUs to be removed before RTP
+        // The AOMedia AV1 RTP payload format requires Temporal Delimiter OBUs
+        // to be removed before RTP
         // packetization. Restore one at the start of every reassembled temporal
         // unit: the native oneVPL decoder consumes low-overhead AV1 bitstreams
         // and relies on this boundary when complete frames are submitted.
@@ -567,7 +569,10 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     std::shared_ptr<rtc::PeerConnection> peer_connection;
     std::shared_ptr<rtc::DataChannel> data_channel;
     std::shared_ptr<rtc::Track> video_track;
+    std::shared_ptr<rtc::MediaHandler> video_sender_handler;
     mutable std::mutex channel_mutex;
+    std::mutex video_pacing_mutex;
+    bool video_pacing_configured = false;
     std::mutex video_timestamp_mutex;
     std::uint32_t last_video_timestamp = 0;
     std::uint64_t video_timestamp_wraps = 0;
@@ -810,6 +815,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                     invoke_callback(self->callbacks.on_video_keyframe_requested);
                 }
             }));
+            video_sender_handler = packetizer;
             track->setMediaHandler(std::move(packetizer));
         } else {
             auto receiver = std::make_shared<rtc::RtcpReceivingSession>();
@@ -988,6 +994,24 @@ bool WebRtcTransport::send_video_frame(std::span<const std::uint8_t> frame,
             impl_->configuration.video_direction != VideoDirection::SendOnly) return false;
         track->sendFrame(reinterpret_cast<const rtc::byte*>(frame.data()), frame.size(),
             rtc::FrameInfo(std::chrono::duration<double, std::micro>(timestamp_us)));
+        return true;
+    } catch (const std::exception& error) {
+        impl_->report_error(error.what());
+        return false;
+    }
+}
+
+bool WebRtcTransport::configure_video_pacing(std::uint64_t bitrate_bps) noexcept {
+    try {
+        if (!impl_ || bitrate_bps == 0 ||
+            impl_->configuration.video_direction != VideoDirection::SendOnly) return false;
+        std::lock_guard lock(impl_->video_pacing_mutex);
+        if (impl_->video_pacing_configured || !impl_->video_sender_handler) return false;
+        // libwebrtc's modern pacer uses a task queue; libdatachannel's
+        // PacingHandler is the equivalent leaky-bucket media-handler stage.
+        impl_->video_sender_handler->addToChain(std::make_shared<rtc::PacingHandler>(
+            static_cast<double>(bitrate_bps), std::chrono::milliseconds(5)));
+        impl_->video_pacing_configured = true;
         return true;
     } catch (const std::exception& error) {
         impl_->report_error(error.what());

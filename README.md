@@ -235,10 +235,10 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 为 2560×1440 时，`--scale 75` 会请求 1920×1080。最终宽高会向下对齐到偶数，并由
 `StreamHeader` 回传。缩放在 host 的 D3D11 GPU 视频处理器中完成，不回读 CPU。
 
-## WebRTC 传输协议 v10
+## WebRTC 传输协议 v11
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-标准 H.264/AV1 VideoTrack 和 protocol v10；可靠有序的 `remoe-control` DataChannel 发送键鼠
+标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remoe-control` DataChannel 发送键鼠
 `InputEvent` 与 UTF-8 文本剪贴板。连接后
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
@@ -260,16 +260,21 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 编码视频由标准 RTP/SRTP VideoTrack 承载。libdatachannel 负责 H.264/AV1 RTP 分片、Sender Report、
 NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
 
+host 在 RTP 发送链末端使用 5 ms 的漏桶 pacer，按 client 请求的网络媒体目标速率的 2.5 倍
+发送。这沿用 libwebrtc 的经典 paced-sender 设计，用来吸收画面突变时编码器产生的瞬时码率峰值，
+避免数百个 RTP 包同时涌入 UDP/socket 队列。固定质量模式下，`quality` 只控制编码质量，
+`bitrate_bps` 仍用于指定网络媒体目标并配置 pacer。
+
 ### ClientConfig（36 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMCF` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
-| 16 | u32 | bitrate_bps | CBR 目标码率；固定质量时为 0 |
+| 16 | u32 | bitrate_bps | 网络媒体目标码率；CBR 时也作为编码器目标 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
 | 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；其他位必须为 0 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
@@ -280,14 +285,14 @@ NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `RMOE` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `44` |
 | 8 | u32 | codec | `AV01` 或 `H264` |
 | 12 | u32 | width | 编码宽度 |
 | 16 | u32 | height | 编码高度 |
 | 20 | u32 | fps_num | 帧率分子 |
 | 24 | u32 | fps_den | 帧率分母，当前为 1 |
-| 28 | u32 | bitrate_bps | CBR 目标码率；固定质量时为 0 |
+| 28 | u32 | bitrate_bps | 回显网络媒体目标码率 |
 | 32 | u32 | codec_profile | AV1 为 0；H.264 为 `profile_idc << 16 | constraints << 8 | level_idc` |
 | 36 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 40 | u32 | quality | 固定质量值；CBR 为 0 |
@@ -297,7 +302,7 @@ NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `SRDY` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `8` |
 
 client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
@@ -326,7 +331,7 @@ Remoe 私有的 `VideoChunkHeader`。接收端通过 RTCP PLI 请求关键帧，
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `INPT` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `24` |
 | 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
@@ -339,7 +344,7 @@ Remoe 私有的 `VideoChunkHeader`。接收端通过 RTCP PLI 请求关键帧，
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `CLIP` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `16` |
 | 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 1 MiB |
 | 12 | u32 | sequence | 发送方递增消息编号 |
@@ -354,7 +359,7 @@ Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本�
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
 | 0 | u32 | magic | `WRMS` |
-| 4 | u16 | version | `10` |
+| 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `20` |
 | 8 | u16 | type | 1=SDP；2=ICE candidate；3=DataChannel ready；4=完成确认 |
 | 10 | u16 | reserved | 0 |

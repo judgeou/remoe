@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 
 export const MAGIC = Object.freeze({
   clientConfig: 0x46434d52,
@@ -71,7 +71,7 @@ export class SignalFrameBuffer {
       if (view.getUint32(0, true) !== MAGIC.signal ||
           view.getUint16(4, true) !== PROTOCOL_VERSION ||
           view.getUint16(6, true) !== 20 || view.getUint16(10, true) !== 0) {
-        throw new Error('信令服务器转发了无效的 protocol v10 bootstrap 帧');
+        throw new Error('信令服务器转发了无效的 protocol v11 bootstrap 帧');
       }
       const type = view.getUint16(8, true);
       const valueSize = view.getUint32(12, true);
@@ -105,14 +105,14 @@ export function encodeClientConfig({
 } = {}) {
   const fixedQuality = rateControl === 'fixed-quality';
   if (!Number.isInteger(fps) || fps < 1 || fps > 240 ||
-      (!fixedQuality && (!Number.isFinite(bitrateMbps) || bitrateMbps < 1 || bitrateMbps > 1000)) ||
+      !Number.isFinite(bitrateMbps) || bitrateMbps < 1 || bitrateMbps > 1000 ||
       (fixedQuality && (!Number.isInteger(quality) || quality < 1 || quality > 51)) ||
       (!fixedQuality && rateControl !== 'cbr') ||
       !Number.isInteger(scalePercent) || scalePercent < 10 || scalePercent > 100) {
     throw new RangeError('无效的视频请求参数');
   }
-  const bitrate = fixedQuality ? 0 : Math.round(bitrateMbps * 1_000_000);
-  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v10 上限');
+  const bitrate = Math.round(bitrateMbps * 1_000_000);
+  if (bitrate > 1_000_000_000) throw new RangeError('码率超过 protocol v11 上限');
   const bytes = new Uint8Array(36);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, MAGIC.clientConfig, true);
@@ -153,7 +153,7 @@ export function decodeStreamHeader(value) {
   const rateControlValid = result.rateControl === RATE_CONTROL.cbr
     ? result.bitrateBps >= 1_000_000 && result.quality === 0
     : result.codec === MAGIC.av1 && result.rateControl === RATE_CONTROL.fixedQuality &&
-      result.bitrateBps === 0 && result.quality >= 1 && result.quality <= 51;
+      result.bitrateBps >= 1_000_000 && result.quality >= 1 && result.quality <= 51;
   if (result.magic !== MAGIC.stream || result.version !== PROTOCOL_VERSION ||
       result.headerSize !== 44 || !codecValid || !profileValid || !rateControlValid ||
       result.width < 2 || result.height < 2 || result.fpsNum < 1 ||

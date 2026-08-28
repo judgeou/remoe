@@ -12,7 +12,7 @@ constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
-constexpr std::uint16_t kVersion = 10;
+constexpr std::uint16_t kVersion = 11;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
@@ -61,6 +61,8 @@ struct ClientConfig {
     std::uint16_t header_size = sizeof(ClientConfig);
     std::uint32_t fps_num = 60;
     std::uint32_t fps_den = 1;
+    // Nominal network media rate used to configure RTP pacing. In CBR mode it
+    // is also the encoder target; fixed-quality mode uses quality for encoding.
     std::uint32_t bitrate_bps = 20'000'000;
     std::uint32_t scale_percent = 100;
     std::uint32_t flags = 0;
@@ -78,6 +80,7 @@ struct StreamHeader {
     std::uint32_t height = 0;
     std::uint32_t fps_num = 0;
     std::uint32_t fps_den = 1;
+    // Echoes ClientConfig::bitrate_bps, including in fixed-quality mode.
     std::uint32_t bitrate_bps = 0;
     // H.264 uses the low 24 bits for profile_idc, constraint flags and level_idc.
     // AV1 leaves this field at zero.

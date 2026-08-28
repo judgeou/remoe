@@ -192,6 +192,11 @@ int main() {
             std::cerr << "Timed out opening the host-candidate DataChannel\n";
             return 1;
         }
+        if (!answerer.configure_video_pacing(10'000'000) ||
+            answerer.configure_video_pacing(10'000'000)) {
+            std::cerr << "WebRTC sender rejected one-time RTP pacing setup\n";
+            return 1;
+        }
 
         constexpr std::string_view text = "remoe-webrtc-smoke";
         const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};
@@ -241,7 +246,7 @@ int main() {
             return 1;
         }
 
-        // Exercise Remoe's RFC 9364 depacketizer too. libdatachannel provides
+        // Exercise Remoe's AOMedia AV1 RTP depacketizer too. libdatachannel provides
         // AV1 packetization but does not ship an AV1 depacketizer in 0.24.x.
         SharedState av1_state;
         remoe::WebRtcTransport::Configuration av1_answerer_config;
@@ -268,10 +273,14 @@ int main() {
             std::cerr << "Timed out opening the AV1 video track\n";
             return 1;
         }
+        if (!av1_answerer.configure_video_pacing(10'000'000)) {
+            std::cerr << "AV1 sender rejected RTP pacing setup\n";
+            return 1;
+        }
         // A Temporal Delimiter, Sequence Header, Metadata OBU and a fragmented
         // Frame OBU. The separate Metadata and Frame OBUs both start with Z=0
-        // in RFC 9364; only the first one starts the temporal unit.
-        // RFC 9364 strips the delimiter on send; Remoe must restore it for the
+        // in the AV1 RTP payload format; only the first starts the temporal unit.
+        // The payload format strips the delimiter on send; Remoe restores it for the
         // native oneVPL low-overhead AV1 decoder. The large OBU also exercises
         // Z/Y continuation across multiple RTP packets.
         std::vector<std::uint8_t> av1_frame = {
