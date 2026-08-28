@@ -969,9 +969,19 @@ int run(const Options& options) {
 
         bool first_input = true;
         bool first_clipboard_poll = true;
+        const auto frame_interval =
+            std::chrono::microseconds(1'000'000 / settings.fps);
         auto next_frame = Clock::now();
         while (g_running && session_running && control_channel->is_open()) {
-            next_frame += std::chrono::microseconds(1'000'000 / settings.fps);
+            // Desktop Duplication may block until the screen changes.  Do not
+            // retain a deadline that became stale while acquire() was waiting:
+            // otherwise the next burst of desktop updates is sent without any
+            // pacing while the loop tries to catch up with the old schedule.
+            const auto now = Clock::now();
+            if (now > next_frame) next_frame = now;
+            std::this_thread::sleep_until(next_frame);
+            next_frame += frame_interval;
+
             const DWORD current_clipboard_sequence = GetClipboardSequenceNumber();
             const DWORD previous_clipboard_sequence =
                 clipboard_sequence.exchange(current_clipboard_sequence);
@@ -1022,7 +1032,6 @@ int run(const Options& options) {
                 session_running = false;
                 break;
             }
-            std::this_thread::sleep_until(next_frame);
         }
         session_running = false;
         control_channel->close();
