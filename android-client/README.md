@@ -65,6 +65,20 @@ PeerConnection、WSS 的顺序释放会话资源。
 本阶段在网页批准后停止，界面会提示阶段 E 再创建本机 passkey。未部署生产服务，也未进行真机
 绑定，以免提前引入 Credential Manager/Digital Asset Links 的半成品流程。
 
+## 阶段 E 本地实现
+
+Android 使用稳定版 AndroidX Credentials 1.6.0 创建和登录 discoverable passkey。注册 ceremony
+只能由已批准绑定的 client secret 领取，服务端分别校验 Android APK origin、RP ID、challenge 和
+用户验证；成功后在同一 SQLite 事务中保存 passkey、native refresh session 并完成绑定。
+
+refresh token 使用 Android Keystore 中的 AES-256-GCM key 加密后保存，access token 仅驻留内存；
+应用重启时用 refresh token 换取新的短期 access token。卸载应用会清除本地 session，但由凭据
+提供程序保存的 passkey 可用于重新登录。
+
+本地代码、单测、lint 和 APK 构建已完成。生产验收仍需先确定 Release/Play App Signing 证书，
+用实际证书替换 `docs/assetlinks.template.json` 的占位符，并配置服务端
+`REMOE_ANDROID_ORIGINS`；在此之前不要部署占位模板。
+
 ## 本机命令
 
 ```powershell

@@ -1,6 +1,5 @@
 package top.ozaoza.remoe
 
-import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -16,10 +15,21 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.credentials.CreatePublicKeyCredentialRequest
+import androidx.credentials.CreatePublicKeyCredentialResponse
+import androidx.credentials.CredentialManager
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.GetPublicKeyCredentialOption
+import androidx.credentials.PublicKeyCredential
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import org.webrtc.RendererCommon
 import org.webrtc.SurfaceViewRenderer
 import org.webrtc.VideoTrack
 import top.ozaoza.remoe.protocol.ClientConfig
+import top.ozaoza.remoe.auth.NativeSessionStore
 import top.ozaoza.remoe.binding.ActiveBinding
 import top.ozaoza.remoe.binding.AndroidBindingClient
 import top.ozaoza.remoe.binding.BindInviteParser
@@ -30,7 +40,7 @@ import top.ozaoza.remoe.rtc.RtcSession
 import top.ozaoza.remoe.signaling.InviteParser
 import java.util.concurrent.Executors
 
-class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEvents {
+class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.RendererEvents {
     private val probeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var app: RemoeApplication
     private lateinit var renderer: SurfaceViewRenderer
@@ -44,18 +54,30 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
     private lateinit var disconnectButton: Button
     private lateinit var codecProbeButton: Button
     private lateinit var scanBindButton: Button
+    private lateinit var passkeyLoginButton: Button
     private lateinit var bindingStatusView: TextView
     private lateinit var bindingClient: AndroidBindingClient
+    private lateinit var credentialManager: CredentialManager
+    private lateinit var nativeSessionStore: NativeSessionStore
     private val bindingHandler = Handler(Looper.getMainLooper())
     private var activeBinding: ActiveBinding? = null
     private var bindingForeground = false
     private var session: RtcSession? = null
     private var remoteTrack: VideoTrack? = null
+    private val qrScannerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            handleBindingQr(result.data?.getStringExtra(QrScannerActivity.EXTRA_RESULT).orEmpty())
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         app = application as RemoeApplication
         bindingClient = AndroidBindingClient(app.httpClient)
+        credentialManager = CredentialManager.create(this)
+        nativeSessionStore = NativeSessionStore(this)
 
         renderer = SurfaceViewRenderer(this).apply {
             init(app.rtcRuntime.eglBase.eglBaseContext, this@MainActivity)
@@ -79,6 +101,7 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
         }
         setContentView(root)
         showStatus("粘贴 Host invite 后连接")
+        restoreNativeSession()
     }
 
     private fun createControlPanel(): ScrollView {
@@ -109,11 +132,12 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
         scanBindButton = Button(this).apply {
             text = "扫描账号绑定二维码"
             setOnClickListener {
-                startActivityForResult(
-                    Intent(this@MainActivity, QrScannerActivity::class.java),
-                    REQUEST_BIND_QR,
-                )
+                qrScannerLauncher.launch(Intent(this@MainActivity, QrScannerActivity::class.java))
             }
+        }
+        passkeyLoginButton = Button(this).apply {
+            text = "使用 Passkey 登录"
+            setOnClickListener { loginWithPasskey() }
         }
         bindingStatusView = textView(14f, Color.rgb(205, 214, 228))
 
@@ -144,6 +168,7 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
                 typeface = Typeface.DEFAULT_BOLD
             }, matchWrap(top = 18))
             addView(scanBindButton, matchWrap(top = 6))
+            addView(passkeyLoginButton, matchWrap(top = 6))
             addView(bindingStatusView, matchWrap(top = 8))
             addView(statusView, matchWrap(top = 12))
             addView(diagnosticsView, matchWrap(top = 10))
@@ -154,11 +179,7 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
         }
     }
 
-    @Deprecated("Activity result compatibility for the current programmatic Activity UI")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_BIND_QR || resultCode != RESULT_OK) return
-        val raw = data?.getStringExtra(QrScannerActivity.EXTRA_RESULT).orEmpty()
+    private fun handleBindingQr(raw: String) {
         val invite = try {
             BindInviteParser.parse(raw)
         } catch (error: IllegalArgumentException) {
@@ -212,9 +233,7 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
             "claimed" -> bindingStatusView.text =
                 "请在网页核对并批准：\n${state.comparisonCode ?: "核对码不可用"}"
             "approved" -> {
-                bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
-                bindingStatusView.text = "网页已批准。阶段 E 将在此创建本机 passkey。"
-                finishBindingPolling()
+                beginPasskeyRegistration()
             }
             "rejected" -> {
                 bindingStatusView.text = "网页已拒绝本次绑定。"
@@ -232,6 +251,113 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
         activeBinding = null
         bindingHandler.removeCallbacks(bindingPoll)
         scanBindButton.isEnabled = true
+    }
+
+    private fun beginPasskeyRegistration() {
+        val binding = activeBinding ?: return
+        activeBinding = null
+        bindingHandler.removeCallbacks(bindingPoll)
+        bindingStatusView.setTextColor(Color.rgb(205, 214, 228))
+        bindingStatusView.text = "网页已批准，正在准备创建 Passkey…"
+        bindingClient.registrationOptions(binding) { result ->
+            postUi {
+                result.onSuccess { options ->
+                    lifecycleScope.launch {
+                        try {
+                            val response = credentialManager.createCredential(
+                                this@MainActivity,
+                                CreatePublicKeyCredentialRequest(options.optionsJson),
+                            )
+                            require(response is CreatePublicKeyCredentialResponse)
+                            bindingStatusView.text = "正在验证 Passkey…"
+                            bindingClient.verifyRegistration(
+                                binding, options.ceremonyId, response.registrationResponseJson,
+                            ) { verification ->
+                                postUi {
+                                    verification.onSuccess { tokens ->
+                                        nativeSessionStore.save(tokens)
+                                        bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
+                                        bindingStatusView.text = "Passkey 已创建，账号绑定完成。"
+                                    }.onFailure(::showBindingFailure)
+                                    scanBindButton.isEnabled = true
+                                }
+                            }
+                        } catch (error: Exception) {
+                            showBindingFailure(error)
+                            scanBindButton.isEnabled = true
+                        }
+                    }
+                }.onFailure {
+                    showBindingFailure(it)
+                    scanBindButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun loginWithPasskey() {
+        passkeyLoginButton.isEnabled = false
+        bindingStatusView.setTextColor(Color.rgb(205, 214, 228))
+        bindingStatusView.text = "正在准备 Passkey 登录…"
+        bindingClient.loginOptions { result ->
+            postUi {
+                result.onSuccess { options ->
+                    lifecycleScope.launch {
+                        try {
+                            val request = GetCredentialRequest.Builder()
+                                .addCredentialOption(GetPublicKeyCredentialOption(options.optionsJson))
+                                .build()
+                            val response = credentialManager.getCredential(this@MainActivity, request)
+                            val credential = response.credential
+                            require(credential is PublicKeyCredential)
+                            bindingStatusView.text = "正在验证 Passkey…"
+                            bindingClient.verifyLogin(
+                                options.ceremonyId, credential.authenticationResponseJson,
+                            ) { verification ->
+                                postUi {
+                                    verification.onSuccess { tokens ->
+                                        nativeSessionStore.save(tokens)
+                                        bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
+                                        bindingStatusView.text = "Passkey 登录成功。"
+                                    }.onFailure(::showBindingFailure)
+                                    passkeyLoginButton.isEnabled = true
+                                }
+                            }
+                        } catch (error: Exception) {
+                            showBindingFailure(error)
+                            passkeyLoginButton.isEnabled = true
+                        }
+                    }
+                }.onFailure {
+                    showBindingFailure(it)
+                    passkeyLoginButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun showBindingFailure(error: Throwable) {
+        bindingStatusView.setTextColor(Color.rgb(255, 130, 130))
+        bindingStatusView.text = "账号验证失败：${error.message ?: error.javaClass.simpleName}"
+    }
+
+    private fun restoreNativeSession() {
+        val refreshToken = nativeSessionStore.refreshToken() ?: return
+        passkeyLoginButton.isEnabled = false
+        bindingStatusView.text = "正在恢复 Android 登录…"
+        bindingClient.refresh(refreshToken) { result ->
+            postUi {
+                result.onSuccess { grant ->
+                    nativeSessionStore.updateAccess(grant.accessToken, grant.expiresIn)
+                    bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
+                    bindingStatusView.text = "Android 登录已恢复。"
+                }.onFailure {
+                    nativeSessionStore.clear()
+                    showBindingFailure(it)
+                }
+                passkeyLoginButton.isEnabled = true
+            }
+        }
     }
 
     private fun connect() {
@@ -383,7 +509,4 @@ class MainActivity : Activity(), RtcSession.Observer, RendererCommon.RendererEve
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    companion object {
-        private const val REQUEST_BIND_QR = 4101
-    }
 }

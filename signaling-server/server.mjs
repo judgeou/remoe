@@ -35,6 +35,13 @@ const deviceAuthorizationLifetimeMs = 10 * 60 * 1000;
 const androidBindingLifetimeMs = 2 * 60 * 1000;
 const nativeAccessLifetimeMs = 15 * 60 * 1000;
 const nativeRefreshLifetimeMs = 90 * 24 * 60 * 60 * 1000;
+const configuredAndroidOrigins = (process.env.REMOE_ANDROID_ORIGINS ?? '').split(',')
+  .map((origin) => origin.trim()).filter(Boolean);
+const androidOrigins = configuredAndroidOrigins.length
+  ? configuredAndroidOrigins
+  : process.env.NODE_ENV === 'production' ? [] : [
+      'android:apk-key-hash:BqXC8WNqInaEZFX7pQDW0GpBppYDaUWJ9AIxOhkg6ts',
+    ];
 const sessionPattern = /^[A-Za-z0-9_-]{8,64}$/;
 const idPattern = /^[A-Za-z0-9_-]{16,64}$/;
 const sessions = new Map();
@@ -43,6 +50,7 @@ const pairings = new Map();
 const deviceAuthorizations = new Map();
 const deviceAuthorizationCodes = new Map();
 const nativeAccessTokens = new Map();
+const androidCeremonies = new Map();
 const managedHosts = new Map();
 let totalPendingBytes = 0;
 
@@ -147,6 +155,43 @@ function issueNativeAccess(userId, refreshHash) {
   return { accessToken, expiresIn: Math.floor(nativeAccessLifetimeMs / 1000) };
 }
 
+function issueNativeSession(userId, clientNameValue) {
+  const refreshToken = randomToken();
+  const refreshHash = tokenHash(refreshToken);
+  store.createNativeSession(
+    refreshHash, userId, clientNameValue, Date.now() + nativeRefreshLifetimeMs);
+  return { refreshToken, ...issueNativeAccess(userId, refreshHash) };
+}
+
+function beginAndroidCeremony(state) {
+  if (androidCeremonies.size >= 1024) {
+    throw Object.assign(new Error('Service is busy'), { status: 503 });
+  }
+  const secret = randomToken();
+  androidCeremonies.set(tokenHash(secret), {
+    ...state,
+    expiresAt: Date.now() + ceremonyLifetimeMs,
+  });
+  return secret;
+}
+
+function takeAndroidCeremony(value, expectedType) {
+  const secret = String(value ?? '');
+  const hash = tokenHash(secret);
+  const ceremony = secret ? androidCeremonies.get(hash) : null;
+  if (secret) androidCeremonies.delete(hash);
+  if (!ceremony || ceremony.expiresAt <= Date.now() || ceremony.type !== expectedType) {
+    throw Object.assign(new Error('Android authentication ceremony expired'), { status: 400 });
+  }
+  return ceremony;
+}
+
+function requireAndroidOrigins() {
+  if (!androidOrigins.length) {
+    throw Object.assign(new Error('Android passkey origin is not configured'), { status: 503 });
+  }
+}
+
 function normalizeDeviceCode(value) {
   const normalized = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   return normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : null;
@@ -235,7 +280,8 @@ function publicPasskey(row) {
   };
 }
 
-async function createRegistrationOptions(userId, existing, compatibilityMode) {
+async function createRegistrationOptions(
+  userId, existing, compatibilityMode, residentKey = 'preferred') {
   const userName = `remoe-${userId.slice(0, 8)}`;
   const options = await generateRegistrationOptions({
     rpName: 'remoe',
@@ -254,7 +300,7 @@ async function createRegistrationOptions(userId, existing, compatibilityMode) {
       userVerification: 'required',
     } : {
       authenticatorAttachment: 'platform',
-      residentKey: 'preferred',
+      residentKey,
       userVerification: 'required',
     },
   });
@@ -273,6 +319,102 @@ function localCredentialIds(body) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/android/passkey/register/options') {
+    requireAndroidOrigins();
+    const body = await readJson(request);
+    const bindingId = String(body.bindingId ?? '');
+    const clientSecret = bearerToken(request);
+    const binding = clientSecret && idPattern.test(bindingId)
+      ? store.androidBindingByClient(bindingId, tokenHash(clientSecret))
+      : null;
+    if (!binding || binding.state !== 'APPROVED') {
+      throw Object.assign(new Error('Approved Android binding required'), { status: 403 });
+    }
+    const options = await createRegistrationOptions(
+      binding.user_id, store.passkeysForUser(binding.user_id), false, 'required');
+    const ceremonyId = beginAndroidCeremony({
+      type: 'register', bindingId, userId: binding.user_id,
+      clientSecretHash: tokenHash(clientSecret), challenge: options.challenge,
+    });
+    return json(response, 200, { ceremonyId, options });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/android/passkey/register/verify') {
+    requireAndroidOrigins();
+    const body = await readJson(request);
+    const ceremony = takeAndroidCeremony(body.ceremonyId, 'register');
+    const clientSecret = bearerToken(request);
+    if (!clientSecret || !hashesEqual(ceremony.clientSecretHash, tokenHash(clientSecret)) ||
+        body.bindingId !== ceremony.bindingId) {
+      throw Object.assign(new Error('Android binding authentication changed'), { status: 403 });
+    }
+    const verification = await verifyRegistrationResponse({
+      response: body.credential,
+      expectedChallenge: ceremony.challenge,
+      expectedOrigin: androidOrigins,
+      expectedRPID: rpId,
+      requireUserVerification: true,
+    });
+    if (!verification.verified || !verification.registrationInfo) {
+      throw Object.assign(new Error('Passkey registration failed'), { status: 400 });
+    }
+    const record = passkeyRecord(
+      ceremony.userId, verification.registrationInfo, body.credential);
+    const refreshToken = randomToken();
+    const refreshHash = tokenHash(refreshToken);
+    const binding = store.completeAndroidRegistration(
+      ceremony.bindingId, ceremony.clientSecretHash, record, refreshHash,
+      Date.now() + nativeRefreshLifetimeMs,
+    );
+    if (!binding) {
+      throw Object.assign(new Error('Android binding is no longer approved'), { status: 409 });
+    }
+    return json(response, 200, {
+      verified: true,
+      refreshToken,
+      ...issueNativeAccess(binding.user_id, refreshHash),
+    });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/android/passkey/login/options') {
+    requireAndroidOrigins();
+    const options = await generateAuthenticationOptions({
+      rpID: rpId,
+      userVerification: 'required',
+      allowCredentials: [],
+    });
+    return json(response, 200, {
+      ceremonyId: beginAndroidCeremony({ type: 'login', challenge: options.challenge }),
+      options,
+    });
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/android/passkey/login/verify') {
+    requireAndroidOrigins();
+    const body = await readJson(request);
+    const ceremony = takeAndroidCeremony(body.ceremonyId, 'login');
+    const credential = body.credential ?? {};
+    const row = store.passkeyById(credential.id);
+    if (!row) throw Object.assign(new Error('Passkey is not registered'), { status: 400 });
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge: ceremony.challenge,
+      expectedOrigin: androidOrigins,
+      expectedRPID: rpId,
+      credential: passkeyForVerification(row),
+      requireUserVerification: true,
+    });
+    if (!verification.verified) {
+      throw Object.assign(new Error('Passkey verification failed'), { status: 400 });
+    }
+    store.updatePasskeyUse(row.credential_id, verification.authenticationInfo.newCounter,
+                           verification.authenticationInfo.credentialBackedUp);
+    return json(response, 200, {
+      verified: true,
+      ...issueNativeSession(row.user_id, 'Android passkey'),
+    });
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/android/bind/claim') {
     const body = await readJson(request);
     const qrToken = String(body.token ?? '');
@@ -969,6 +1111,9 @@ const heartbeat = setInterval(() => {
   }
   const now = Date.now();
   for (const [id, ceremony] of ceremonies) if (ceremony.expiresAt <= now) ceremonies.delete(id);
+  for (const [id, ceremony] of androidCeremonies) {
+    if (ceremony.expiresAt <= now) androidCeremonies.delete(id);
+  }
   for (const [id, authorization] of deviceAuthorizations) {
     if (authorization.expiresAt > now) continue;
     deviceAuthorizations.delete(id);
@@ -990,6 +1135,7 @@ const heartbeat = setInterval(() => {
   }
   store.deleteExpiredSessions();
   store.deleteExpiredNativeSessions();
+  store.expireAndroidBindings(now);
 }, 30_000);
 heartbeat.unref();
 

@@ -90,7 +90,12 @@ sudo systemctl edit remoe-signaling.service
 [Service]
 Environment=REMOE_RP_ID=signal.example.com
 Environment=REMOE_ORIGIN=https://signal.example.com
+Environment=REMOE_ANDROID_ORIGINS=android:apk-key-hash:&lt;RELEASE_APK_KEY_HASH&gt;
 ```
+
+`REMOE_ANDROID_ORIGINS` 是逗号分隔的精确 WebAuthn origin 白名单。生产环境不提供默认值；
+签名证书轮换期可以同时列出旧、新两个 origin。这里填写的是证书 SHA-256 的 Base64URL（无填充）
+形式，不是冒号分隔的十六进制指纹。网页 origin 与 Android origin 分开校验。
 
 然后启动：
 
@@ -365,6 +370,8 @@ sudo ss -lunp
   `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。部分 Android Credential Manager 实现会在
   请求可发现凭据时返回 `NotReadableError`；网页会自动回退到不可发现的本机凭据，并长期保存公开的
   credential ID。清除站点数据或换设备后，使用最新恢复码在该设备重新注册即可。
+- Android passkey 返回 origin 未配置或被拒绝：检查 `REMOE_ANDROID_ORIGINS` 与 APK 的实际签名
+  证书，并确认 `/.well-known/assetlinks.json` 返回 200、JSON MIME 且没有重定向。
 - 配对码错误：配对码十分钟失效；重新启动未配对 Host，或在已配对 Host 本机使用 `--repair`。
 - Host 显示离线：检查 Host 的 WSS 日志以及 `/host` 是否由 Caddy 反向代理。
 - DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名

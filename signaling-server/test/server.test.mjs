@@ -447,12 +447,41 @@ test('binds Android only after the browser confirms matching device details', as
   assert.equal(approveResponse.status, 200);
   assert.equal((await approveResponse.json()).status, 'approved');
 
+  const optionsResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/passkey/register/options`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${clientSecret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ bindingId: started.bindingId }),
+    });
+  assert.equal(optionsResponse.status, 200);
+  const registration = await optionsResponse.json();
+  assert.ok(registration.ceremonyId.length >= 32);
+  assert.equal(registration.options.rp.id, 'localhost');
+  assert.equal(registration.options.authenticatorSelection.residentKey, 'required');
+
   const androidStatusResponse = await fetch(
     `http://127.0.0.1:${port}/api/android/bind/status?id=${started.bindingId}`, {
       headers: { authorization: `Bearer ${clientSecret}` },
     });
   assert.equal(androidStatusResponse.status, 200);
   assert.equal((await androidStatusResponse.json()).status, 'approved');
+});
+
+test('issues discoverable Android passkey login options without a browser cookie', async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/android/passkey/login/options`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(response.status, 200);
+  const login = await response.json();
+  assert.ok(login.ceremonyId.length >= 32);
+  assert.equal(login.options.rpId, 'localhost');
+  assert.equal(login.options.userVerification, 'required');
+  assert.deepEqual(login.options.allowCredentials, []);
 });
 
 test('allows only one Android claimant and rejects QR reuse', async () => {

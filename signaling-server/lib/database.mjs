@@ -188,8 +188,14 @@ export function createStore(database) {
       SELECT * FROM android_bindings WHERE id = ? AND client_secret_hash = ?
     `),
     decideAndroidBinding: database.prepare(`
-      UPDATE android_bindings SET state = ?, decided_at = ?
+      UPDATE android_bindings
+      SET state = ?, decided_at = ?,
+          expires_at = CASE WHEN ? = 'APPROVED' THEN ? ELSE expires_at END
       WHERE id = ? AND user_id = ? AND state = 'CLAIMED' AND expires_at > ?
+    `),
+    completeAndroidBinding: database.prepare(`
+      UPDATE android_bindings SET state = 'COMPLETED'
+      WHERE id = ? AND client_secret_hash = ? AND state = 'APPROVED' AND expires_at > ?
     `),
   };
 
@@ -285,7 +291,25 @@ export function createStore(database) {
       const now = Date.now();
       return database.transaction(() => {
         statements.expireAndroidBindings.run(now);
-        return statements.decideAndroidBinding.run(decision, now, id, userId, now).changes === 1;
+        return statements.decideAndroidBinding.run(
+          decision, now, decision, now + 5 * 60 * 1000, id, userId, now).changes === 1;
+      })();
+    },
+    completeAndroidRegistration(id, clientSecretHash, passkey, refreshHash, expiresAt) {
+      const now = Date.now();
+      return database.transaction(() => {
+        statements.expireAndroidBindings.run(now);
+        const binding = statements.androidBindingByClient.get(id, clientSecretHash);
+        if (!binding || binding.state !== 'APPROVED') return null;
+        statements.insertPasskey.run(passkey);
+        statements.insertNativeSession.run(
+          refreshHash, binding.user_id, binding.device_name ?? 'Android device',
+          now, now, expiresAt,
+        );
+        if (statements.completeAndroidBinding.run(id, clientSecretHash, now).changes !== 1) {
+          throw new Error('Android binding changed during registration');
+        }
+        return binding;
       })();
     },
   };
