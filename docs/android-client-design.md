@@ -6,7 +6,8 @@
 > Android 工程：`android-client/`
 
 > 实施进度：阶段 A–D 已完成代码与自动化测试；阶段 E 已完成本地实现，但在 Release/Play App
-> Signing 策略确定前不部署 DAL 或做生产真机验收。阶段 C 的完整 10 分钟长稳测试延后至阶段 H。
+> Signing 策略确定前不部署 DAL 或做生产真机验收。阶段 F 的 Host 列表、token 续期/注销和正式
+> 连接已完成本地实现。阶段 C 的完整 10 分钟长稳测试延后至阶段 H。
 
 ## 1. 目标
 

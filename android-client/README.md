@@ -79,6 +79,16 @@ refresh token 使用 Android Keystore 中的 AES-256-GCM key 加密后保存，a
 用实际证书替换 `docs/assetlinks.template.json` 的占位符，并配置服务端
 `REMOE_ANDROID_ORIGINS`；在此之前不要部署占位模板。
 
+## 阶段 F 本地实现
+
+登录成功后，Android 使用内存中的短期 access token 获取账号 Host 列表并显示在线状态；点击在线
+Host 会通过受认证接口领取一次性 WSS invite，再复用阶段 C 的 WebRTC VideoTrack 连接。access token
+临近过期时才使用加密 refresh token 续期，不做后台定时刷新；注销会撤销服务端 refresh session 并
+清除本地密文。当前保留手动 invite 输入作为开发诊断入口。
+
+本阶段的 API、单测、lint 与 APK 构建已通过；真实账号列表和正式连接需在阶段 E 的 DAL/服务端部署
+完成后做真机验收。
+
 ## 本机命令
 
 ```powershell

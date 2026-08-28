@@ -56,6 +56,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var scanBindButton: Button
     private lateinit var passkeyLoginButton: Button
     private lateinit var bindingStatusView: TextView
+    private lateinit var hostListView: LinearLayout
     private lateinit var bindingClient: AndroidBindingClient
     private lateinit var credentialManager: CredentialManager
     private lateinit var nativeSessionStore: NativeSessionStore
@@ -140,6 +141,18 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             setOnClickListener { loginWithPasskey() }
         }
         bindingStatusView = textView(14f, Color.rgb(205, 214, 228))
+        hostListView = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val accountActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(this@MainActivity).apply {
+                text = "刷新电脑"
+                setOnClickListener { loadHosts() }
+            }, LinearLayout.LayoutParams(0, dp(52), 1f))
+            addView(Button(this@MainActivity).apply {
+                text = "退出账号"
+                setOnClickListener { logoutNativeSession() }
+            }, LinearLayout.LayoutParams(0, dp(52), 1f))
+        }
 
         val settings = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -170,6 +183,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             addView(scanBindButton, matchWrap(top = 6))
             addView(passkeyLoginButton, matchWrap(top = 6))
             addView(bindingStatusView, matchWrap(top = 8))
+            addView(accountActions, matchWrap(top = 8))
+            addView(hostListView, matchWrap(top = 6))
             addView(statusView, matchWrap(top = 12))
             addView(diagnosticsView, matchWrap(top = 10))
         }
@@ -278,6 +293,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                                         nativeSessionStore.save(tokens)
                                         bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
                                         bindingStatusView.text = "Passkey 已创建，账号绑定完成。"
+                                        loadHosts()
                                     }.onFailure(::showBindingFailure)
                                     scanBindButton.isEnabled = true
                                 }
@@ -319,6 +335,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                                         nativeSessionStore.save(tokens)
                                         bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
                                         bindingStatusView.text = "Passkey 登录成功。"
+                                        loadHosts()
                                     }.onFailure(::showBindingFailure)
                                     passkeyLoginButton.isEnabled = true
                                 }
@@ -351,11 +368,95 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                     nativeSessionStore.updateAccess(grant.accessToken, grant.expiresIn)
                     bindingStatusView.setTextColor(Color.rgb(90, 225, 175))
                     bindingStatusView.text = "Android 登录已恢复。"
+                    loadHosts()
                 }.onFailure {
                     nativeSessionStore.clear()
                     showBindingFailure(it)
                 }
                 passkeyLoginButton.isEnabled = true
+            }
+        }
+    }
+
+    private fun withAccess(action: (String) -> Unit) {
+        val current = nativeSessionStore.accessToken
+        if (current != null && nativeSessionStore.accessExpiresAt > System.currentTimeMillis() + 30_000) {
+            action(current)
+            return
+        }
+        val refreshToken = nativeSessionStore.refreshToken()
+        if (refreshToken == null) {
+            showBindingFailure(IllegalStateException("请先使用 Passkey 登录"))
+            return
+        }
+        bindingClient.refresh(refreshToken) { result ->
+            postUi {
+                result.onSuccess { grant ->
+                    nativeSessionStore.updateAccess(grant.accessToken, grant.expiresIn)
+                    action(grant.accessToken)
+                }.onFailure {
+                    nativeSessionStore.clear()
+                    showBindingFailure(it)
+                }
+            }
+        }
+    }
+
+    private fun loadHosts() = withAccess { accessToken ->
+        hostListView.removeAllViews()
+        hostListView.addView(textView(13f, Color.rgb(145, 154, 170)).apply {
+            text = "正在载入电脑…"
+        })
+        bindingClient.hosts(accessToken) { result ->
+            postUi {
+                hostListView.removeAllViews()
+                result.onSuccess { hosts ->
+                    if (hosts.isEmpty()) {
+                        hostListView.addView(textView(13f, Color.rgb(145, 154, 170)).apply {
+                            text = "账号下还没有 Host。"
+                        })
+                    }
+                    hosts.forEach { host ->
+                        hostListView.addView(Button(this).apply {
+                            text = "${if (host.online) "●" else "○"} ${host.name}"
+                            isEnabled = host.online && session == null
+                            setOnClickListener { connectManagedHost(host.id) }
+                        }, matchWrap(top = 4))
+                    }
+                }.onFailure(::showBindingFailure)
+            }
+        }
+    }
+
+    private fun connectManagedHost(hostId: String) = withAccess { accessToken ->
+        bindingStatusView.text = "正在请求 Host 连接…"
+        bindingClient.connectHost(hostId, accessToken) { result ->
+            postUi {
+                result.onSuccess { managedInvite ->
+                    inviteInput.setText(managedInvite)
+                    connect()
+                }.onFailure(::showBindingFailure)
+            }
+        }
+    }
+
+    private fun logoutNativeSession() {
+        val refreshToken = nativeSessionStore.refreshToken()
+        if (refreshToken == null) {
+            nativeSessionStore.clear()
+            hostListView.removeAllViews()
+            bindingStatusView.text = "当前没有 Android 登录。"
+            return
+        }
+        bindingClient.logout(refreshToken) { result ->
+            postUi {
+                nativeSessionStore.clear()
+                hostListView.removeAllViews()
+                if (result.isSuccess) {
+                    bindingStatusView.text = "已退出 Android 账号。"
+                } else {
+                    bindingStatusView.text = "本地登录已清除；服务端撤销将在会话过期后生效。"
+                }
             }
         }
     }

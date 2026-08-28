@@ -31,6 +31,7 @@ data class ActiveBinding(
 
 data class PasskeyOptions(val ceremonyId: String, val optionsJson: String)
 data class AccessGrant(val accessToken: String, val expiresIn: Int)
+data class HostSummary(val id: String, val name: String, val online: Boolean)
 
 class AndroidBindingClient(private val httpClient: OkHttpClient) {
     private val jsonType = "application/json; charset=utf-8".toMediaType()
@@ -118,6 +119,48 @@ class AndroidBindingClient(private val httpClient: OkHttpClient) {
             null,
             callback,
         ) { json -> AccessGrant(json.getString("accessToken"), json.getInt("expiresIn")) }
+    }
+
+    fun hosts(accessToken: String, callback: (Result<List<HostSummary>>) -> Unit) {
+        val request = Request.Builder()
+            .url(DEFAULT_SERVER.newBuilder().addPathSegments("api/client/hosts").build())
+            .header("Authorization", "Bearer $accessToken")
+            .get()
+            .build()
+        httpClient.newCall(request).enqueue(jsonCallback(callback) { json ->
+            val hosts = json.getJSONArray("hosts")
+            List(hosts.length()) { index ->
+                val host = hosts.getJSONObject(index)
+                HostSummary(host.getString("id"), host.getString("name"), host.getBoolean("online"))
+            }
+        })
+    }
+
+    fun connectHost(
+        hostId: String,
+        accessToken: String,
+        callback: (Result<String>) -> Unit,
+    ) {
+        val request = Request.Builder()
+            .url(DEFAULT_SERVER.newBuilder()
+                .addPathSegments("api/client/hosts")
+                .addPathSegment(hostId)
+                .addPathSegment("connect")
+                .build())
+            .header("Authorization", "Bearer $accessToken")
+            .post(JSONObject().toString().toRequestBody(jsonType))
+            .build()
+        httpClient.newCall(request).enqueue(jsonCallback(callback) { it.getString("invite") })
+    }
+
+    fun logout(refreshToken: String, callback: (Result<Unit>) -> Unit) {
+        postJson(
+            DEFAULT_SERVER,
+            "api/client/logout",
+            JSONObject().put("refreshToken", refreshToken),
+            null,
+            callback,
+        ) { Unit }
     }
 
     private fun <T> postJson(
