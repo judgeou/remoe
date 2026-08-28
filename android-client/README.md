@@ -1,6 +1,6 @@
 # Remoe Android
 
-原生 Kotlin Android 客户端工程。当前阶段 A 提供 libwebrtc codec、MediaCodec 和 EGL/GPU
+原生 Kotlin Android 客户端工程。阶段 A 提供 libwebrtc codec、MediaCodec 和 EGL/GPU
 能力探针。启动 Debug APK 后会自动执行检测；顶部 `RESULT` 应在支持 AV1 的设备上显示 `PASS`。
 
 libwebrtc 固定版本、校验值、revision 与许可证记录见
@@ -20,6 +20,16 @@ EGL renderer: Adreno (TM) 840
 `.low_latency` MediaCodec 的 `HardwareVideoDecoderFactory` 执行 AV1 `initDecode(1920×1080)`。
 这样既验证了所选 AAR 编译时包含 AV1，也验证了目标设备上的 libwebrtc → MediaCodec
 低延迟硬件解码路径能够创建和初始化。
+
+## 阶段 B protocol v11
+
+`app/src/main/java/top/ozaoza/remoe/protocol/` 使用显式 little-endian 编解码全部 protocol v11
+控制消息，包括有状态的 WRMS 分片/合并 frame buffer。JVM 测试使用来自现有 Web/C++ 布局的
+硬编码 golden bytes，并覆盖错误 magic/version/header size、保留位、截断、超长和非法 UTF-8。
+
+```powershell
+.\gradlew.bat testDebugUnitTest
+```
 
 ## 本机命令
 

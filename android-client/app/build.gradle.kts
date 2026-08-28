@@ -39,4 +39,5 @@ android {
 
 dependencies {
     implementation("io.github.webrtc-sdk:android:$libwebrtcVersion")
+    testImplementation("junit:junit:4.13.2")
 }
