@@ -103,7 +103,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
             setMirror(false)
         }
-        touchController = RemoteTouchController(renderer) { input ->
+        val remoteTouchLayer = View(this)
+        touchController = RemoteTouchController(remoteTouchLayer, renderer) { input ->
             session?.sendInput(input) == true
         }
 
@@ -119,6 +120,10 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER,
+            ))
+            addView(remoteTouchLayer, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
             ))
             addView(controlPanel, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -669,6 +674,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun enterRemoteMode() {
+        touchController.resetViewport()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         controlPanel.visibility = View.GONE
         remoteStopButton.visibility = View.VISIBLE
@@ -681,6 +687,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun leaveRemoteMode() {
+        touchController.resetViewport()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         remoteStopButton.visibility = View.GONE
         controlPanel.visibility = View.VISIBLE
