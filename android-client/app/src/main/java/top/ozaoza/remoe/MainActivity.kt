@@ -30,7 +30,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import org.webrtc.RendererCommon
 import org.webrtc.VideoSink
 import org.webrtc.VideoTrack
-import top.ozaoza.remoe.protocol.ClientConfig
 import top.ozaoza.remoe.auth.AndroidDeviceProtocol
 import top.ozaoza.remoe.auth.DeviceIdentityStore
 import top.ozaoza.remoe.auth.NativeSessionStore
@@ -47,6 +46,8 @@ import top.ozaoza.remoe.rtc.RtcSession
 import top.ozaoza.remoe.rtc.TextureViewVideoRenderer
 import top.ozaoza.remoe.signaling.InviteParser
 import top.ozaoza.remoe.protocol.VideoRateControl
+import top.ozaoza.remoe.settings.VideoConnectionSettings
+import top.ozaoza.remoe.settings.VideoSettingsStore
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -83,6 +84,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var bindingClient: AndroidBindingClient
     private lateinit var deviceIdentityStore: DeviceIdentityStore
     private lateinit var nativeSessionStore: NativeSessionStore
+    private lateinit var videoSettingsStore: VideoSettingsStore
     private val bindingHandler = Handler(Looper.getMainLooper())
     private var activeBinding: ActiveBinding? = null
     private var bindingForeground = false
@@ -116,6 +118,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         bindingClient = AndroidBindingClient(app.httpClient)
         deviceIdentityStore = DeviceIdentityStore(this)
         nativeSessionStore = NativeSessionStore(this)
+        videoSettingsStore = VideoSettingsStore(this)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
 
         renderer = TextureViewVideoRenderer(this).apply {
@@ -200,13 +203,23 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun createControlPanel(): ScrollView {
+        val storedVideoSettings = videoSettingsStore.load()
         inviteInput = editText(getString(R.string.invite_hint), InputType.TYPE_CLASS_TEXT).apply {
             isSingleLine = true
         }
-        fpsInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("60") }
-        bitrateInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("20") }
-        scaleInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("100") }
-        qualityInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("28") }
+        fpsInput = editText("", InputType.TYPE_CLASS_NUMBER).apply {
+            setText(storedVideoSettings.fps.toString())
+        }
+        bitrateInput = editText("", InputType.TYPE_CLASS_NUMBER).apply {
+            setText(storedVideoSettings.bitrateMbps.toString())
+        }
+        scaleInput = editText("", InputType.TYPE_CLASS_NUMBER).apply {
+            setText(storedVideoSettings.scalePercent.toString())
+        }
+        qualityInput = editText("", InputType.TYPE_CLASS_NUMBER).apply {
+            setText(storedVideoSettings.quality.toString())
+        }
+        selectedRateControl = storedVideoSettings.rateControl
         rateControlButton = secondaryButton("CBR").apply {
             setOnClickListener {
                 selectedRateControl = if (selectedRateControl == VideoRateControl.CBR) {
@@ -630,23 +643,21 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         val fps = fpsInput.text.toString().toIntOrNull()
         val bitrateMbps = bitrateInput.text.toString().toIntOrNull()
         val scale = scaleInput.text.toString().toIntOrNull()
-        val quality = if (selectedRateControl == VideoRateControl.FIXED_QUALITY) {
-            qualityInput.text.toString().toIntOrNull()
-        } else {
-            0
-        }
+        val quality = qualityInput.text.toString().toIntOrNull()
         if (fps !in 1..240 || bitrateMbps !in 1..1000 || scale !in 10..100 ||
-            (selectedRateControl == VideoRateControl.FIXED_QUALITY && quality !in 1..51)
+            quality !in 1..51
         ) {
             return showStatus("FPS/码率/缩放/质量参数无效", true)
         }
-        val config = ClientConfig(
-            fpsNum = fps!!,
-            bitrateBps = bitrateMbps!! * 1_000_000,
+        val videoSettings = VideoConnectionSettings(
+            fps = fps!!,
+            bitrateMbps = bitrateMbps!!,
             scalePercent = scale!!,
             rateControl = selectedRateControl,
             quality = quality!!,
         )
+        val config = videoSettings.toClientConfig()
+        videoSettingsStore.save(videoSettings)
         diagnosticsView.text = "log: ${app.diagnosticLog.path()}"
         connectButton.isEnabled = false
         disconnectButton.isEnabled = true
