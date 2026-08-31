@@ -1,5 +1,6 @@
 package top.ozaoza.remoe.rtc
 
+import android.os.SystemClock
 import okhttp3.OkHttpClient
 import org.webrtc.DataChannel
 import org.webrtc.CandidatePairChangeEvent
@@ -49,6 +50,7 @@ class RtcSession(
         fun onStatus(message: String)
         fun onVideoTrack(track: VideoTrack)
         fun onStreamHeader(header: StreamHeader)
+        fun onPerformanceStats(stats: RtcPerformanceStats)
         fun onDiagnostics(summary: String)
         fun onError(message: String)
     }
@@ -79,11 +81,14 @@ class RtcSession(
     private var localCandidateCount = 0
     private var remoteCandidateCount = 0
     private var lastIceStatsSummary: String? = null
+    private val performanceStatsCalculator = RtcPerformanceStatsCalculator()
     private val receivedSignalCounts = mutableMapOf<SignalType, Int>()
     private var remoteSdpObserver: SdpObserver? = null
     private var inputSequence = 0u
     @Volatile
     private var stopped = false
+    @Volatile
+    private var performanceStatsEnabled = false
 
     fun connect() {
         check(!stopped) { "session is stopped" }
@@ -96,6 +101,19 @@ class RtcSession(
     fun sendInput(event: RemoteInputEvent): Boolean {
         if (stopped || !bootstrapComplete || streamHeader == null) return false
         return sendControl(InputEventCodec.encode(event.copy(sequence = inputSequence++)))
+    }
+
+    @Synchronized
+    fun setPerformanceStatsEnabled(enabled: Boolean) {
+        if (stopped || performanceStatsEnabled == enabled) return
+        performanceStatsEnabled = enabled
+        performanceStatsCalculator.reset()
+        if (enabled) {
+            startStats()
+        } else {
+            statsTask?.cancel(false)
+            statsTask = null
+        }
     }
 
     @Synchronized
@@ -156,7 +174,6 @@ class RtcSession(
         channel.registerObserver(ControlObserver())
 
         status("正在交换 SDP/ICE…")
-        startStats()
         created.createOffer(CreateOfferObserver(), MediaConstraints())
     }
 
@@ -323,7 +340,6 @@ class RtcSession(
             )
             observer.onStreamHeader(header)
             if (!sendControl(StreamReadyCodec.encode())) throw IllegalStateException("发送 StreamReady 失败")
-            startStats()
             status("等待第一张 ${header.codec} 画面…")
         } catch (error: Throwable) {
             fail("控制消息无效：${error.message}")
@@ -503,7 +519,7 @@ class RtcSession(
     }
 
     private fun reportStats(report: RTCStatsReport) {
-        if (stopped) return
+        if (stopped || !performanceStatsEnabled) return
         reportIceStats(report)
         val inbound = report.statsMap.values.firstOrNull { stat ->
             stat.type == "inbound-rtp" &&
@@ -525,7 +541,12 @@ class RtcSession(
             append(" dropped=${number(members["framesDropped"])}")
         }
         diagnostics.append("stats", summary)
-        observer.onDiagnostics(summary)
+        performanceStatsCalculator.update(
+            timestampNanos = SystemClock.elapsedRealtimeNanos(),
+            bytesReceived = number(members["bytesReceived"]),
+            framesDecoded = number(members["framesDecoded"] ?: members["framesReceived"]),
+            packetsLost = number(members["packetsLost"]),
+        )?.let(observer::onPerformanceStats)
     }
 
     private fun reportIceStats(report: RTCStatsReport) {

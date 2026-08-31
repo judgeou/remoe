@@ -5,6 +5,10 @@ import android.content.pm.ActivityInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -37,9 +41,12 @@ import top.ozaoza.remoe.binding.BindingState
 import top.ozaoza.remoe.binding.QrScannerActivity
 import top.ozaoza.remoe.input.RemoteTouchController
 import top.ozaoza.remoe.rtc.RtcCodecProbe
+import top.ozaoza.remoe.rtc.RtcPerformanceStats
 import top.ozaoza.remoe.rtc.RtcSession
 import top.ozaoza.remoe.rtc.TextureViewVideoRenderer
 import top.ozaoza.remoe.signaling.InviteParser
+import top.ozaoza.remoe.protocol.VideoRateControl
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -52,6 +59,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var fpsInput: EditText
     private lateinit var bitrateInput: EditText
     private lateinit var scaleInput: EditText
+    private lateinit var qualityInput: EditText
+    private lateinit var rateControlButton: Button
     private lateinit var statusView: TextView
     private lateinit var diagnosticsView: TextView
     private lateinit var connectButton: Button
@@ -63,6 +72,9 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var hostListView: LinearLayout
     private lateinit var controlPanel: ScrollView
     private lateinit var remoteStopButton: Button
+    private lateinit var remoteToolbar: LinearLayout
+    private lateinit var performanceButton: Button
+    private lateinit var performanceStatsView: TextView
     private lateinit var developerPanel: LinearLayout
     private lateinit var bindingClient: AndroidBindingClient
     private lateinit var deviceIdentityStore: DeviceIdentityStore
@@ -72,6 +84,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private var bindingForeground = false
     private var session: RtcSession? = null
     private var remoteTrack: VideoTrack? = null
+    private var selectedRateControl = VideoRateControl.CBR
+    private var showPerformanceStats = false
     private val firstSinkFrame = AtomicBoolean(false)
     private val remoteVideoSink = VideoSink { frame ->
         if (firstSinkFrame.compareAndSet(false, true)) {
@@ -110,9 +124,30 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
         controlPanel = createControlPanel()
         remoteStopButton = secondaryButton("断开").apply {
-            visibility = View.GONE
             setOnClickListener { disconnect("用户断开") }
         }
+        performanceButton = secondaryButton("性能").apply {
+            setOnClickListener { setPerformanceStatsVisible(!showPerformanceStats) }
+        }
+        remoteToolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            visibility = View.GONE
+            addView(performanceButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(48),
+            ))
+            addView(remoteStopButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                dp(48),
+            ).apply { marginStart = dp(6) })
+        }
+        performanceStatsView = textView(13f, Color.WHITE).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setBackgroundColor(Color.argb(210, 8, 11, 16))
+            visibility = View.GONE
+        }
+        renderPerformanceStats(RtcPerformanceStats())
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -129,10 +164,15 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ))
-            addView(remoteStopButton, FrameLayout.LayoutParams(
+            addView(remoteToolbar, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.END,
+            ).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
+            addView(performanceStatsView, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START,
             ).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
         }
         setContentView(root)
@@ -144,9 +184,21 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         inviteInput = editText(getString(R.string.invite_hint), InputType.TYPE_CLASS_TEXT).apply {
             isSingleLine = true
         }
-        fpsInput = editText("FPS", InputType.TYPE_CLASS_NUMBER).apply { setText("60") }
-        bitrateInput = editText("Mbps", InputType.TYPE_CLASS_NUMBER).apply { setText("20") }
-        scaleInput = editText("Scale %", InputType.TYPE_CLASS_NUMBER).apply { setText("100") }
+        fpsInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("60") }
+        bitrateInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("20") }
+        scaleInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("100") }
+        qualityInput = editText("", InputType.TYPE_CLASS_NUMBER).apply { setText("28") }
+        rateControlButton = secondaryButton("CBR").apply {
+            setOnClickListener {
+                selectedRateControl = if (selectedRateControl == VideoRateControl.CBR) {
+                    VideoRateControl.FIXED_QUALITY
+                } else {
+                    VideoRateControl.CBR
+                }
+                renderRateControl()
+            }
+        }
+        renderRateControl()
         statusView = textView(15f, Color.WHITE).apply { typeface = Typeface.DEFAULT_BOLD }
         diagnosticsView = textView(11f, Color.rgb(205, 214, 228)).apply {
             typeface = Typeface.MONOSPACE
@@ -180,11 +232,21 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             }, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(8) })
         }
 
-        val settings = LinearLayout(this).apply {
+        val primaryVideoSettings = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(fpsInput, LinearLayout.LayoutParams(0, dp(52), 1f))
-            addView(bitrateInput, LinearLayout.LayoutParams(0, dp(52), 1f))
-            addView(scaleInput, LinearLayout.LayoutParams(0, dp(52), 1f))
+            addView(settingColumn("FPS", fpsInput), weightedColumn())
+            addView(settingColumn("网络 Mbps", bitrateInput), weightedColumn(start = 8))
+            addView(settingColumn("编码缩放 %", scaleInput), weightedColumn(start = 8))
+        }
+        val qualityVideoSettings = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(settingColumn("码控", rateControlButton), weightedColumn())
+            addView(settingColumn("质量（小=好）", qualityInput), weightedColumn(start = 8))
+        }
+        val videoSettings = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(primaryVideoSettings, matchWrap())
+            addView(qualityVideoSettings, matchWrap(top = 8))
         }
         val actions = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -194,7 +256,6 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         developerPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(inviteInput, matchWrap(top = 10))
-            addView(settings, matchWrap(top = 6))
             addView(actions, matchWrap(top = 6))
             addView(codecProbeButton, matchWrap(top = 6))
             addView(diagnosticsView, matchWrap(top = 10))
@@ -217,6 +278,14 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             addView(scanBindButton, matchWrap(top = 12))
             addView(deviceLoginButton, matchWrap(top = 8))
             addView(bindingStatusView, matchWrap(top = 12))
+            addView(textView(20f, Color.WHITE).apply {
+                text = "视频参数"
+                typeface = Typeface.DEFAULT_BOLD
+            }, matchWrap(top = 30))
+            addView(textView(12f, Color.rgb(145, 154, 170)).apply {
+                text = "与 Web 端一致；固定质量模式下数值越小画质越高"
+            }, matchWrap(top = 4))
+            addView(videoSettings, matchWrap(top = 10))
             addView(textView(20f, Color.WHITE).apply {
                 text = "我的电脑"
                 typeface = Typeface.DEFAULT_BOLD
@@ -542,13 +611,22 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         val fps = fpsInput.text.toString().toIntOrNull()
         val bitrateMbps = bitrateInput.text.toString().toIntOrNull()
         val scale = scaleInput.text.toString().toIntOrNull()
-        if (fps !in 1..240 || bitrateMbps !in 1..1000 || scale !in 10..100) {
-            return showStatus("FPS/码率/缩放参数无效", true)
+        val quality = if (selectedRateControl == VideoRateControl.FIXED_QUALITY) {
+            qualityInput.text.toString().toIntOrNull()
+        } else {
+            0
+        }
+        if (fps !in 1..240 || bitrateMbps !in 1..1000 || scale !in 10..100 ||
+            (selectedRateControl == VideoRateControl.FIXED_QUALITY && quality !in 1..51)
+        ) {
+            return showStatus("FPS/码率/缩放/质量参数无效", true)
         }
         val config = ClientConfig(
             fpsNum = fps!!,
             bitrateBps = bitrateMbps!! * 1_000_000,
             scalePercent = scale!!,
+            rateControl = selectedRateControl,
+            quality = quality!!,
         )
         diagnosticsView.text = "log: ${app.diagnosticLog.path()}"
         connectButton.isEnabled = false
@@ -569,6 +647,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private fun disconnect(reason: String) {
         touchController.cancel()
         detachRemoteTrack()
+        setPerformanceStatsVisible(false)
         session?.close(reason)
         session = null
         connectButton.isEnabled = true
@@ -606,7 +685,16 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     override fun onStreamHeader(header: top.ozaoza.remoe.protocol.StreamHeader) = postUi {
-        showStatus("${header.codec} ${header.width}×${header.height} @ ${header.fpsNum} FPS")
+        val rate = if (header.rateControl == VideoRateControl.FIXED_QUALITY) {
+            "固定质量 ${header.quality} · 网络 ${header.bitrateBps / 1_000_000.0} Mbps"
+        } else {
+            "${header.bitrateBps / 1_000_000.0} Mbps CBR"
+        }
+        showStatus("${header.codec} ${header.width}×${header.height} · ${header.fpsNum} FPS · $rate")
+    }
+
+    override fun onPerformanceStats(stats: RtcPerformanceStats) = postUi {
+        renderPerformanceStats(stats)
     }
 
     override fun onDiagnostics(summary: String) = postUi {
@@ -617,6 +705,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         touchController.cancel()
         detachRemoteTrack()
         session = null
+        setPerformanceStatsVisible(false)
         connectButton.isEnabled = true
         disconnectButton.isEnabled = false
         codecProbeButton.isEnabled = true
@@ -677,7 +766,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         touchController.resetViewport()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         controlPanel.visibility = View.GONE
-        remoteStopButton.visibility = View.VISIBLE
+        remoteToolbar.visibility = View.VISIBLE
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             systemBarsBehavior =
@@ -689,7 +778,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private fun leaveRemoteMode() {
         touchController.resetViewport()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        remoteStopButton.visibility = View.GONE
+        remoteToolbar.visibility = View.GONE
+        performanceStatsView.visibility = View.GONE
         controlPanel.visibility = View.VISIBLE
         WindowCompat.getInsetsController(window, window.decorView)
             .show(WindowInsetsCompat.Type.systemBars())
@@ -719,14 +809,68 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         inputType = type
         setTextColor(Color.WHITE)
         setHintTextColor(Color.rgb(145, 154, 170))
-        setBackgroundColor(Color.rgb(38, 44, 56))
-        backgroundTintList = ColorStateList.valueOf(Color.rgb(73, 220, 175))
-        setPadding(dp(10), 0, dp(10), 0)
+        backgroundTintList = null
+        background = StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), inputBackground(Color.rgb(73, 220, 175)))
+            addState(intArrayOf(), inputBackground(Color.rgb(78, 89, 104)))
+        }
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(12), 0, dp(12), 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            textCursorDrawable = ColorDrawable(Color.WHITE)
+        }
+    }
+
+    private fun inputBackground(strokeColor: Int): GradientDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(8).toFloat()
+        setColor(Color.rgb(28, 34, 43))
+        setStroke(dp(1), strokeColor)
     }
 
     private fun textView(size: Float, color: Int): TextView = TextView(this).apply {
         textSize = size
         setTextColor(color)
+    }
+
+    private fun settingColumn(label: String, control: View): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(textView(12f, Color.rgb(145, 154, 170)).apply { text = label })
+        addView(control, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(52),
+        ).apply { topMargin = dp(4) })
+    }
+
+    private fun weightedColumn(start: Int = 0): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(start)
+        }
+
+    private fun renderRateControl() {
+        val fixedQuality = selectedRateControl == VideoRateControl.FIXED_QUALITY
+        rateControlButton.text = if (fixedQuality) "固定质量" else "CBR"
+        qualityInput.isEnabled = fixedQuality
+        qualityInput.alpha = if (fixedQuality) 1f else 0.45f
+    }
+
+    private fun setPerformanceStatsVisible(visible: Boolean) {
+        showPerformanceStats = visible
+        performanceButton.text = if (visible) "隐藏性能" else "性能"
+        performanceStatsView.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) renderPerformanceStats(RtcPerformanceStats())
+        session?.setPerformanceStatsEnabled(visible)
+    }
+
+    private fun renderPerformanceStats(stats: RtcPerformanceStats) {
+        performanceStatsView.text = String.format(
+            Locale.US,
+            "解码 FPS   %.1f\n接收码率   %.1f Mbps\n实际网速   %.1f KB/s\n丢帧事件   %d",
+            stats.fps,
+            stats.bitrateMbps,
+            stats.dataRateKBps,
+            stats.lossEvents,
+        )
     }
 
     private fun matchWrap(top: Int = 0): LinearLayout.LayoutParams = LinearLayout.LayoutParams(

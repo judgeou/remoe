@@ -39,9 +39,9 @@ ready/ack、ClientConfig、StreamHeader、StreamReady 后把远端 VideoTrack �
 基于 EGL 的 `TextureView` 渲染器。目标 HONOR 设备的 `SurfaceViewRenderer` 能收到并解码视频帧，
 但系统合成结果为黑屏；`TextureView` 路径已真机验证，并按视频宽高比完整显示、避免裁掉任务栏。
 
-连接期间每秒采集 inbound RTP stats，并把脱敏诊断写入应用私有目录的
+用户打开远程画面的“性能”面板时，每秒采集 inbound RTP stats，并把脱敏诊断写入应用私有目录的
 `files/diagnostics/latest.log`。日志只记录候选类型和传输协议，不记录 IP、端口、SDP、ICE
-candidate、invite session 或其他 token。首版进入后台会立即断开并按 DataChannel、
+candidate、invite session 或其他 token；面板关闭后停止 stats 轮询以减少功耗。首版进入后台会立即断开并按 DataChannel、
 PeerConnection、WSS 的顺序释放会话资源。
 
 个人热点场景需要启用 libwebrtc 的 any-address candidate gathering，使未被 Android
@@ -99,6 +99,10 @@ Host 会通过受认证接口领取一次性 WSS invite，再复用阶段 C 的 
 断开、窗口失焦和 `ACTION_CANCEL` 会释放尚未抬起的远端左键，离开远程模式会重置视口。坐标、
 点击、拖拽、长按、双指滚轮、缩放锚点、平移约束和取消释放均有 JVM 单元测试；轻点、拖拽和
 长按右键已通过 HONOR 真机到 Windows Host 的闭环验证，缩放和平移等待用户真机验收。
+
+连接前的视频设置与 Web 端一致，支持 1–240 FPS、1–1000 Mbps 网络目标、10%–100% 编码缩放，
+以及 CBR / 固定质量码控；固定质量范围为 1–51，数值越小画质越高。远程画面可切换性能浮层，
+显示解码 FPS、接收码率、实际网速和本周期丢帧事件。指标计算有 JVM 单元测试，真机显示等待用户验收。
 
 ## 自行管理 Release 签名
 
