@@ -146,3 +146,29 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 ```powershell
 & "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" devices -l
 ```
+
+## GitHub 自动构建
+
+仓库的 `Build and release` GitHub Actions workflow 会在主分支提交、`v*` 标签和手动触发时运行
+Android JVM 单元测试，并使用固定的自管密钥构建 arm64-v8a Release APK。构建结果可在 workflow
+run 的 Artifacts 中下载，文件名为 `remoe-android-arm64-v8a-release.apk`；`v*` 标签触发的
+GitHub Release 也会附带同名 APK。PR 不会运行签名构建，避免向不受信任的 PR 暴露签名密钥。
+
+首次运行前，在仓库的 `Settings` → `Secrets and variables` → `Actions` 中配置以下 Repository
+secrets：
+
+- `REMOE_RELEASE_KEYSTORE_BASE64`：`remoe-release.p12` 文件的 Base64 内容。
+- `REMOE_RELEASE_STORE_PASSWORD`：密钥库密码。
+- `REMOE_RELEASE_KEY_ALIAS`：密钥 alias，默认创建脚本使用 `remoe-release`。
+- `REMOE_RELEASE_KEY_PASSWORD`：密钥密码。
+
+可以在 PowerShell 中把密钥库转换为 Base64 并直接复制到剪贴板，命令不会修改原文件：
+
+```powershell
+[Convert]::ToBase64String(
+    [IO.File]::ReadAllBytes((Resolve-Path .\private\remoe-release.p12))
+) | Set-Clipboard
+```
+
+必须持续使用同一个 `.p12` 和同一 alias；更换或丢失密钥后，GitHub 生成的新 APK 将无法覆盖升级
+已经安装的版本。
