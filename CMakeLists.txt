@@ -319,6 +319,7 @@ if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
         remoe_vpl_dispatcher
         d3d11
         dxgi
+        imm32
         shell32
         winhttp)
     install(TARGETS remoe_client RUNTIME DESTINATION bin)

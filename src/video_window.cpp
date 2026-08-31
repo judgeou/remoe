@@ -1,6 +1,7 @@
 #include "video_window.h"
 
 #include <d3d10.h>
+#include <imm.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -81,6 +82,11 @@ VideoWindow::VideoWindow(std::uint32_t width, std::uint32_t height) {
                               rectangle.right - rectangle.left, rectangle.bottom - rectangle.top,
                               nullptr, nullptr, instance, this);
     if (!window_) throw std::runtime_error("CreateWindowExW failed");
+    if (!ImmAssociateContextEx(window_, nullptr, 0)) {
+        DestroyWindow(window_);
+        window_ = nullptr;
+        throw std::runtime_error("failed to disable input methods for the remote window");
+    }
 
     create_device_and_swapchain(width, height);
     ShowWindow(window_, SW_SHOWMAXIMIZED);
