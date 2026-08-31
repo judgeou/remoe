@@ -36,7 +36,8 @@ EGL renderer: Adreno (TM) 840
 启动 APK 后可粘贴临时 Host invite，建立 STUN-only WebRTC 会话。Android 作为 offerer 创建
 recv-only AV1/H.264 transceiver 和可靠有序的 `remoe-control` DataChannel，完成 WRMS
 ready/ack、ClientConfig、StreamHeader、StreamReady 后把远端 VideoTrack 连接到
-`SurfaceViewRenderer`。
+基于 EGL 的 `TextureView` 渲染器。目标 HONOR 设备的 `SurfaceViewRenderer` 能收到并解码视频帧，
+但系统合成结果为黑屏；`TextureView` 路径已真机验证，并按视频宽高比完整显示、避免裁掉任务栏。
 
 连接期间每秒采集 inbound RTP stats，并把脱敏诊断写入应用私有目录的
 `files/diagnostics/latest.log`。日志只记录候选类型和传输协议，不记录 IP、端口、SDP、ICE
@@ -62,22 +63,21 @@ PeerConnection、WSS 的顺序释放会话资源。
 打包的 ML Kit QR 模型扫码，不依赖 Google Play Services 下载；相机只在扫码 Activity 位于前台时
 运行，识别成功立即关闭。绑定状态轮询也只在主 Activity 前台、且状态未结束时运行。
 
-本阶段在网页批准后停止，界面会提示阶段 E 再创建本机 passkey。未部署生产服务，也未进行真机
-绑定，以免提前引入 Credential Manager/Digital Asset Links 的半成品流程。
+网页批准后，阶段 E 会继续登记本机 Android Keystore 设备密钥并建立 native session。
 
 ## 阶段 E 本地实现
 
-Android 使用稳定版 AndroidX Credentials 1.6.0 创建和登录 discoverable passkey。注册 ceremony
-只能由已批准绑定的 client secret 领取，服务端分别校验 Android APK origin、RP ID、challenge 和
-用户验证；成功后在同一 SQLite 事务中保存 passkey、native refresh session 并完成绑定。
+Android 使用系统 Android Keystore 生成 P-256/ES256 设备密钥，私钥不可导出。登记 ceremony 只能
+由已批准绑定的 client secret 领取；App 对包含 challenge、binding ID、device ID 和公钥的版本化消息
+签名，服务端验证后在同一 SQLite 事务中保存设备公钥、native refresh session 并完成绑定。一个
+网页账号可以关联多台 Android 设备，每台设备使用不同密钥。
 
 refresh token 使用 Android Keystore 中的 AES-256-GCM key 加密后保存，access token 仅驻留内存；
-应用重启时用 refresh token 换取新的短期 access token。卸载应用会清除本地 session，但由凭据
-提供程序保存的 passkey 可用于重新登录。
+应用重启时用 refresh token 换取新的短期 access token。refresh token 丢失时可用本机设备密钥
+签名 challenge 重新登录；卸载或清除 App 数据会删除密钥，因此必须重新扫码绑定。
 
-本地代码、单测、lint 和 APK 构建已完成。生产验收仍需先确定 Release/Play App Signing 证书，
-用实际证书替换 `docs/assetlinks.template.json` 的占位符，并配置服务端
-`REMOE_ANDROID_ORIGINS`；在此之前不要部署占位模板。
+该流程不依赖 Credential Manager、Google Password Manager、Digital Asset Links 或 Google Play。
+生产服务部署和 HONOR 真机扫码绑定、本机密钥登录验收均已完成。
 
 ## 阶段 F 本地实现
 
@@ -86,8 +86,17 @@ Host 会通过受认证接口领取一次性 WSS invite，再复用阶段 C 的 
 临近过期时才使用加密 refresh token 续期，不做后台定时刷新；注销会撤销服务端 refresh session 并
 清除本地密文。当前保留手动 invite 输入作为开发诊断入口。
 
-本阶段的 API、单测、lint 与 APK 构建已通过；真实账号列表和正式连接需在阶段 E 的 DAL/服务端部署
-完成后做真机验收。
+本阶段的 API、单测、lint 与 APK 构建已通过；真实账号 Host 列表、一次性 invite 和正式 WebRTC
+连接已在 HONOR 真机验收。
+
+## 阶段 G：触摸控制
+
+远程画面支持直接触控：轻点发送绝对坐标和左键点击，单指滑动超过 touch slop 后执行左键拖拽，
+静止长按发送右键点击，双指横向/纵向滑动分别发送水平/垂直滚轮。触摸使用稳定 pointer ID；第二根
+手指加入后整次手势固定为滚轮，避免抬起一根手指时误触左键。
+
+断开、窗口失焦和 `ACTION_CANCEL` 会释放尚未抬起的远端左键。坐标、点击、拖拽、长按、双指滚轮
+和取消释放均有 JVM 单元测试；轻点、拖拽和长按右键已通过 HONOR 真机到 Windows Host 的闭环验证。
 
 ## 自行管理 Release 签名
 
@@ -96,12 +105,10 @@ Host 会通过受认证接口领取一次性 WSS invite，再复用阶段 C 的 
 
 ```powershell
 .\create-release-keystore.ps1
-.\export-release-identity.ps1 -KeystorePath .\private\remoe-release.p12
 ```
 
-第二个脚本会生成 `web-client/public/.well-known/assetlinks.json`，并打印服务端所需的
-`REMOE_ANDROID_ORIGINS`。确认指纹后再提交和部署该公开 JSON。`private/` 与常见 keystore 后缀已被
-Git 忽略；仍应在密码管理器保存密码，并把 keystore 加密备份到至少两个独立位置。
+`private/` 与常见 keystore 后缀已被 Git 忽略；仍应在密码管理器保存密码，并把 keystore 加密备份
+到至少两个独立位置。Release 签名只用于 APK 安装与升级身份，不参与 Android 设备密钥协议。
 
 Release 构建只从进程环境读取签名配置：
 
@@ -114,18 +121,6 @@ $env:REMOE_RELEASE_KEY_PASSWORD = '<from password manager>'
 ```
 
 缺少任一变量时，Release 构建会直接失败，不会悄悄生成未签名 APK。
-
-### 临时 Debug DAL
-
-2026-08-28 为真机闭环测试，生产域名临时部署了当前开发机 Debug certificate：
-
-```text
-06:A5:C2:F1:63:6A:22:76:84:64:55:FB:A5:00:D6:D0:6A:41:A6:96:03:69:45:89:F4:02:31:3A:19:20:EA:DB
-```
-
-对应配置为 `web-client/public/.well-known/assetlinks.json` 和
-`deploy/remoe-auth-debug.conf`。这两处都明确属于 Debug 测试信任；确定正式签名证书后必须替换，
-不能与 Release 长期并存。
 
 ## 本机命令
 

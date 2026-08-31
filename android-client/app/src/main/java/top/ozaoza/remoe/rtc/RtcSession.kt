@@ -19,7 +19,9 @@ import top.ozaoza.remoe.diagnostics.DiagnosticLog
 import top.ozaoza.remoe.protocol.ClientConfig
 import top.ozaoza.remoe.protocol.ClientConfigCodec
 import top.ozaoza.remoe.protocol.ClipboardCodec
+import top.ozaoza.remoe.protocol.InputEventCodec
 import top.ozaoza.remoe.protocol.Protocol
+import top.ozaoza.remoe.protocol.RemoteInputEvent
 import top.ozaoza.remoe.protocol.SignalFrame
 import top.ozaoza.remoe.protocol.SignalFrameBuffer
 import top.ozaoza.remoe.protocol.SignalFrameCodec
@@ -79,6 +81,7 @@ class RtcSession(
     private var lastIceStatsSummary: String? = null
     private val receivedSignalCounts = mutableMapOf<SignalType, Int>()
     private var remoteSdpObserver: SdpObserver? = null
+    private var inputSequence = 0u
     @Volatile
     private var stopped = false
 
@@ -87,6 +90,12 @@ class RtcSession(
         status("正在注册邀请…")
         diagnostics.append("signal", "Connecting to WSS host=${invite.displayHost}")
         signalSocket.connect()
+    }
+
+    @Synchronized
+    fun sendInput(event: RemoteInputEvent): Boolean {
+        if (stopped || !bootstrapComplete || streamHeader == null) return false
+        return sendControl(InputEventCodec.encode(event.copy(sequence = inputSequence++)))
     }
 
     @Synchronized

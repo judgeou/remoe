@@ -66,7 +66,7 @@ test('native client refresh sessions expire and can be revoked', () => {
   database.close();
 });
 
-test('Android registration completes binding, passkey, and refresh session atomically', () => {
+test('Android registration completes binding, device key, and refresh session atomically', () => {
   const database = openDatabase(':memory:');
   const store = createStore(database);
   const userId = 'android_user_123456789';
@@ -76,17 +76,21 @@ test('Android registration completes binding, passkey, and refresh session atomi
   assert.ok(store.claimAndroidBinding(
     'qr_hash', 'client_hash', 'Test phone', 'Test model', 'ABCD-EFGH'));
   assert.equal(store.decideAndroidBinding(bindingId, userId, 'APPROVED'), true);
-  const passkey = {
-    credentialId: 'android_credential_123456789', userId,
-    publicKey: Buffer.from([4, 5, 6]), counter: 0, transports: '[]',
-    backupEligible: 1, backupState: 1, createdAt: Date.now(),
-  };
-  assert.ok(store.completeAndroidRegistration(
-    bindingId, 'client_hash', passkey, 'android_refresh_hash', Date.now() + 60_000));
+  const deviceId = 'android_device_123456789';
+  const publicKey = Buffer.from([4, 5, 6]);
+  assert.ok(store.completeAndroidDeviceRegistration(
+    bindingId, 'client_hash', deviceId, publicKey,
+    'android_refresh_hash', Date.now() + 60_000));
   assert.equal(store.androidBindingByClient(bindingId, 'client_hash').state, 'COMPLETED');
-  assert.equal(store.passkeyById(passkey.credentialId).user_id, userId);
+  assert.equal(store.androidDeviceById(deviceId).user_id, userId);
   assert.equal(store.nativeSessionByHash('android_refresh_hash').user_id, userId);
-  assert.equal(store.completeAndroidRegistration(
-    bindingId, 'client_hash', passkey, 'another_hash', Date.now() + 60_000), null);
+  assert.equal(store.nativeSessionByHash('android_refresh_hash').android_device_id, deviceId);
+  assert.equal(store.completeAndroidDeviceRegistration(
+    bindingId, 'client_hash', deviceId, publicKey,
+    'another_hash', Date.now() + 60_000), null);
+  database.prepare('UPDATE android_devices SET revoked_at = ? WHERE id = ?')
+    .run(Date.now(), deviceId);
+  assert.equal(store.androidDeviceById(deviceId), undefined);
+  assert.equal(store.nativeSessionByHash('android_refresh_hash'), undefined);
   database.close();
 });

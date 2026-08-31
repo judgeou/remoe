@@ -1,13 +1,13 @@
 # Remoe Android 原生客户端设计方案
 
-> 状态：设计基线，2026-08-28  
+> 状态：设计基线，2026-08-31
 > 目标读者：后续开发者与新的 Codex 对话  
 > 对应仓库：`C:\Users\judge\projects\remoe`  
 > Android 工程：`android-client/`
 
-> 实施进度：阶段 A–D 已完成代码与自动化测试；阶段 E 已完成本地实现，但在 Release/Play App
-> Signing 策略确定前不部署 DAL 或做生产真机验收。阶段 F 的 Host 列表、token 续期/注销和正式
-> 连接已完成本地实现。阶段 C 的完整 10 分钟长稳测试延后至阶段 H。
+> 实施进度：阶段 A–F 已完成实现、生产部署和真机端到端验收；阶段 E 使用 Android Keystore
+> 设备密钥。阶段 G 已完成触摸鼠标控制，物理键盘、剪贴板和体验完善仍待继续。阶段 C 的完整
+> 10 分钟长稳测试延后至阶段 H。
 
 ## 1. 目标
 
@@ -36,11 +36,11 @@ Android 端业务代码使用 Kotlin。允许引入预编译 `libwebrtc.aar`；�
 | 视频解码 | 优先 Android MediaCodec 硬件解码；通过 libwebrtc decoder factory 使用 |
 | Android UI | 单 Activity 为主，传统 View；视频使用 `SurfaceViewRenderer` |
 | 状态管理 | ViewModel + `StateFlow` + 单向数据流 |
-| 首次账号绑定 | 已登录网页生成二维码，Android 扫码后绑定新 Passkey |
-| 后续登录 | Android Credential Manager 直接使用 Passkey |
-| 网页与 APK 关联 | Digital Asset Links |
+| 首次账号绑定 | 已登录网页生成二维码，Android 扫码后登记本机 Keystore 公钥 |
+| 后续登录 | 本机设备密钥签名服务端一次性 challenge |
+| 账号与设备 | 一个 `user_id` 可关联多把独立 Android 设备密钥 |
 | 本地凭据 | Android Keystore 支持的加密存储，不明文保存 refresh token |
-| 最低系统 | API 26；Passkey 功能实际要求 API 28+，低版本需给出明确提示/降级路径 |
+| 最低系统 | API 26；设备身份使用系统 Android Keystore |
 | 发布签名 | 不使用 Google Play；自行保管固定 Release keystore，直接分发签名 APK |
 
 ## 3. 当前工程与环境状态
@@ -328,7 +328,7 @@ ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
 - 截断、超长、错误版本和保留位拒绝；
 - WRMS 分片/合并输入的 frame buffer。
 
-## 8. 扫码绑定同一网页账号的 Passkey
+## 8. 扫码绑定 Android 设备密钥
 
 ### 8.1 用户目标
 
@@ -338,28 +338,29 @@ ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
 2. 网页生成 Android 绑定二维码；
 3. Android 扫码；
 4. 网页确认当前 Android 设备；
-5. Android Credential Manager 为 `remoe.oza-oza.top` 创建一枚新 Passkey；
-6. 服务端把新 Passkey 保存到当前网页账号的同一个 `user_id`；
+5. Android Keystore 在 App 沙箱内生成不可导出的 P-256 设备密钥；
+6. 服务端验证持钥签名，把设备公钥保存到当前网页账号的同一个 `user_id`；
 7. Android 同时获得自己的 native refresh session。
 
 以后：
 
-1. Android 请求 authentication options；
-2. Credential Manager 弹出 Passkey/生物识别/锁屏确认；
-3. Android 将 assertion 发给服务器；
-4. 服务端通过 credential ID 找到同一网页账号；
+1. Android 携带随机设备 ID 请求一次性 challenge；
+2. App 使用 Android Keystore 私钥签名 challenge；
+3. Android 将设备 ID 和签名发给服务器；
+4. 服务端通过设备 ID 找到公钥和同一网页账号；
 5. 服务端签发 Android access/refresh token；
 6. Android 直接进入 Host 列表，不再扫码。
 
-Passkey 可能由密码管理器同步到其他设备，不能宣传为“私钥永远锁死当前物理手机”。
-“当前 Android 客户端设备”应通过独立 native session/refresh token 记录；Passkey 负责账号身份。
+网页继续使用 WebAuthn Passkey；Android 设备密钥不参与密码管理器同步。一个账号允许登记多把
+设备密钥，每台手机/每次重新安装都是独立身份。丢失或重装只撤销对应设备及其 native sessions，
+不影响同一账号的网页 Passkey、其他手机或 Host。
 
 ### 8.2 安全绑定流程
 
 推荐状态机：
 
 ```text
-CREATED → CLAIMED → APPROVED → PASSKEY_CREATED → COMPLETED
+CREATED → CLAIMED → APPROVED → COMPLETED
                    ↘ REJECTED
 任何状态 → EXPIRED
 ```
@@ -373,10 +374,10 @@ CREATED → CLAIMED → APPROVED → PASSKEY_CREATED → COMPLETED
 5. 服务端只保存 QR token/client secret 的哈希；
 6. 网页显示请求绑定的设备名、型号和短比较码；
 7. 用户在网页明确批准；
-8. Android 持 client secret 轮询，批准后领取一次性 registration options；
-9. Android 调 Credential Manager 创建 Passkey；
-10. 服务端验证 challenge、RP ID、Android origin、UV/UP 和 credential 唯一性；
-11. Passkey 保存到绑定记录的同一 `user_id`；
+8. Android 持 client secret 轮询，批准后领取一次性设备登记 challenge；
+9. Android Keystore 生成 P-256/ES256 密钥，并对版本化登记消息签名；
+10. 服务端验证 challenge、绑定 ID、设备 ID、公钥和签名；
+11. 设备公钥保存到绑定记录的同一 `user_id`；
 12. 服务端创建 native session，返回 access/refresh token；
 13. 立即删除绑定/ceremony secret，二维码不可再次使用。
 
@@ -390,7 +391,7 @@ remoe://bind?v=1&server=https%3A%2F%2Fremoe.oza-oza.top&token=<random>
 
 - access token；
 - refresh token；
-- Passkey private key；
+- Android device private key；
 - 长期设备 token；
 - 可直接识别账号的 user ID/email；
 - 超过两分钟仍有效的 bearer credential。
@@ -406,156 +407,82 @@ GET  /api/android/bind/status                # 网页轮询 claim/完成状态
 POST /api/android/bind/approve               # 网页登录态明确批准
 POST /api/android/bind/reject                # 网页拒绝
 
-POST /api/android/passkey/register/options   # Android + client secret
-POST /api/android/passkey/register/verify    # Android credential response
+POST /api/android/device/register/options    # Android + client secret
+POST /api/android/device/register/verify     # 公钥 + 持钥签名
 
-POST /api/android/passkey/login/options      # Android 直接登录
-POST /api/android/passkey/login/verify       # 验证 assertion 并签发 token
+POST /api/android/device/login/options       # device ID，返回一次性 challenge
+POST /api/android/device/login/verify        # 验证设备签名并签发 token
 ```
 
 Android ceremony 不能依赖浏览器 Cookie。服务端应返回独立的 opaque ceremony ID/secret，
-保存 challenge、用途、绑定 user ID、过期时间和预期 origin，并在成功/失败后消费。
+保存 challenge、用途、绑定 user ID、设备 ID 和过期时间，并在任意 verify 尝试后消费。
 
 ### 8.4 与现有数据库的关系
 
-现有信令服务已经支持一个用户拥有多枚 Passkey。Android 注册成功后，继续复用现有
-passkey record 格式，把新 credential 保存到绑定网页账号的同一 `user_id`：
+新增 `android_devices` 表，每把设备密钥独立保存并关联同一 `user_id`：
 
 ```text
 Web passkey A ─┐
-Web passkey B ─┼─ same user_id
+Android key  B ─┼─ same user_id
 Android key  C ┘
 ```
 
-建议为 passkey 增加可选的人类可读标签/来源信息，例如：
+每台设备记录随机 ID、公钥、算法、名称、型号、创建/最近使用/撤销时间。`native_sessions` 通过
+`android_device_id` 关联设备；撤销设备时一并使其 refresh sessions 失效。设备名称只是显示信息，
+不能作为安全身份依据。
 
 ```text
 HONOR AAP-AN00 · Android
 ```
 
-设备名称是显示信息，不能作为安全身份依据。
+## 9. Android Keystore 设备身份
 
-## 9. Digital Asset Links 与 Android origin
+Android 客户端不使用 Credential Manager、Google Password Manager 或 Digital Asset Links。
+设备密钥使用 Android Keystore 的 `EC/secp256r1` 生成，签名算法为 `SHA256withECDSA`。私钥不可导出，
+App 仅持久化非秘密的随机设备 ID，并把 SPKI DER 公钥以 Base64URL 发送给服务端。
 
-原生 Credential Manager 为网页 RP 创建/使用 Passkey 时，Digital Asset Links 必须部署。
-
-目标文件：
-
-```text
-https://remoe.oza-oza.top/.well-known/assetlinks.json
-```
-
-响应要求：
-
-- HTTP 200；
-- `Content-Type: application/json`；
-- 不允许 301/302；
-- 公网可访问；
-- `robots.txt` 不阻止 `/.well-known/`。
-
-声明结构：
-
-```json
-[
-  {
-    "relation": [
-      "delegate_permission/common.handle_all_urls",
-      "delegate_permission/common.get_login_creds"
-    ],
-    "target": {
-      "namespace": "android_app",
-      "package_name": "top.ozaoza.remoe",
-      "sha256_cert_fingerprints": [
-        "<RELEASE_CERT_SHA256>"
-      ]
-    }
-  }
-]
-```
-
-当前本机 Debug certificate SHA-256：
+登记签名消息：
 
 ```text
-06:A5:C2:F1:63:6A:22:76:84:64:55:FB:A5:00:D6:D0:6A:41:A6:96:03:69:45:89:F4:02:31:3A:19:20:EA:DB
+remoe-android-device-register-v1
+<ceremonyId>
+<challenge>
+<bindingId>
+<deviceId>
+<publicKeyBase64Url>
 ```
 
-对应 Android WebAuthn origin：
+登录签名消息：
 
 ```text
-android:apk-key-hash:BqXC8WNqInaEZFX7pQDW0GpBppYDaUWJ9AIxOhkg6ts
-```
-
-生产服务器正式上线时必须使用 Release/Play App Signing certificate。不要把 Debug key 当作永久生产信任根。
-若需要在生产域名临时测试 Debug APK，应明确记录、限制测试周期，并在 Release 验证完成后删除 Debug 指纹。
-
-服务端应按 ceremony 类型验证 origin：
-
-- 网页 WebAuthn：`https://remoe.oza-oza.top`；
-- Android Debug：上面的 `android:apk-key-hash:...`；
-- Android Release：由 Release signing certificate 计算；
-- 未知 origin 一律拒绝；
-- 不能为了兼容而跳过 origin、RP ID、challenge 或 user verification 检查。
-
-官方参考：
-
-- <https://developer.android.com/identity/credential-manager/prerequisites>
-- <https://developer.android.com/identity/passkeys/create-passkeys>
-- <https://developers.google.com/identity/passkeys/developer-guides/server-registration>
-- <https://developers.google.com/identity/passkeys/developer-guides/server-authentication>
-
-## 10. Android Passkey 实现
-
-依赖版本在编码时查 AndroidX stable release 并固定，不使用动态版本。需要：
-
-```text
-androidx.credentials:credentials
-androidx.credentials:credentials-play-services-auth（按设备兼容需求决定）
-```
-
-注册：
-
-```text
-server registration options JSON
-→ CreatePublicKeyCredentialRequest
-→ CredentialManager.createCredential()
-→ CreatePublicKeyCredentialResponse.registrationResponseJson
-→ server register/verify
-```
-
-登录：
-
-```text
-server authentication options JSON
-→ GetPublicKeyCredentialOption
-→ CredentialManager.getCredential()
-→ PublicKeyCredential.authenticationResponseJson
-→ server login/verify
+remoe-android-device-login-v1
+<ceremonyId>
+<challenge>
+<deviceId>
 ```
 
 必须处理并向用户说明：
 
-- 用户取消；
-- 没有凭据提供程序；
-- 没有匹配 Passkey；
-- 设备无安全锁屏；
-- DAL 验证失败；
+- Keystore 不可用或密钥损坏；
+- 本地设备 ID 与 Keystore key 不一致；
 - challenge/二维码过期；
 - 网络中断；
-- Passkey 已注册；
-- 服务端 origin/RP ID 拒绝。
+- 设备 ID 冲突或已绑定其他账号；
+- 设备已被服务端撤销；
+- 签名、公钥或协议版本不匹配。
 
-## 11. Token 与本地账号状态
+## 10. Token 与本地账号状态
 
 - access token 只保存在内存，过期后用 refresh token 更新；
 - refresh token 使用 Android Keystore 支持的加密方案保存；
 - 不使用明文 SharedPreferences；
 - logout 调服务端撤销 native session，然后删除本地 token；
-- refresh 失败时回到 Passkey 登录页；
+- refresh 失败时尝试本机设备密钥登录；若设备被撤销则要求重新扫码；
 - 每台 Android 客户端有独立 refresh session，服务端记录 client name、创建时间和最近使用时间；
 - 后续网页账号页应支持查看和撤销 Android 客户端 session；
-- Passkey 删除与 native session 撤销是两个动作，不应混为一个操作。
+- 网页 Passkey 管理与 Android 设备撤销是两个动作，不应混为一个操作。
 
-## 12. 二维码扫描
+## 11. 二维码扫描
 
 本需求是“Android 扫网页二维码”，因此需要相机扫描能力。
 
@@ -576,7 +503,7 @@ server authentication options JSON
 
 生产模式建议只接受配置/allowlist 中的 `https://remoe.oza-oza.top`，开发 build 才允许自定义 origin。
 
-## 13. 输入设计
+## 12. 输入设计
 
 当前 protocol v11 `InputEvent` 使用 Windows 绝对鼠标坐标和 Windows scan code。
 
@@ -584,10 +511,9 @@ server authentication options JSON
 
 | Android 操作 | 远端行为 |
 |---|---|
-| 单指移动/点击位置 | 绝对鼠标移动 |
-| 单击 | 左键点击 |
-| 长按 | 右键点击 |
-| 按住后拖动 | 左键拖动 |
+| 单指触碰/轻点位置 | 绝对鼠标移动并左键点击 |
+| 单指按住后滑动 | 超过系统 touch slop 后左键拖动 |
+| 静止长按 | 右键点击，不额外发送左键 |
 | 双指垂直滑动 | 垂直滚轮 |
 | 双指水平滑动 | 水平滚轮 |
 | 外接鼠标按键/滚轮 | 映射对应 InputEvent |
@@ -595,6 +521,11 @@ server authentication options JSON
 
 输入 View 使用 `MotionEvent.actionMasked` 和稳定 pointer ID；必须处理 `ACTION_CANCEL`，在断开、失焦
 或 Activity pause 时释放所有按下的按钮/按键，防止远端卡键。
+
+Android 当前通过与完整视频内容等大的 `TextureView` 接收触摸，因此左右黑边不参与坐标映射；
+View 内坐标线性映射到 protocol v11 的 `0..65535` 绝对坐标。第二根手指加入后，本次手势只作为
+滚轮使用，直到所有手指抬起，避免中途退化为单击。断开、`ACTION_CANCEL` 和窗口失焦都会立即
+释放尚未抬起的左键。
 
 ### 13.1 软键盘与文本输入缺口
 
@@ -615,7 +546,7 @@ Android 触控参考：
 - <https://developer.android.com/develop/ui/views/touch-and-input/gestures/multi>
 - <https://developer.android.com/develop/ui/views/touch-and-input/input-events>
 
-## 14. 剪贴板
+## 13. 剪贴板
 
 - 首版只支持 UTF-8 文本，与现有 protocol 一致；
 - Android 读取剪贴板受系统前台/隐私限制，不能后台轮询复制 Windows 行为；
@@ -625,7 +556,7 @@ Android 触控参考：
 - 使用 sequence 防止本机与远端回环重复发送；
 - 不支持图片、文件和任意 MIME object。
 
-## 15. 诊断与可观测性
+## 14. 诊断与可观测性
 
 诊断必须从第一条真实 WebRTC 连接开始实现，而不是出现卡顿后再补。
 
@@ -657,7 +588,7 @@ Android 触控参考：
 - Debug build 可启用 libwebrtc logging；Release 默认降低详细度；
 - 日志禁止包含 access/refresh token、binding token、device secret、Passkey response 完整内容或 Host token。
 
-## 16. 已知安全问题：Host token 进入 Caddy 错误日志
+## 15. 已知安全问题：Host token 进入 Caddy 错误日志
 
 服务器现有 Host WebSocket 认证把 Host ID/token 放在 `Sec-WebSocket-Protocol`。当上游 Node
 短暂不可用时，Caddy reverse proxy 错误日志会记录完整请求头，因此 Host token 可能进入 journal。
@@ -673,9 +604,9 @@ Android 触控参考：
 
 未经明确安排不要直接旋转生产 Host token，因为旋转会导致现有 Host 断开并需要重新配对。
 
-## 17. 测试策略
+## 16. 测试策略
 
-### 17.1 JVM unit tests
+### 16.1 JVM unit tests
 
 - protocol golden bytes；
 - WRMS frame buffer 分片/合并；
@@ -686,28 +617,28 @@ Android 触控参考：
 - touch coordinate normalization；
 - stats 派生指标计算。
 
-### 17.2 信令服务测试
+### 16.2 信令服务测试
 
 - 只有已登录网页能创建绑定；
 - QR token 高熵、只保存哈希、短期过期；
 - 未批准 claim 不能获得 registration options；
 - 抢先/重复 claim 被拒绝或由网页明确看到；
 - approve/reject/expire 状态转换；
-- ceremony 与 user/binding/client secret/origin 强绑定；
-- Android Passkey 保存到正确 user ID；
-- credential ID 全局唯一；
-- Android login 找回正确账号；
+- ceremony 与 user/binding/client secret/device ID 强绑定；
+- 多把 Android 设备公钥保存到正确 user ID；
+- device ID 全局唯一；
+- Android 签名登录找回正确账号；
 - replay response/重复 verify 被拒绝；
-- 未知 APK origin、错误 RP ID、错误 challenge、UV=false 均拒绝；
+- 错误公钥、签名、challenge、device ID 和协议版本均拒绝；
 - refresh/logout/revoke 流程；
 - 并发和容量上限，定时清理过期状态。
 
-### 17.3 Android instrumentation / 真机测试
+### 16.3 Android instrumentation / 真机测试
 
 - QR 相机授权允许/拒绝/永久拒绝；
 - 扫描合法、错误、过期、钓鱼域名二维码；
-- Credential Manager 创建/取消/无 provider；
-- Passkey 后续直接登录；
+- Keystore 生成密钥、签名、密钥丢失和损坏；
+- 本机设备密钥后续直接登录；
 - 绑定后 Host 列表；
 - AV1 VideoTrack 硬解码；
 - 10/30/60 分钟播放；
@@ -717,9 +648,8 @@ Android 触控参考：
 - 断开时释放按键、Track、renderer、PeerConnection 和 EGL；
 - 日志导出不包含 secret。
 
-### 17.4 服务端部署验收
+### 16.4 服务端部署验收
 
-- `assetlinks.json`：200、JSON MIME、无 redirect；
 - `/healthz`：200；
 - 网页现有 Passkey 登录不回归；
 - Windows native device authorization 不回归；
@@ -729,7 +659,7 @@ Android 触控参考：
 - Caddy config validate；
 - 部署前后 SQLite 备份和 schema migration 可回滚。
 
-## 18. 分阶段实施计划
+## 17. 分阶段实施计划
 
 ### 阶段 A：libwebrtc 能力探针
 
@@ -769,16 +699,16 @@ Android 触控参考：
 
 验收：过期、抢扫、拒绝、重复使用均正确。
 
-### 阶段 E：Credential Manager + DAL
+### 阶段 E：Android Keystore 设备身份
 
-- 确定 Release signing strategy；
-- 部署 assetlinks；
-- Android register/login；
-- server Android origin allowlist；
-- 保存到同一 user ID；
+- Android Keystore 生成 P-256 设备密钥；
+- Android register/login challenge 签名协议；
+- 一个 user ID 关联多把独立设备公钥；
+- 设备与 native session 关联并支持独立撤销；
 - native session/token store。
 
-验收：网页扫码绑定一次，卸载前后按预期登录；Android 可直接 Passkey 登录同账号。
+验收：网页扫码绑定一次后，Android 可直接使用本机密钥登录；另一台设备可登记另一把密钥；
+卸载或清除数据后必须重新扫码，不影响账号中的其他设备。
 
 ### 阶段 F：Host 列表和正式连接
 
@@ -800,11 +730,11 @@ Android 触控参考：
 - 长稳/弱网/生命周期测试；
 - Host token 握手安全改造与轮换；
 - Release signing/Play signing；
-- 移除生产 DAL 中不需要的 Debug cert；
+- 设备撤销和 native session 联动验收；
 - R8、依赖许可证、隐私说明；
 - 灰度发布和回滚流程。
 
-## 19. 推荐的下一次开发任务
+## 18. 推荐的下一次开发任务
 
 新对话开始后，优先执行阶段 A，不要先实现扫码 UI：
 
@@ -819,13 +749,11 @@ Android 触控参考：
 原因：手机 MediaCodec 支持 AV1 不等于选定的 libwebrtc AAR 编译时启用了 AV1。这个事实必须最先
 通过运行代码验证，否则后续 VideoTrack、扫码和完整 UI 都可能建立在错误依赖上。
 
-## 20. 尚未最终决定的事项
+## 19. 尚未最终决定的事项
 
 - 最终 libwebrtc AAR 版本及供应链固定方式；
 - Release signing/Play App Signing 方案；
-- Debug APK 是否临时加入生产 DAL，或使用单独测试策略；
 - QR scanner 采用 CameraX + ML Kit 还是 ZXing；
-- Android API 26–27 的无 Passkey 降级行为；
 - 是否扩展 protocol 支持 UTF-8 text input；
 - 后台/画中画/平板/折叠屏支持范围；
 - STUN server 最终配置来源和多地址策略；

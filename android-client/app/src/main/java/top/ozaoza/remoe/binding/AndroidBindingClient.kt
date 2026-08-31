@@ -29,7 +29,7 @@ data class ActiveBinding(
     val clientSecret: String,
 )
 
-data class PasskeyOptions(val ceremonyId: String, val optionsJson: String)
+data class DeviceChallenge(val ceremonyId: String, val challenge: String)
 data class AccessGrant(val accessToken: String, val expiresIn: Int)
 data class HostSummary(val id: String, val name: String, val online: Boolean)
 
@@ -67,47 +67,59 @@ class AndroidBindingClient(private val httpClient: OkHttpClient) {
 
     fun registrationOptions(
         binding: ActiveBinding,
-        callback: (Result<PasskeyOptions>) -> Unit,
+        callback: (Result<DeviceChallenge>) -> Unit,
     ) {
         val body = JSONObject().put("bindingId", binding.bindingId)
         postJson(
-            binding.server, "api/android/passkey/register/options", body,
+            binding.server, "api/android/device/register/options", body,
             binding.clientSecret, callback,
-        ) { json -> PasskeyOptions(json.getString("ceremonyId"), json.getJSONObject("options").toString()) }
+        ) { json -> DeviceChallenge(json.getString("ceremonyId"), json.getString("challenge")) }
     }
 
     fun verifyRegistration(
         binding: ActiveBinding,
         ceremonyId: String,
-        credentialJson: String,
+        deviceId: String,
+        publicKey: String,
+        signature: String,
         callback: (Result<NativeTokens>) -> Unit,
     ) {
         val body = JSONObject()
             .put("bindingId", binding.bindingId)
             .put("ceremonyId", ceremonyId)
-            .put("credential", JSONObject(credentialJson))
+            .put("deviceId", deviceId)
+            .put("publicKey", publicKey)
+            .put("signature", signature)
         postJson(
-            binding.server, "api/android/passkey/register/verify", body,
+            binding.server, "api/android/device/register/verify", body,
             binding.clientSecret, callback, ::parseTokens,
         )
     }
 
-    fun loginOptions(callback: (Result<PasskeyOptions>) -> Unit) {
-        postJson(DEFAULT_SERVER, "api/android/passkey/login/options", JSONObject(), null, callback) {
-            PasskeyOptions(it.getString("ceremonyId"), it.getJSONObject("options").toString())
+    fun loginOptions(deviceId: String, callback: (Result<DeviceChallenge>) -> Unit) {
+        postJson(
+            DEFAULT_SERVER,
+            "api/android/device/login/options",
+            JSONObject().put("deviceId", deviceId),
+            null,
+            callback,
+        ) {
+            DeviceChallenge(it.getString("ceremonyId"), it.getString("challenge"))
         }
     }
 
     fun verifyLogin(
         ceremonyId: String,
-        credentialJson: String,
+        deviceId: String,
+        signature: String,
         callback: (Result<NativeTokens>) -> Unit,
     ) {
         val body = JSONObject()
             .put("ceremonyId", ceremonyId)
-            .put("credential", JSONObject(credentialJson))
+            .put("deviceId", deviceId)
+            .put("signature", signature)
         postJson(
-            DEFAULT_SERVER, "api/android/passkey/login/verify", body, null, callback, ::parseTokens,
+            DEFAULT_SERVER, "api/android/device/login/verify", body, null, callback, ::parseTokens,
         )
     }
 

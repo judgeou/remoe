@@ -90,12 +90,10 @@ sudo systemctl edit remoe-signaling.service
 [Service]
 Environment=REMOE_RP_ID=signal.example.com
 Environment=REMOE_ORIGIN=https://signal.example.com
-Environment=REMOE_ANDROID_ORIGINS=android:apk-key-hash:&lt;RELEASE_APK_KEY_HASH&gt;
 ```
 
-`REMOE_ANDROID_ORIGINS` 是逗号分隔的精确 WebAuthn origin 白名单。生产环境不提供默认值；
-签名证书轮换期可以同时列出旧、新两个 origin。这里填写的是证书 SHA-256 的 Base64URL（无填充）
-形式，不是冒号分隔的十六进制指纹。网页 origin 与 Android origin 分开校验。
+Android 客户端使用独立的 Android Keystore 设备密钥协议，不需要配置 APK WebAuthn origin 或
+Digital Asset Links。`REMOE_RP_ID` 和 `REMOE_ORIGIN` 仍用于网页 WebAuthn。
 
 然后启动：
 
@@ -366,12 +364,12 @@ sudo ss -lunp
 - HTTPS 证书申请失败：检查 A/AAAA 记录、TCP 80/443、安全组和主机防火墙。
 - `/healthz` 返回 502：检查 `remoe-signaling.service` 是否正在运行，以及 Node.js 是否监听 8080。
 - STUN 超时：检查 UDP 3478 的 IPv4/IPv6 云安全组、主机防火墙和 coturn 监听状态。
-- passkey 无法创建：检查网页是否为 HTTPS、`REMOE_RP_ID` 是否等于部署域名，以及
-  `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。部分 Android Credential Manager 实现会在
+- 网页 passkey 无法创建：检查网页是否为 HTTPS、`REMOE_RP_ID` 是否等于部署域名，以及
+  `REMOE_ORIGIN` 是否为包含 `https://` 的精确 origin。部分 Android 浏览器 WebAuthn 实现会在
   请求可发现凭据时返回 `NotReadableError`；网页会自动回退到不可发现的本机凭据，并长期保存公开的
   credential ID。清除站点数据或换设备后，使用最新恢复码在该设备重新注册即可。
-- Android passkey 返回 origin 未配置或被拒绝：检查 `REMOE_ANDROID_ORIGINS` 与 APK 的实际签名
-  证书，并确认 `/.well-known/assetlinks.json` 返回 200、JSON MIME 且没有重定向。
+- Android 设备密钥登录失败：确认设备已通过网页二维码批准绑定，App 本地 Keystore 密钥未因卸载
+  或清除数据而丢失，并检查服务端 challenge 是否过期或设备是否已被撤销。
 - 配对码错误：配对码十分钟失效；重新启动未配对 Host，或在已配对 Host 本机使用 `--repair`。
 - Host 显示离线：检查 Host 的 WSS 日志以及 `/host` 是否由 Caddy 反向代理。
 - DataChannel 超时：检查双方日志是否生成 `srflx` candidate；应用会从 WSS URL 自动派生同域名
@@ -381,7 +379,7 @@ sudo ss -lunp
 
 - 日常网页访问使用 WebAuthn/passkey；登录 Cookie 是只在当前浏览器会话有效的 HttpOnly、
   SameSite=Strict、Secure Cookie。credential ID 不是秘密，会长期保存在浏览器 localStorage，供
-  Android 等只能创建不可发现 WebAuthn 凭据的环境在登录时填写 `allowCredentials`。
+  网页后续登录时填写 `allowCredentials`。
 - 恢复码约有 130 bit 随机熵，服务器只保存 SHA-256 哈希；新 passkey 验证成功后在 SQLite 事务中
   消费旧码并生成新码。恢复码仍是 bearer secret，不应发送给其他人。
 - Host 长期 token 由 Windows DPAPI 保护，服务器只保存哈希。该简化模型信任服务器，未使用 TPM

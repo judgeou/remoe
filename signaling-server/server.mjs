@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { createPublicKey, verify as verifySignature } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import {
@@ -35,13 +36,6 @@ const deviceAuthorizationLifetimeMs = 10 * 60 * 1000;
 const androidBindingLifetimeMs = 2 * 60 * 1000;
 const nativeAccessLifetimeMs = 15 * 60 * 1000;
 const nativeRefreshLifetimeMs = 90 * 24 * 60 * 60 * 1000;
-const configuredAndroidOrigins = (process.env.REMOE_ANDROID_ORIGINS ?? '').split(',')
-  .map((origin) => origin.trim()).filter(Boolean);
-const androidOrigins = configuredAndroidOrigins.length
-  ? configuredAndroidOrigins
-  : process.env.NODE_ENV === 'production' ? [] : [
-      'android:apk-key-hash:BqXC8WNqInaEZFX7pQDW0GpBppYDaUWJ9AIxOhkg6ts',
-    ];
 const sessionPattern = /^[A-Za-z0-9_-]{8,64}$/;
 const idPattern = /^[A-Za-z0-9_-]{16,64}$/;
 const sessions = new Map();
@@ -155,11 +149,11 @@ function issueNativeAccess(userId, refreshHash) {
   return { accessToken, expiresIn: Math.floor(nativeAccessLifetimeMs / 1000) };
 }
 
-function issueNativeSession(userId, clientNameValue) {
+function issueNativeSession(userId, clientNameValue, androidDeviceId = null) {
   const refreshToken = randomToken();
   const refreshHash = tokenHash(refreshToken);
   store.createNativeSession(
-    refreshHash, userId, clientNameValue, Date.now() + nativeRefreshLifetimeMs);
+    refreshHash, userId, clientNameValue, Date.now() + nativeRefreshLifetimeMs, androidDeviceId);
   return { refreshToken, ...issueNativeAccess(userId, refreshHash) };
 }
 
@@ -186,12 +180,6 @@ function takeAndroidCeremony(value, expectedType) {
   return ceremony;
 }
 
-function requireAndroidOrigins() {
-  if (!androidOrigins.length) {
-    throw Object.assign(new Error('Android passkey origin is not configured'), { status: 503 });
-  }
-}
-
 function normalizeDeviceCode(value) {
   const normalized = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   return normalized.length === 8 ? `${normalized.slice(0, 4)}-${normalized.slice(4)}` : null;
@@ -205,6 +193,42 @@ function clientName(value) {
 function deviceLabel(value, fallback) {
   const normalized = String(value ?? '').trim().replace(/[\u0000-\u001f\u007f]/g, '');
   return normalized.slice(0, 80) || fallback;
+}
+
+function androidDeviceMessage(type, ...fields) {
+  return Buffer.from([`remoe-android-device-${type}-v1`, ...fields].join('\n'), 'utf8');
+}
+
+function androidPublicKey(value) {
+  const encoded = String(value ?? '');
+  if (!/^[A-Za-z0-9_-]{80,1024}$/.test(encoded)) {
+    throw Object.assign(new Error('Android device public key is invalid'), { status: 400 });
+  }
+  try {
+    const der = Buffer.from(encoded, 'base64url');
+    const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') {
+      throw new Error('Unsupported key');
+    }
+    return { der, key };
+  } catch {
+    throw Object.assign(new Error('Android device public key is invalid'), { status: 400 });
+  }
+}
+
+function validDeviceId(value) {
+  const id = String(value ?? '');
+  return idPattern.test(id) ? id : null;
+}
+
+function validDeviceSignature(value) {
+  const encoded = String(value ?? '');
+  if (!/^[A-Za-z0-9_-]{8,512}$/.test(encoded)) return null;
+  try {
+    return Buffer.from(encoded, 'base64url');
+  } catch {
+    return null;
+  }
 }
 
 function publicAndroidBinding(binding) {
@@ -319,8 +343,7 @@ function localCredentialIds(body) {
 }
 
 async function handleApi(request, response, url) {
-  if (request.method === 'POST' && url.pathname === '/api/android/passkey/register/options') {
-    requireAndroidOrigins();
+  if (request.method === 'POST' && url.pathname === '/api/android/device/register/options') {
     const body = await readJson(request);
     const bindingId = String(body.bindingId ?? '');
     const clientSecret = bearerToken(request);
@@ -330,40 +353,42 @@ async function handleApi(request, response, url) {
     if (!binding || binding.state !== 'APPROVED') {
       throw Object.assign(new Error('Approved Android binding required'), { status: 403 });
     }
-    const options = await createRegistrationOptions(
-      binding.user_id, store.passkeysForUser(binding.user_id), false, 'required');
+    const challenge = randomToken();
     const ceremonyId = beginAndroidCeremony({
-      type: 'register', bindingId, userId: binding.user_id,
-      clientSecretHash: tokenHash(clientSecret), challenge: options.challenge,
+      type: 'device-register', bindingId, userId: binding.user_id,
+      clientSecretHash: tokenHash(clientSecret), challenge,
     });
-    return json(response, 200, { ceremonyId, options });
+    return json(response, 200, { ceremonyId, challenge });
   }
 
-  if (request.method === 'POST' && url.pathname === '/api/android/passkey/register/verify') {
-    requireAndroidOrigins();
+  if (request.method === 'POST' && url.pathname === '/api/android/device/register/verify') {
     const body = await readJson(request);
-    const ceremony = takeAndroidCeremony(body.ceremonyId, 'register');
+    const ceremonyId = String(body.ceremonyId ?? '');
+    const ceremony = takeAndroidCeremony(ceremonyId, 'device-register');
     const clientSecret = bearerToken(request);
     if (!clientSecret || !hashesEqual(ceremony.clientSecretHash, tokenHash(clientSecret)) ||
         body.bindingId !== ceremony.bindingId) {
       throw Object.assign(new Error('Android binding authentication changed'), { status: 403 });
     }
-    const verification = await verifyRegistrationResponse({
-      response: body.credential,
-      expectedChallenge: ceremony.challenge,
-      expectedOrigin: androidOrigins,
-      expectedRPID: rpId,
-      requireUserVerification: true,
-    });
-    if (!verification.verified || !verification.registrationInfo) {
-      throw Object.assign(new Error('Passkey registration failed'), { status: 400 });
+    const deviceId = validDeviceId(body.deviceId);
+    const publicKeyEncoded = String(body.publicKey ?? '');
+    const publicKey = androidPublicKey(publicKeyEncoded);
+    const signature = validDeviceSignature(body.signature);
+    if (!deviceId || !signature || !verifySignature(
+      'sha256',
+      androidDeviceMessage(
+        'register', ceremonyId, ceremony.challenge, ceremony.bindingId,
+        deviceId, publicKeyEncoded,
+      ),
+      publicKey.key,
+      signature,
+    )) {
+      throw Object.assign(new Error('Android device key verification failed'), { status: 400 });
     }
-    const record = passkeyRecord(
-      ceremony.userId, verification.registrationInfo, body.credential);
     const refreshToken = randomToken();
     const refreshHash = tokenHash(refreshToken);
-    const binding = store.completeAndroidRegistration(
-      ceremony.bindingId, ceremony.clientSecretHash, record, refreshHash,
+    const binding = store.completeAndroidDeviceRegistration(
+      ceremony.bindingId, ceremony.clientSecretHash, deviceId, publicKey.der, refreshHash,
       Date.now() + nativeRefreshLifetimeMs,
     );
     if (!binding) {
@@ -376,42 +401,40 @@ async function handleApi(request, response, url) {
     });
   }
 
-  if (request.method === 'POST' && url.pathname === '/api/android/passkey/login/options') {
-    requireAndroidOrigins();
-    const options = await generateAuthenticationOptions({
-      rpID: rpId,
-      userVerification: 'required',
-      allowCredentials: [],
-    });
+  if (request.method === 'POST' && url.pathname === '/api/android/device/login/options') {
+    const body = await readJson(request);
+    const deviceId = validDeviceId(body.deviceId);
+    const device = deviceId ? store.androidDeviceById(deviceId) : null;
+    if (!device) throw Object.assign(new Error('Android device is not registered'), { status: 400 });
+    const challenge = randomToken();
     return json(response, 200, {
-      ceremonyId: beginAndroidCeremony({ type: 'login', challenge: options.challenge }),
-      options,
+      ceremonyId: beginAndroidCeremony({
+        type: 'device-login', challenge, deviceId, userId: device.user_id,
+      }),
+      challenge,
     });
   }
 
-  if (request.method === 'POST' && url.pathname === '/api/android/passkey/login/verify') {
-    requireAndroidOrigins();
+  if (request.method === 'POST' && url.pathname === '/api/android/device/login/verify') {
     const body = await readJson(request);
-    const ceremony = takeAndroidCeremony(body.ceremonyId, 'login');
-    const credential = body.credential ?? {};
-    const row = store.passkeyById(credential.id);
-    if (!row) throw Object.assign(new Error('Passkey is not registered'), { status: 400 });
-    const verification = await verifyAuthenticationResponse({
-      response: credential,
-      expectedChallenge: ceremony.challenge,
-      expectedOrigin: androidOrigins,
-      expectedRPID: rpId,
-      credential: passkeyForVerification(row),
-      requireUserVerification: true,
-    });
-    if (!verification.verified) {
-      throw Object.assign(new Error('Passkey verification failed'), { status: 400 });
+    const ceremonyId = String(body.ceremonyId ?? '');
+    const ceremony = takeAndroidCeremony(ceremonyId, 'device-login');
+    const deviceId = validDeviceId(body.deviceId);
+    const device = deviceId ? store.androidDeviceById(deviceId) : null;
+    const signature = validDeviceSignature(body.signature);
+    if (!device || device.id !== ceremony.deviceId || device.user_id !== ceremony.userId ||
+        !signature || !verifySignature(
+          'sha256',
+          androidDeviceMessage('login', ceremonyId, ceremony.challenge, device.id),
+          createPublicKey({ key: device.public_key, format: 'der', type: 'spki' }),
+          signature,
+        )) {
+      throw Object.assign(new Error('Android device key verification failed'), { status: 400 });
     }
-    store.updatePasskeyUse(row.credential_id, verification.authenticationInfo.newCounter,
-                           verification.authenticationInfo.credentialBackedUp);
+    store.touchAndroidDevice(device.id);
     return json(response, 200, {
       verified: true,
-      ...issueNativeSession(row.user_id, 'Android passkey'),
+      ...issueNativeSession(device.user_id, device.device_name, device.id),
     });
   }
 

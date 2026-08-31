@@ -17,6 +17,10 @@
 		reverse_proxy 127.0.0.1:8080
 	}
 
+	handle /.well-known/assetlinks.json {
+		respond 404
+	}
+
 	handle {
 		root * /opt/remoe/web-client/current
 		try_files {path} /index.html

@@ -104,6 +104,31 @@ export function openDatabase(filename) {
       database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)').run(Date.now());
     })();
   }
+  if (version < 4) {
+    database.transaction(() => {
+      database.exec(`
+        CREATE TABLE android_devices (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          public_key BLOB NOT NULL,
+          algorithm TEXT NOT NULL CHECK(algorithm = 'ES256'),
+          device_name TEXT NOT NULL,
+          device_model TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_used_at INTEGER,
+          revoked_at INTEGER
+        );
+        CREATE INDEX android_devices_user_id
+          ON android_devices(user_id, created_at);
+
+        ALTER TABLE native_sessions
+          ADD COLUMN android_device_id TEXT REFERENCES android_devices(id) ON DELETE CASCADE;
+        CREATE INDEX native_sessions_android_device_id
+          ON native_sessions(android_device_id);
+      `);
+      database.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)').run(Date.now());
+    })();
+  }
   return database;
 }
 
@@ -139,13 +164,17 @@ export function createStore(database) {
     deleteSession: database.prepare('DELETE FROM web_sessions WHERE id_hash = ?'),
     deleteExpiredSessions: database.prepare('DELETE FROM web_sessions WHERE expires_at <= ?'),
     insertNativeSession: database.prepare(`
-      INSERT INTO native_sessions(refresh_hash, user_id, client_name, created_at, last_used_at, expires_at)
-      VALUES(?, ?, ?, ?, ?, ?)
+      INSERT INTO native_sessions(refresh_hash, user_id, client_name, created_at, last_used_at,
+                                  expires_at, android_device_id)
+      VALUES(?, ?, ?, ?, ?, ?, ?)
     `),
     nativeSessionByHash: database.prepare(`
       SELECT native_sessions.*, users.id AS valid_user_id
-      FROM native_sessions JOIN users ON users.id = native_sessions.user_id
+      FROM native_sessions
+      JOIN users ON users.id = native_sessions.user_id
+      LEFT JOIN android_devices ON android_devices.id = native_sessions.android_device_id
       WHERE refresh_hash = ? AND expires_at > ?
+        AND (native_sessions.android_device_id IS NULL OR android_devices.revoked_at IS NULL)
     `),
     touchNativeSession: database.prepare(`
       UPDATE native_sessions SET last_used_at = ? WHERE refresh_hash = ?
@@ -197,6 +226,24 @@ export function createStore(database) {
       UPDATE android_bindings SET state = 'COMPLETED'
       WHERE id = ? AND client_secret_hash = ? AND state = 'APPROVED' AND expires_at > ?
     `),
+    insertAndroidDevice: database.prepare(`
+      INSERT INTO android_devices(id, user_id, public_key, algorithm, device_name, device_model,
+                                  created_at)
+      VALUES(?, ?, ?, 'ES256', ?, ?, ?)
+    `),
+    androidDeviceById: database.prepare(`
+      SELECT * FROM android_devices WHERE id = ? AND revoked_at IS NULL
+    `),
+    androidDeviceByIdAny: database.prepare(`
+      SELECT * FROM android_devices WHERE id = ?
+    `),
+    updateAndroidDevice: database.prepare(`
+      UPDATE android_devices SET device_name = ?, device_model = ?
+      WHERE id = ? AND user_id = ? AND public_key = ? AND revoked_at IS NULL
+    `),
+    touchAndroidDevice: database.prepare(`
+      UPDATE android_devices SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL
+    `),
   };
 
   return {
@@ -243,9 +290,10 @@ export function createStore(database) {
     sessionByHash: (hash) => statements.sessionByHash.get(hash, Date.now()),
     deleteSession: (hash) => statements.deleteSession.run(hash),
     deleteExpiredSessions: () => statements.deleteExpiredSessions.run(Date.now()),
-    createNativeSession(hash, userId, clientName, expiresAt) {
+    createNativeSession(hash, userId, clientName, expiresAt, androidDeviceId = null) {
       const now = Date.now();
-      statements.insertNativeSession.run(hash, userId, clientName, now, now, expiresAt);
+      statements.insertNativeSession.run(
+        hash, userId, clientName, now, now, expiresAt, androidDeviceId);
     },
     nativeSessionByHash: (hash) => statements.nativeSessionByHash.get(hash, Date.now()),
     touchNativeSession: (hash) => statements.touchNativeSession.run(Date.now(), hash),
@@ -295,16 +343,33 @@ export function createStore(database) {
           decision, now, decision, now + 5 * 60 * 1000, id, userId, now).changes === 1;
       })();
     },
-    completeAndroidRegistration(id, clientSecretHash, passkey, refreshHash, expiresAt) {
+    androidDeviceById: (id) => statements.androidDeviceById.get(id),
+    touchAndroidDevice: (id) => statements.touchAndroidDevice.run(Date.now(), id).changes === 1,
+    completeAndroidDeviceRegistration(
+      id, clientSecretHash, deviceId, publicKey, refreshHash, expiresAt,
+    ) {
       const now = Date.now();
       return database.transaction(() => {
         statements.expireAndroidBindings.run(now);
         const binding = statements.androidBindingByClient.get(id, clientSecretHash);
         if (!binding || binding.state !== 'APPROVED') return null;
-        statements.insertPasskey.run(passkey);
+        const existing = statements.androidDeviceByIdAny.get(deviceId);
+        if (existing) {
+          if (existing.revoked_at !== null || existing.user_id !== binding.user_id ||
+              !Buffer.from(existing.public_key).equals(publicKey)) return null;
+          statements.updateAndroidDevice.run(
+            binding.device_name ?? 'Android device', binding.device_model ?? 'Android',
+            deviceId, binding.user_id, publicKey,
+          );
+        } else {
+          statements.insertAndroidDevice.run(
+            deviceId, binding.user_id, publicKey,
+            binding.device_name ?? 'Android device', binding.device_model ?? 'Android', now,
+          );
+        }
         statements.insertNativeSession.run(
           refreshHash, binding.user_id, binding.device_name ?? 'Android device',
-          now, now, expiresAt,
+          now, now, expiresAt, deviceId,
         );
         if (statements.completeAndroidBinding.run(id, clientSecretHash, now).changes !== 1) {
           throw new Error('Android binding changed during registration');

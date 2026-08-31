@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -109,6 +110,69 @@ async function claimAndroidBinding(started, clientSecret, deviceName = 'Test pho
       deviceModel: 'HONOR test model',
     }),
   });
+}
+
+function createAndroidIdentity() {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  return {
+    deviceId: randomBytes(24).toString('base64url'),
+    privateKey,
+    publicKey: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
+  };
+}
+
+function androidDeviceMessage(type, ...fields) {
+  return Buffer.from([`remoe-android-device-${type}-v1`, ...fields].join('\n'), 'utf8');
+}
+
+async function approveAndroidBinding(started) {
+  return fetch(`http://127.0.0.1:${port}/api/android/bind/approve`, {
+    method: 'POST',
+    headers: {
+      cookie: `remoe_session=${testWebSession}`,
+      origin: `http://localhost:${port}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ bindingId: started.bindingId }),
+  });
+}
+
+async function finishAndroidRegistration(started, clientSecret, identity) {
+  const optionsResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/device/register/options`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${clientSecret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ bindingId: started.bindingId }),
+    });
+  assert.equal(optionsResponse.status, 200);
+  const options = await optionsResponse.json();
+  const signature = sign(
+    'sha256',
+    androidDeviceMessage(
+      'register', options.ceremonyId, options.challenge, started.bindingId,
+      identity.deviceId, identity.publicKey,
+    ),
+    identity.privateKey,
+  ).toString('base64url');
+  const verifyResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/device/register/verify`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${clientSecret}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        bindingId: started.bindingId,
+        ceremonyId: options.ceremonyId,
+        deviceId: identity.deviceId,
+        publicKey: identity.publicKey,
+        signature,
+      }),
+    });
+  return { options, verifyResponse };
 }
 
 test('relays binary messages in both directions', async () => {
@@ -434,54 +498,68 @@ test('binds Android only after the browser confirms matching device details', as
   assert.equal(webStatus.deviceModel, 'HONOR test model');
   assert.equal(webStatus.comparisonCode, claimed.comparisonCode);
 
-  const approveResponse = await fetch(
-    `http://127.0.0.1:${port}/api/android/bind/approve`, {
-      method: 'POST',
-      headers: {
-        cookie: `remoe_session=${testWebSession}`,
-        origin: `http://localhost:${port}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ bindingId: started.bindingId }),
-    });
+  const approveResponse = await approveAndroidBinding(started);
   assert.equal(approveResponse.status, 200);
   assert.equal((await approveResponse.json()).status, 'approved');
 
-  const optionsResponse = await fetch(
-    `http://127.0.0.1:${port}/api/android/passkey/register/options`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${clientSecret}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({ bindingId: started.bindingId }),
-    });
-  assert.equal(optionsResponse.status, 200);
-  const registration = await optionsResponse.json();
-  assert.ok(registration.ceremonyId.length >= 32);
-  assert.equal(registration.options.rp.id, 'localhost');
-  assert.equal(registration.options.authenticatorSelection.residentKey, 'required');
+  const identity = createAndroidIdentity();
+  const registration = await finishAndroidRegistration(started, clientSecret, identity);
+  assert.ok(registration.options.ceremonyId.length >= 32);
+  assert.ok(registration.options.challenge.length >= 32);
+  assert.equal(registration.verifyResponse.status, 200);
+  const tokens = await registration.verifyResponse.json();
+  assert.ok(tokens.refreshToken.length >= 32);
 
   const androidStatusResponse = await fetch(
     `http://127.0.0.1:${port}/api/android/bind/status?id=${started.bindingId}`, {
       headers: { authorization: `Bearer ${clientSecret}` },
     });
   assert.equal(androidStatusResponse.status, 200);
-  assert.equal((await androidStatusResponse.json()).status, 'approved');
+  assert.equal((await androidStatusResponse.json()).status, 'completed');
 });
 
-test('issues discoverable Android passkey login options without a browser cookie', async () => {
-  const response = await fetch(`http://127.0.0.1:${port}/api/android/passkey/login/options`, {
+test('allows multiple device keys for one account and logs in by signed challenge', async () => {
+  const started = await startAndroidBinding();
+  const clientSecret = 'second_device_secret_abcdefghijklmnopqrstuvwxyz123456';
+  assert.equal((await claimAndroidBinding(started, clientSecret, 'Second phone')).status, 200);
+  assert.equal((await approveAndroidBinding(started)).status, 200);
+  const identity = createAndroidIdentity();
+  const registration = await finishAndroidRegistration(started, clientSecret, identity);
+  assert.equal(registration.verifyResponse.status, 200);
+
+  const database = openDatabase(databasePath);
+  const devices = database.prepare(
+    'SELECT * FROM android_devices WHERE user_id = ? ORDER BY created_at').all(testUserId);
+  database.close();
+  assert.equal(devices.length, 2);
+  assert.notEqual(devices[0].id, devices[1].id);
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/android/device/login/options`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify({ deviceId: identity.deviceId }),
   });
   assert.equal(response.status, 200);
   const login = await response.json();
   assert.ok(login.ceremonyId.length >= 32);
-  assert.equal(login.options.rpId, 'localhost');
-  assert.equal(login.options.userVerification, 'required');
-  assert.deepEqual(login.options.allowCredentials, []);
+  assert.ok(login.challenge.length >= 32);
+  const signature = sign(
+    'sha256',
+    androidDeviceMessage('login', login.ceremonyId, login.challenge, identity.deviceId),
+    identity.privateKey,
+  ).toString('base64url');
+  const verifyResponse = await fetch(
+    `http://127.0.0.1:${port}/api/android/device/login/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ceremonyId: login.ceremonyId,
+        deviceId: identity.deviceId,
+        signature,
+      }),
+    });
+  assert.equal(verifyResponse.status, 200);
+  assert.ok((await verifyResponse.json()).refreshToken.length >= 32);
 });
 
 test('allows only one Android claimant and rejects QR reuse', async () => {
