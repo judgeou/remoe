@@ -1,15 +1,17 @@
 package top.ozaoza.remoe.input
 
+import kotlin.math.abs
 import kotlin.math.hypot
 import top.ozaoza.remoe.protocol.InputType
 import top.ozaoza.remoe.protocol.Protocol
 import top.ozaoza.remoe.protocol.RemoteInputEvent
 
-/** Converts stable Android pointer IDs into protocol-v11 absolute mouse events. */
+/** Converts Android touch gestures into the Web client's trackpad-style pointer controls. */
 class TouchGestureEngine(
     private val touchSlopPx: Float,
     private val emit: (RemoteInputEvent) -> Boolean,
-    private val absoluteCoordinates: (Point) -> Pair<Int, Int>?,
+    private val relativeCoordinates: (delta: Point, currentX: Int, currentY: Int) -> Pair<Int, Int>?,
+    private val onPointerMoved: (x: Int, y: Int) -> Unit = { _, _ -> },
     private val panViewport: (deltaX: Float, deltaY: Float) -> Boolean = { _, _ -> false },
     private val zoomViewport: (
         scaleFactor: Float,
@@ -17,16 +19,24 @@ class TouchGestureEngine(
         focusDelta: Point,
     ) -> Unit = { _, _, _ -> },
     private val scrollScale: Float = 3f,
+    private val tapDistancePx: Float = 18f,
+    private val doubleTapDistancePx: Float = 28f,
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     data class Point(val x: Float, val y: Float)
 
-    private enum class Mode { IDLE, SINGLE, DRAG, LONG_PRESS, MULTI }
+    private data class Tap(val timeMs: Long, val point: Point)
+    private enum class Mode { IDLE, SINGLE, DRAG, MULTI }
     private enum class MultiMode { PAN, PINCH }
 
     private val pointers = mutableMapOf<Int, Point>()
     private var mode = Mode.IDLE
     private var primaryPointerId = -1
+    private var startedAtMs = 0L
     private var start = Point(0f, 0f)
+    private var gestureDistance = 0f
+    private var maximumPointers = 0
+    private var lastTap: Tap? = null
     private var leftPressed = false
     private var multiMode: MultiMode? = null
     private var multiStartCenter: Point? = null
@@ -35,21 +45,34 @@ class TouchGestureEngine(
     private var lastSpread = 0f
     private var verticalWheelRemainder = 0f
     private var horizontalWheelRemainder = 0f
-    private var lastMouseX = -1
-    private var lastMouseY = -1
+    private var mouseX = 32_768
+    private var mouseY = 32_768
 
     init {
         require(touchSlopPx >= 0f)
         require(scrollScale > 0f)
+        require(tapDistancePx > 0f)
+        require(doubleTapDistancePx > 0f)
     }
 
     fun down(pointerId: Int, point: Point) {
-        cancel()
+        releaseLeft()
+        resetGesture()
         pointers[pointerId] = point
         primaryPointerId = pointerId
+        startedAtMs = clockMs()
         start = point
-        mode = Mode.SINGLE
-        moveAbsolute(point)
+        maximumPointers = 1
+        val previousTap = lastTap
+        if (previousTap != null && startedAtMs - previousTap.timeMs in 0 until DOUBLE_TAP_TIMEOUT_MS &&
+            distance(previousTap.point, point) < doubleTapDistancePx
+        ) {
+            pressLeft()
+            mode = Mode.DRAG
+            lastTap = null
+        } else {
+            mode = Mode.SINGLE
+        }
     }
 
     fun pointerDown(activePointers: Map<Int, Point>) {
@@ -57,7 +80,9 @@ class TouchGestureEngine(
         pointers.putAll(activePointers)
         if (pointers.size < 2) return
         releaseLeft()
+        lastTap = null
         mode = Mode.MULTI
+        maximumPointers = maxOf(maximumPointers, 2)
         multiMode = null
         multiStartCenter = center(pointers.values)
         lastCenter = multiStartCenter
@@ -69,8 +94,13 @@ class TouchGestureEngine(
 
     fun move(activePointers: Map<Int, Point>) {
         if (mode == Mode.IDLE) return
+        val previousPointers = pointers.toMap()
+        gestureDistance += activePointers.entries.sumOf { (id, point) ->
+            previousPointers[id]?.let { distance(it, point).toDouble() } ?: 0.0
+        }.toFloat()
         pointers.clear()
         pointers.putAll(activePointers)
+
         if (mode == Mode.MULTI) {
             if (pointers.size < 2) return
             val center = center(pointers.values)
@@ -81,7 +111,7 @@ class TouchGestureEngine(
             if (multiMode == null) {
                 val initialCenter = multiStartCenter ?: center
                 val panDistance = distance(initialCenter, center)
-                val pinchDistance = kotlin.math.abs(spread - startSpread)
+                val pinchDistance = abs(spread - startSpread)
                 if (maxOf(panDistance, pinchDistance) >= touchSlopPx) {
                     multiMode = if (pinchDistance > panDistance) MultiMode.PINCH else MultiMode.PAN
                     delta = Point(center.x - initialCenter.x, center.y - initialCenter.y)
@@ -108,51 +138,61 @@ class TouchGestureEngine(
         }
 
         val point = pointers[primaryPointerId] ?: return
-        if (mode == Mode.SINGLE && distance(start, point) > touchSlopPx) {
-            pressLeft()
-            mode = Mode.DRAG
-        }
-        moveAbsolute(point)
+        val previous = previousPointers[primaryPointerId] ?: point
+        moveRelative(Point(point.x - previous.x, point.y - previous.y))
     }
 
     fun pointerUp(pointerId: Int, remainingPointers: Map<Int, Point>) {
         pointers.remove(pointerId)
         pointers.clear()
         pointers.putAll(remainingPointers)
-        if (mode != Mode.MULTI) return
-        if (pointers.isEmpty()) resetGesture()
-        else lastCenter = center(pointers.values)
+        if (mode == Mode.MULTI && pointers.isNotEmpty()) lastCenter = center(pointers.values)
     }
 
     fun up(pointerId: Int, point: Point) {
         if (pointerId != primaryPointerId && mode != Mode.MULTI) return
+        val now = clockMs()
+        val isTap = now - startedAtMs in 0 until TAP_TIMEOUT_MS &&
+            gestureDistance < tapDistancePx
         when (mode) {
-            Mode.SINGLE -> {
-                moveAbsolute(point)
+            Mode.SINGLE -> if (isTap) {
                 click(InputType.MOUSE_LEFT)
+                lastTap = Tap(now, start)
+            } else {
+                lastTap = null
             }
             Mode.DRAG -> {
-                moveAbsolute(point)
                 releaseLeft()
+                lastTap = null
             }
-            Mode.LONG_PRESS -> moveAbsolute(point)
-            Mode.MULTI, Mode.IDLE -> Unit
+            Mode.MULTI -> {
+                if (isTap && maximumPointers == 2 && multiMode == null) {
+                    click(InputType.MOUSE_RIGHT)
+                }
+                lastTap = null
+            }
+            Mode.IDLE -> Unit
         }
         resetGesture()
     }
 
-    fun longPress(pointerId: Int): Boolean {
-        if (mode != Mode.SINGLE || pointerId != primaryPointerId || pointers.size != 1) return false
-        val point = pointers[pointerId] ?: return false
-        if (distance(start, point) > touchSlopPx) return false
-        click(InputType.MOUSE_RIGHT)
-        mode = Mode.LONG_PRESS
-        return true
-    }
-
     fun cancel() {
         releaseLeft()
+        lastTap = null
         resetGesture()
+    }
+
+    fun resetPointer() {
+        mouseX = 32_768
+        mouseY = 32_768
+        onPointerMoved(mouseX, mouseY)
+    }
+
+    fun refreshPointer() = onPointerMoved(mouseX, mouseY)
+
+    fun syncPointer() {
+        emit(RemoteInputEvent(InputType.MOUSE_MOVE, value1 = mouseX, value2 = mouseY))
+        onPointerMoved(mouseX, mouseY)
     }
 
     private fun pressLeft() {
@@ -172,12 +212,14 @@ class TouchGestureEngine(
         emit(RemoteInputEvent(type, flags = Protocol.INPUT_FLAG_RELEASE))
     }
 
-    private fun moveAbsolute(point: Point) {
-        val (x, y) = absoluteCoordinates(point) ?: return
-        if (x == lastMouseX && y == lastMouseY) return
-        lastMouseX = x
-        lastMouseY = y
+    private fun moveRelative(delta: Point) {
+        if (delta.x == 0f && delta.y == 0f) return
+        val (x, y) = relativeCoordinates(delta, mouseX, mouseY) ?: return
+        if (x == mouseX && y == mouseY) return
+        mouseX = x
+        mouseY = y
         emit(RemoteInputEvent(InputType.MOUSE_MOVE, value1 = x, value2 = y))
+        onPointerMoved(x, y)
     }
 
     private fun sendWheel(type: InputType, accumulated: Float): Float {
@@ -192,6 +234,9 @@ class TouchGestureEngine(
         pointers.clear()
         mode = Mode.IDLE
         primaryPointerId = -1
+        startedAtMs = 0L
+        gestureDistance = 0f
+        maximumPointers = 0
         multiMode = null
         multiStartCenter = null
         lastCenter = null
@@ -206,11 +251,15 @@ class TouchGestureEngine(
         points.sumOf { it.y.toDouble() }.toFloat() / points.size,
     )
 
-    private fun distance(left: Point, right: Point): Float =
-        hypot(right.x - left.x, right.y - left.y)
+    private fun distance(left: Point, right: Point): Float = hypot(right.x - left.x, right.y - left.y)
 
     private fun spread(points: Collection<Point>): Float {
         val values = points.take(2)
         return if (values.size < 2) 0f else distance(values[0], values[1])
+    }
+
+    private companion object {
+        const val TAP_TIMEOUT_MS = 500L
+        const val DOUBLE_TAP_TIMEOUT_MS = 350L
     }
 }

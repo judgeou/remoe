@@ -1,7 +1,5 @@
 package top.ozaoza.remoe.input
 
-import android.os.Handler
-import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -9,28 +7,31 @@ import top.ozaoza.remoe.protocol.RemoteInputEvent
 
 class RemoteTouchController(
     private val view: View,
-    contentView: View,
+    private val contentView: View,
     send: (RemoteInputEvent) -> Boolean,
+    private val onPointerMoved: (TouchGestureEngine.Point) -> Unit = {},
 ) : View.OnTouchListener {
-    private val handler = Handler(Looper.getMainLooper())
     private val viewport = RemoteViewportController(view, contentView)
     private val engine = TouchGestureEngine(
-        ViewConfiguration.get(view.context).scaledTouchSlop.toFloat(),
-        send,
-        viewport::remoteCoordinates,
-        viewport::panBy,
-        viewport::zoomBy,
+        touchSlopPx = ViewConfiguration.get(view.context).scaledTouchSlop.toFloat(),
+        emit = send,
+        relativeCoordinates = viewport::moveRemotePointer,
+        onPointerMoved = ::positionPointer,
+        panViewport = ::panViewport,
+        zoomViewport = ::zoomViewport,
+        tapDistancePx = 18f * view.resources.displayMetrics.density,
+        doubleTapDistancePx = 28f * view.resources.displayMetrics.density,
     )
-    private var longPressPointerId = MotionEvent.INVALID_POINTER_ID
     private var gestureAccepted = false
-    private val longPress = Runnable {
-        val pointerId = longPressPointerId
-        if (pointerId != MotionEvent.INVALID_POINTER_ID) engine.longPress(pointerId)
+    private val layoutChangeListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        engine.refreshPointer()
     }
 
     init {
         view.isClickable = true
         view.setOnTouchListener(this)
+        view.addOnLayoutChangeListener(layoutChangeListener)
+        contentView.addOnLayoutChangeListener(layoutChangeListener)
     }
 
     override fun onTouch(touchedView: View, event: MotionEvent): Boolean {
@@ -45,22 +46,18 @@ class RemoteTouchController(
                 }
                 gestureAccepted = true
                 engine.down(pointerId, point)
-                scheduleLongPress(pointerId)
             }
             else -> if (!gestureAccepted) return false
         }
         when (event.actionMasked) {
             MotionEvent.ACTION_POINTER_DOWN -> {
-                clearLongPress()
                 engine.pointerDown(event.points())
             }
             MotionEvent.ACTION_MOVE -> engine.move(event.points())
             MotionEvent.ACTION_POINTER_UP -> {
-                clearLongPress()
                 engine.pointerUp(event.getPointerId(event.actionIndex), event.points(event.actionIndex))
             }
             MotionEvent.ACTION_UP -> {
-                clearLongPress()
                 val index = event.actionIndex
                 engine.up(
                     event.getPointerId(index),
@@ -76,27 +73,42 @@ class RemoteTouchController(
     }
 
     fun cancel() {
-        clearLongPress()
         engine.cancel()
         gestureAccepted = false
     }
 
-    fun resetViewport() = viewport.reset()
+    fun resetViewport() {
+        viewport.reset()
+        engine.resetPointer()
+    }
+
+    fun refreshPointerPosition() = engine.refreshPointer()
+
+    fun syncPointerPosition() = engine.syncPointer()
 
     fun dispose() {
         cancel()
         view.setOnTouchListener(null)
+        view.removeOnLayoutChangeListener(layoutChangeListener)
+        contentView.removeOnLayoutChangeListener(layoutChangeListener)
     }
 
-    private fun scheduleLongPress(pointerId: Int) {
-        clearLongPress()
-        longPressPointerId = pointerId
-        handler.postDelayed(longPress, ViewConfiguration.getLongPressTimeout().toLong())
+    private fun positionPointer(remoteX: Int, remoteY: Int) {
+        viewport.viewCoordinates(remoteX, remoteY)?.let(onPointerMoved)
     }
 
-    private fun clearLongPress() {
-        handler.removeCallbacks(longPress)
-        longPressPointerId = MotionEvent.INVALID_POINTER_ID
+    private fun panViewport(deltaX: Float, deltaY: Float): Boolean =
+        viewport.panBy(deltaX, deltaY).also { consumed ->
+            if (consumed) engine.refreshPointer()
+        }
+
+    private fun zoomViewport(
+        scale: Float,
+        focus: TouchGestureEngine.Point,
+        delta: TouchGestureEngine.Point,
+    ) {
+        viewport.zoomBy(scale, focus, delta)
+        engine.refreshPointer()
     }
 
     private fun MotionEvent.point(index: Int) = TouchGestureEngine.Point(getX(index), getY(index))

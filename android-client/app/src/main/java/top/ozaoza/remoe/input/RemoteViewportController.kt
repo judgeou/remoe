@@ -49,6 +49,35 @@ class RemoteViewportController(
         return normalize(mapped.x, contentView.width) to normalize(mapped.y, contentView.height)
     }
 
+    fun moveRemotePointer(
+        delta: TouchGestureEngine.Point,
+        currentX: Int,
+        currentY: Int,
+    ): Pair<Int, Int>? {
+        val displayedWidth = contentView.width * transform.scale
+        val displayedHeight = contentView.height * transform.scale
+        if (displayedWidth <= 1f || displayedHeight <= 1f) return null
+        return (
+            currentX + delta.x * 65_535f / displayedWidth
+            ).toInt().coerceIn(0, 65_535) to (
+            currentY + delta.y * 65_535f / displayedHeight
+            ).toInt().coerceIn(0, 65_535)
+    }
+
+    fun viewCoordinates(remoteX: Int, remoteY: Int): TouchGestureEngine.Point? {
+        if (contentView.width <= 1 || contentView.height <= 1 ||
+            inputView.width <= 1 || inputView.height <= 1
+        ) return null
+        val contentX = remoteX.coerceIn(0, 65_535) * (contentView.width - 1f) / 65_535f
+        val contentY = remoteY.coerceIn(0, 65_535) * (contentView.height - 1f) / 65_535f
+        return TouchGestureEngine.Point(
+            x = inputView.width / 2f +
+                (contentX - contentView.width / 2f) * transform.scale + transform.translationX,
+            y = inputView.height / 2f +
+                (contentY - contentView.height / 2f) * transform.scale + transform.translationY,
+        )
+    }
+
     fun reset() {
         transform.reset()
         applyTransform()

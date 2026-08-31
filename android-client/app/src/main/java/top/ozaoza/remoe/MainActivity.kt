@@ -39,6 +39,7 @@ import top.ozaoza.remoe.binding.AndroidBindingClient
 import top.ozaoza.remoe.binding.BindInviteParser
 import top.ozaoza.remoe.binding.BindingState
 import top.ozaoza.remoe.binding.QrScannerActivity
+import top.ozaoza.remoe.input.RemoteCursorView
 import top.ozaoza.remoe.input.RemoteTouchController
 import top.ozaoza.remoe.rtc.RtcCodecProbe
 import top.ozaoza.remoe.rtc.RtcPerformanceStats
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private val probeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var app: RemoeApplication
     private lateinit var renderer: TextureViewVideoRenderer
+    private lateinit var remoteCursor: RemoteCursorView
     private lateinit var touchController: RemoteTouchController
     private lateinit var inviteInput: EditText
     private lateinit var fpsInput: EditText
@@ -73,6 +75,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private lateinit var controlPanel: ScrollView
     private lateinit var remoteStopButton: Button
     private lateinit var remoteToolbar: LinearLayout
+    private lateinit var remoteMenuButton: Button
+    private lateinit var remoteActionsPanel: LinearLayout
     private lateinit var performanceButton: Button
     private lateinit var performanceStatsView: TextView
     private lateinit var developerPanel: LinearLayout
@@ -86,6 +90,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private var remoteTrack: VideoTrack? = null
     private var selectedRateControl = VideoRateControl.CBR
     private var showPerformanceStats = false
+    private var remoteMenuExpanded = false
+    private var remoteModeActive = false
     private val firstSinkFrame = AtomicBoolean(false)
     private val remoteVideoSink = VideoSink { frame ->
         if (firstSinkFrame.compareAndSet(false, true)) {
@@ -118,9 +124,13 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             setMirror(false)
         }
         val remoteTouchLayer = View(this)
-        touchController = RemoteTouchController(remoteTouchLayer, renderer) { input ->
-            session?.sendInput(input) == true
-        }
+        remoteCursor = RemoteCursorView(this).apply { visibility = View.GONE }
+        touchController = RemoteTouchController(
+            view = remoteTouchLayer,
+            contentView = renderer,
+            send = { input -> session?.sendInput(input) == true },
+            onPointerMoved = ::positionRemoteCursor,
+        )
 
         controlPanel = createControlPanel()
         remoteStopButton = secondaryButton("断开").apply {
@@ -129,18 +139,26 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         performanceButton = secondaryButton("性能").apply {
             setOnClickListener { setPerformanceStatsVisible(!showPerformanceStats) }
         }
-        remoteToolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        remoteMenuButton = circularIconButton("⋮", "展开远程操作")
+        remoteActionsPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            addView(performanceButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                dp(48),
-            ))
-            addView(remoteStopButton, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                dp(48),
-            ).apply { marginStart = dp(6) })
         }
+        addRemoteAction(performanceButton)
+        addRemoteAction(remoteStopButton)
+        remoteToolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+            visibility = View.GONE
+            addView(remoteMenuButton, LinearLayout.LayoutParams(dp(48), dp(48)).apply {
+                gravity = Gravity.END
+            })
+            addView(remoteActionsPanel, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(6) })
+        }
+        remoteMenuButton.setOnClickListener { setRemoteMenuExpanded(!remoteMenuExpanded) }
         performanceStatsView = textView(13f, Color.WHITE).apply {
             typeface = Typeface.MONOSPACE
             setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -160,6 +178,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
             ))
+            addView(remoteCursor, FrameLayout.LayoutParams(dp(38), dp(52), Gravity.TOP or Gravity.START))
             addView(controlPanel, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -691,6 +710,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             "${header.bitrateBps / 1_000_000.0} Mbps CBR"
         }
         showStatus("${header.codec} ${header.width}×${header.height} · ${header.fpsNum} FPS · $rate")
+        touchController.syncPointerPosition()
     }
 
     override fun onPerformanceStats(stats: RtcPerformanceStats) = postUi {
@@ -718,6 +738,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) = postUi {
         app.diagnosticLog.append("renderer", "resolution=${width}x$height rotation=$rotation")
+        touchController.refreshPointerPosition()
     }
 
     override fun onStop() {
@@ -763,7 +784,10 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun enterRemoteMode() {
+        remoteModeActive = true
+        remoteCursor.visibility = View.INVISIBLE
         touchController.resetViewport()
+        setRemoteMenuExpanded(false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         controlPanel.visibility = View.GONE
         remoteToolbar.visibility = View.VISIBLE
@@ -776,7 +800,10 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun leaveRemoteMode() {
+        remoteModeActive = false
+        remoteCursor.visibility = View.GONE
         touchController.resetViewport()
+        setRemoteMenuExpanded(false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         remoteToolbar.visibility = View.GONE
         performanceStatsView.visibility = View.GONE
@@ -802,6 +829,25 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         setTextColor(Color.rgb(225, 233, 240))
         backgroundTintList = ColorStateList.valueOf(Color.rgb(37, 46, 57))
         minHeight = dp(52)
+    }
+
+    private fun circularIconButton(label: String, description: String): Button = Button(this).apply {
+        text = label
+        textSize = 28f
+        isAllCaps = false
+        contentDescription = description
+        setTextColor(Color.WHITE)
+        backgroundTintList = null
+        background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.argb(230, 28, 34, 43))
+            setStroke(dp(1), Color.rgb(78, 89, 104))
+        }
+        minWidth = 0
+        minHeight = 0
+        minimumWidth = 0
+        minimumHeight = 0
+        setPadding(0, 0, 0, 0)
     }
 
     private fun editText(hintText: String, type: Int): EditText = EditText(this).apply {
@@ -862,6 +908,20 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         session?.setPerformanceStatsEnabled(visible)
     }
 
+    private fun setRemoteMenuExpanded(expanded: Boolean) {
+        remoteMenuExpanded = expanded
+        remoteActionsPanel.visibility = if (expanded) View.VISIBLE else View.GONE
+        remoteMenuButton.text = if (expanded) "×" else "⋮"
+        remoteMenuButton.contentDescription = if (expanded) "收起远程操作" else "展开远程操作"
+    }
+
+    /** Keeps every remote-session action in the expandable top-right menu. */
+    private fun addRemoteAction(button: Button) {
+        remoteActionsPanel.addView(button, LinearLayout.LayoutParams(dp(120), dp(48)).apply {
+            if (remoteActionsPanel.childCount > 0) topMargin = dp(6)
+        })
+    }
+
     private fun renderPerformanceStats(stats: RtcPerformanceStats) {
         performanceStatsView.text = String.format(
             Locale.US,
@@ -871,6 +931,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             stats.dataRateKBps,
             stats.lossEvents,
         )
+    }
+
+    private fun positionRemoteCursor(point: top.ozaoza.remoe.input.TouchGestureEngine.Point) {
+        remoteCursor.translationX = point.x - dp(3)
+        remoteCursor.translationY = point.y - dp(2)
+        if (remoteModeActive) remoteCursor.visibility = View.VISIBLE
     }
 
     private fun matchWrap(top: Int = 0): LinearLayout.LayoutParams = LinearLayout.LayoutParams(
