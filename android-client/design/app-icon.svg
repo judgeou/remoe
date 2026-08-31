@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Remoe app icon">
+  <rect width="1024" height="1024" rx="224" fill="#080B10"/>
+  <path
+    d="M332 711 228 616V294c0-38 28-66 66-66h436c38 0 66 28 66 66v322l-57 57"
+    fill="none"
+    stroke="#49DCAF"
+    stroke-linecap="square"
+    stroke-linejoin="round"
+    stroke-width="76"/>
+  <path
+    d="m446 446 38 370 85-104 76 161 85-38-85-161 142-19Z"
+    fill="#F5F8F7"
+    stroke="#080B10"
+    stroke-linejoin="round"
+    stroke-width="24"/>
+</svg>
