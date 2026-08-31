@@ -2,6 +2,7 @@
 
 #include "account_client.h"
 #include "client_identity.h"
+#include "resource.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -95,6 +96,10 @@ public:
         window_class.cbSize = sizeof(window_class);
         window_class.lpfnWndProc = window_proc;
         window_class.hInstance = GetModuleHandleW(nullptr);
+        window_class.hIcon = LoadIconW(window_class.hInstance, MAKEINTRESOURCEW(IDI_REMOE_ICON));
+        window_class.hIconSm = static_cast<HICON>(LoadImageW(
+            window_class.hInstance, MAKEINTRESOURCEW(IDI_REMOE_ICON), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
         window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         window_class.lpszClassName = L"RemoeClientLauncher";

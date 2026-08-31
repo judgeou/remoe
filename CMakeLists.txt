@@ -5,7 +5,7 @@ if(POLICY CMP0144)
     set(CMAKE_POLICY_DEFAULT_CMP0144 NEW)
 endif()
 
-project(remoe_host VERSION 0.1.0 LANGUAGES C CXX)
+project(remoe_host VERSION 0.1.0 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "remoe_host currently supports Windows only")
@@ -157,6 +157,7 @@ foreach(required_file
 endforeach()
 
 add_executable(remoe_host
+    src/remoe.rc
     src/remoe_host.manifest
     src/clipboard.cpp
     src/clipboard.h
@@ -245,6 +246,7 @@ if(REMOE_BUILD_X264_HOST)
         INTERFACE_INCLUDE_DIRECTORIES "${X264_ROOT};${X264_BUILD_ROOT}")
 
     add_executable(remoe_host_x264
+        src/remoe.rc
         src/remoe_host.manifest
         src/clipboard.cpp
         src/clipboard.h
@@ -287,6 +289,7 @@ endif()
 
 if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
     add_executable(remoe_client WIN32
+        src/remoe.rc
         src/account_client.cpp
         src/account_client.h
         src/clipboard.cpp
