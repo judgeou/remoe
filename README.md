@@ -1,19 +1,67 @@
-# remoe
+<p align="center">
+  <img src="android-client/design/app-icon.svg" width="144" height="144" alt="remoe 图标">
+</p>
 
-`remoe_host` 是 Windows 桌面视频流 host 原型：使用 Desktop Duplication API 抓取指定显示器，
-优先通过 Intel oneVPL、不可用时通过 NVIDIA NVENC 编码为低延迟 AV1，并通过 WebRTC 向一个
-client 发送码流。视频、键鼠控制和
-关键帧请求均使用 DataChannel，不需要知道或开放 host IP/端口。
+<h1 align="center">remoe</h1>
 
-`remoe_client` 使用 Intel oneVPL 和 D3D11 视频内存进行 AV1 硬件解码及显示。解码画面不会逐帧
-回读到 CPU，呈现使用垂直同步和单帧队列，以降低 Intel GPU、CPU 与显示链路的额外功耗。
+<p align="center">
+  <strong>面向自托管场景的低延迟、跨平台远程桌面系统</strong>
+</p>
 
-当前版本提供加密的画面传输、窗口内键鼠远程控制、双向纯文本剪贴板，以及基于 passkey 的账号、
-Host 配对和设备列表。音频与文件传输尚未实现。
+<p align="center">
+  Windows Host · Web Client · Android Client · Windows Native Client
+</p>
 
-另有独立的 `remoe_host_x264.exe`：面向 Microsoft Basic Render Driver、Matrox G200e 等无法可靠
-使用 Desktop Duplication/硬件视频处理的服务器，使用 GDI BitBlt 抓屏、libyuv 在 CPU 上转换和缩放，
-并由 x264 编码 H.264。这个目标不编译或链接 NVIDIA、oneVPL、D3D11 与 DXGI 代码。
+## 项目概述
+
+remoe 是一套以 WebRTC 为传输基础的远程桌面系统，面向重视低延迟、硬件加速、移动端交互与
+自主管理服务端的使用场景。系统通过 WSS 完成身份认证与连接协商；会话建立后，视频、键鼠控制和
+纯文本剪贴板直接通过 WebRTC 传输，信令服务不转发桌面画面或业务数据。
+
+Windows Host 使用 Desktop Duplication API 捕获指定显示器，优先通过 Intel oneVPL 编码低延迟 AV1，
+不可用时回退至 NVIDIA NVENC AV1。独立的兼容版本 `remoe_host_x264.exe` 使用 GDI BitBlt、libyuv
+和 x264 生成 H.264，适用于 Microsoft Basic Render Driver、Matrox G200e 等不具备可靠硬件采集或
+AV1 编码能力的环境。
+
+Web、Android 和 Windows 原生客户端共享同一连接协议。账号以 passkey 登录；Windows Host 通过
+短期配对码加入账号，Android 设备则通过二维码批准流程和 Android Keystore 中不可导出的设备密钥
+完成绑定。一个账号可以管理多台 Host 和多台客户端设备。
+
+> [!IMPORTANT]
+> 当前版本为 `0.1.0`，仍处于积极开发阶段。协议、部署方式和兼容性边界可能在正式稳定版之前调整。
+> 当前未实现音频与文件传输，并且只支持 STUN 直连，不提供 TURN 中继。
+
+## 核心能力
+
+- **低延迟视频链路**：使用标准 WebRTC VideoTrack、RTP/SRTP、NACK、PLI 和发送节奏控制，支持
+  AV1 与 H.264。
+- **硬件加速与功耗控制**：Windows AV1 路径使用 D3D11、oneVPL 或 NVENC；原生 Windows Client
+  使用 oneVPL 和 D3D11 视频内存解码、缩放及呈现，避免逐帧回读 CPU。
+- **跨平台客户端**：提供 Chromium 浏览器客户端、原生 Android 客户端和 Windows 原生客户端。
+- **远程输入与剪贴板**：支持键鼠控制、移动端触控板指针、点击/拖拽、双指滚动、缩放和平移，
+  以及双向纯文本剪贴板。
+- **账号与设备管理**：支持 passkey、Host 配对、Android 设备密钥、设备列表和一次性连接邀请。
+- **自托管服务**：提供 Node.js/SQLite 信令与账号服务，以及 Caddy、systemd 和 STUN-only coturn
+  部署配置。
+
+## 系统组成
+
+| 组件 | 位置或产物 | 职责 |
+|---|---|---|
+| Windows Host | `remoe_host.exe` | DXGI 桌面捕获，Intel/NVIDIA AV1 硬件编码，远程输入执行 |
+| 兼容 Host | `remoe_host_x264.exe` | GDI 桌面捕获与 x264 H.264 软件编码 |
+| Web Client | `web-client/` | 浏览器登录、设备管理、WebRTC 播放和远程控制 |
+| Android Client | `android-client/` | 原生设备绑定、硬件解码、触控板式远程操作 |
+| Windows Client | `remoe_client.exe` | oneVPL AV1 硬件解码与 D3D11 低开销呈现 |
+| 信令服务 | `signaling-server/` | passkey、设备状态、一次性邀请和 SDP/ICE 协商 |
+| 部署配置 | `deploy/` | Caddy、systemd 与 coturn STUN-only 生产配置 |
+
+## 文档导航
+
+- [Android 客户端说明](android-client/README.md)
+- [Android 客户端设计与阶段规划](docs/android-client-design.md)
+- [信令服务生产部署](docs/signaling-server-deployment.md)
+- [WebRTC 技术评估](docs/webrtc-evaluation.md)
 
 ## 环境要求
 
