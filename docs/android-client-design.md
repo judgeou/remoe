@@ -2,7 +2,7 @@
 
 > 状态：设计基线，2026-08-31
 > 目标读者：后续开发者与新的 Codex 对话  
-> 对应仓库：`C:\Users\judge\projects\remoe`  
+> 对应仓库：当前仓库根目录
 > Android 工程：`android-client/`
 
 > 实施进度：阶段 A–F 已完成实现、生产部署和真机端到端验收；阶段 E 使用 Android Keystore
@@ -67,7 +67,7 @@ android-client/app/src/main/java/top/ozaoza/remoe/MainActivity.kt
 已有辅助脚本：
 
 ```powershell
-cd C:\Users\judge\projects\remoe\android-client
+cd .\android-client
 .\check-device.ps1 -Install
 ```
 
@@ -76,7 +76,7 @@ cd C:\Users\judge\projects\remoe\android-client
 ### 3.2 本机 Android 环境
 
 - Android Studio 已安装；
-- Android SDK：`C:\Users\judge\AppData\Local\Android\Sdk`；
+- Android SDK：通常位于 `%LOCALAPPDATA%\Android\Sdk`；
 - 已安装 platform：API 35、36.1；
 - 已安装 build-tools：34.0.0、35.0.0、35.0.1、36.0.0；
 - ADB 35.0.2；
