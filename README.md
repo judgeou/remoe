@@ -308,13 +308,15 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 编码视频由标准 RTP/SRTP VideoTrack 承载。libdatachannel 负责 H.264/AV1 RTP 分片、Sender Report、
 NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
 
-host 在 RTP 发送链末端使用有界漏桶 pacer。CBR 会把 client 请求值作为上限，初始工作码率不超过
-10 Mbps；发送节奏默认是工作码率的 1.5 倍、每 2 ms 一批，单批最多 8 个 RTP 包。host 根据 RTCP
+host 在 RTP 发送链末端使用有界漏桶 pacer。CBR 从 client 请求值开始，并把它作为上限；发送节奏
+默认是工作码率的 1.5 倍、每 2 ms 一批，批量大小随码率和间隔计算。host 根据 RTCP
 Receiver Report、NACK、PLI、连接 RTT、发送队列延迟和本机调度迟滞做 AIMD 调节：连续 3 次干净报告
 才小幅升码率，丢包或排队则立即降码率，并在必要时请求新关键帧。调度不稳时发送间隔可放宽为
-3/5 ms；队列达到 100 ms 时跳过尚未编码的新帧，极端溢出时整批丢弃，因此不会无限积压旧画面。
+3/5 ms；高码率始终保持 2 ms，避免较长间隔形成大 UDP 突发。队列中最老数据实际等待达到 100 ms
+时跳过尚未编码的新帧，极端溢出时整批丢弃，因此不会无限积压旧画面。
 NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改变编码质量，仍使用 1.5 倍、2 ms
-的平滑 pacer，但不参与 CBR 自适应。
+的平滑 pacer，但不参与 CBR 自适应；单个大帧即使超过名义队列容量也会完整接纳，发送完成前跳过
+后续采集，避免丢帧触发 PLI/IDR 循环。
 
 ### ClientConfig（36 bytes）
 

@@ -229,6 +229,28 @@ int main() {
             return 1;
         }
 
+        // Fixed-quality screen content can produce an access unit larger than
+        // the pacer's nominal byte budget. It must be admitted as one complete
+        // frame rather than rejected as queue overflow.
+        std::vector<std::uint8_t> large_video(1024 * 1024, 0x52);
+        large_video[0] = 0x00;
+        large_video[1] = 0x00;
+        large_video[2] = 0x00;
+        large_video[3] = 0x01;
+        large_video[4] = 0x65;
+        if (!answerer.send_video_frame(large_video, 223'456)) {
+            std::cerr << "WebRTC transport rejected a large fixed-quality frame\n";
+            return 1;
+        }
+        const bool large_delivered = pump_until(
+            state, offerer, answerer, std::chrono::steady_clock::now() + 5s, [&] {
+                return state.offerer_video_frame == large_video;
+            });
+        if (!large_delivered) {
+            std::cerr << "Timed out delivering a large fixed-quality frame\n";
+            return 1;
+        }
+
         if (!offerer.request_video_keyframe()) {
             std::cerr << "Receive track rejected an RTCP PLI request\n";
             return 1;

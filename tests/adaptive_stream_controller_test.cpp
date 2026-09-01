@@ -7,39 +7,51 @@ int main() {
     try {
         remoe::AdaptiveStreamController controller(20'000'000);
         const auto initial = controller.initial_decision();
-        if (initial.media_bitrate_bps != 10'000'000 ||
-            initial.pacing_bitrate_bps != 15'000'000 ||
+        if (initial.media_bitrate_bps != 20'000'000 ||
+            initial.pacing_bitrate_bps != 30'000'000 ||
             initial.pacing_interval.count() != 2) {
-            throw std::runtime_error("unexpected conservative start decision");
-        }
-
-        for (int index = 0; index < 3; ++index) {
-            remoe::AdaptiveStreamController::NetworkFeedback clean;
-            clean.receiver_report = true;
-            controller.observe_network(clean);
-        }
-        auto increase = controller.take_decision();
-        if (!increase || increase->media_bitrate_bps != 10'500'000) {
-            throw std::runtime_error("clean reports did not increase bitrate");
+            throw std::runtime_error("controller did not honor the requested initial rate");
         }
 
         remoe::AdaptiveStreamController::NetworkFeedback severe;
         severe.loss_fraction = 0.08;
         controller.observe_network(severe);
         auto decrease = controller.take_decision();
-        if (!decrease || decrease->media_bitrate_bps >= increase->media_bitrate_bps ||
-            !decrease->force_key_frame) {
-            throw std::runtime_error("severe loss did not reduce bitrate and recover");
+        if (!decrease || decrease->media_bitrate_bps != 15'000'000 ||
+            decrease->force_key_frame) {
+            throw std::runtime_error("severe loss did not reduce bitrate without an IDR burst");
         }
 
         remoe::AdaptiveStreamController::LocalFeedback local;
         local.scheduler_lateness_ms = 4.5;
+        controller.observe_local(local);
+        auto high_rate_lateness = controller.take_decision();
+        if (high_rate_lateness && high_rate_lateness->pacing_interval.count() == 5) {
+            throw std::runtime_error("high bitrate incorrectly selected a 5 ms burst interval");
+        }
+
         local.dropped_batches = 1;
         controller.observe_local(local);
         auto overflow = controller.take_decision();
-        if (!overflow || overflow->pacing_interval.count() != 5 ||
-            !overflow->force_key_frame) {
+        if (!overflow || overflow->pacing_interval.count() > 3 || !overflow->force_key_frame) {
             throw std::runtime_error("local pacing pressure was not applied");
+        }
+
+        remoe::AdaptiveStreamController::NetworkFeedback pli;
+        pli.pli = true;
+        controller.observe_network(pli);
+        auto recovery = controller.take_decision();
+        if (!recovery || !recovery->force_key_frame) {
+            throw std::runtime_error("PLI did not request key-frame recovery");
+        }
+
+        remoe::AdaptiveStreamController low_rate_controller(6'000'000);
+        remoe::AdaptiveStreamController::LocalFeedback late_scheduler;
+        late_scheduler.scheduler_lateness_ms = 4.5;
+        low_rate_controller.observe_local(late_scheduler);
+        auto relaxed_interval = low_rate_controller.take_decision();
+        if (!relaxed_interval || relaxed_interval->pacing_interval.count() != 5) {
+            throw std::runtime_error("low bitrate did not relax an overloaded scheduler");
         }
 
         std::cout << "Adaptive stream controller test passed\n";

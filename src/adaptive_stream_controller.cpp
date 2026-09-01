@@ -7,7 +7,6 @@
 namespace remoe {
 namespace {
 
-constexpr std::uint32_t kConservativeStartBitrate = 10'000'000;
 constexpr std::uint32_t kAbsoluteMinimumBitrate = 2'000'000;
 constexpr double kPacingMultiplier = 1.5;
 
@@ -20,7 +19,7 @@ std::uint32_t scaled_bitrate(std::uint32_t bitrate, double factor) {
 AdaptiveStreamController::AdaptiveStreamController(std::uint32_t maximum_bitrate_bps)
     : maximum_bitrate_bps_(maximum_bitrate_bps),
       minimum_bitrate_bps_((std::min)(maximum_bitrate_bps, kAbsoluteMinimumBitrate)),
-      current_bitrate_bps_((std::min)(maximum_bitrate_bps, kConservativeStartBitrate)) {}
+      current_bitrate_bps_(maximum_bitrate_bps) {}
 
 AdaptiveStreamController::Decision AdaptiveStreamController::initial_decision() const {
     std::lock_guard lock(mutex_);
@@ -29,7 +28,7 @@ AdaptiveStreamController::Decision AdaptiveStreamController::initial_decision() 
     decision.pacing_bitrate_bps = static_cast<std::uint64_t>(
         static_cast<double>(current_bitrate_bps_) * kPacingMultiplier);
     decision.pacing_interval = pacing_interval_locked();
-    decision.reason = "conservative session start";
+    decision.reason = "client requested session rate";
     return decision;
 }
 
@@ -85,7 +84,7 @@ void AdaptiveStreamController::evaluate_locked(const NetworkFeedback& feedback) 
         last_decrease_ = now;
         const auto reduced = (std::max)(minimum_bitrate_bps_,
                                         scaled_bitrate(current_bitrate_bps_, 0.75));
-        publish_locked(reduced, feedback.pli || reduced < current_bitrate_bps_,
+        publish_locked(reduced, feedback.pli,
                        feedback.pli ? "receiver requested key-frame recovery"
                                     : "severe loss or pacing delay");
         return;
@@ -135,8 +134,15 @@ void AdaptiveStreamController::publish_locked(std::uint32_t bitrate_bps,
 }
 
 std::chrono::milliseconds AdaptiveStreamController::pacing_interval_locked() const {
-    if (scheduler_lateness_ms_ >= 4.0) return std::chrono::milliseconds(5);
-    if (scheduler_lateness_ms_ >= 2.0) return std::chrono::milliseconds(3);
+    // At high rates a longer interval necessarily creates a larger UDP burst.
+    // Never trade scheduler overhead for a 5 ms burst that cannot sustain the
+    // requested throughput with a small RTP batch.
+    if (scheduler_lateness_ms_ >= 4.0 && current_bitrate_bps_ <= 6'000'000u) {
+        return std::chrono::milliseconds(5);
+    }
+    if (scheduler_lateness_ms_ >= 2.0 && current_bitrate_bps_ <= 10'000'000u) {
+        return std::chrono::milliseconds(3);
+    }
     return std::chrono::milliseconds(2);
 }
 

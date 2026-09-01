@@ -101,7 +101,7 @@ target_compile_definitions(remoe_webrtc_transport PRIVATE
 target_compile_options(remoe_webrtc_transport PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
 target_link_libraries(remoe_webrtc_transport
-    PUBLIC LibDataChannel::LibDataChannelStatic bcrypt crypt32)
+    PUBLIC LibDataChannel::LibDataChannelStatic bcrypt crypt32 winmm)
 
 # The oneVPL dispatcher is shared by the host encoder and optional native client
 # decoder. If the vendored source is absent, the host remains buildable with its

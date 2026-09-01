@@ -147,8 +147,9 @@ public:
         NV_ENC_RECONFIGURE_PARAMS reconfigure{NV_ENC_RECONFIGURE_PARAMS_VER};
         reconfigure.reInitEncodeParams = initialize;
         reconfigure.reInitEncodeParams.encodeConfig = &config;
-        reconfigure.resetEncoder = 1;
-        reconfigure.forceIDR = 1;
+        // A bitrate-only update does not require an encoder reset or IDR. The
+        // NVENC low-latency sample uses the same form; forcing an IDR for every
+        // AIMD step creates a large periodic burst and visible stutter.
         if (!encoder_.Reconfigure(&reconfigure)) return false;
         bitrate_bps_ = bitrate_bps;
         return true;

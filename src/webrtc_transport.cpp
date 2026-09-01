@@ -20,6 +20,11 @@
 #include <unordered_set>
 #include <utility>
 
+#ifdef _WIN32
+#include <Windows.h>
+#include <mmsystem.h>
+#endif
+
 namespace remoe {
 namespace {
 
@@ -591,9 +596,14 @@ public:
                     const auto* report = reinterpret_cast<const rtc::RtcpRr*>(header);
                     for (int index = 0; index < header->reportCount(); ++index) {
                         if (const auto* block = report->getReportBlock(index)) {
+                            // libdatachannel 0.24.5 masks one too few bits in
+                            // getFractionLost(). The network-order field always
+                            // stores the fraction in its first wire byte.
+                            const auto* packed_loss = reinterpret_cast<const std::uint8_t*>(
+                                &block->_fractionLostAndPacketsLost);
                             feedback.loss_fraction = (std::max)(
                                 feedback.loss_fraction,
-                                static_cast<double>(block->getFractionLost()) / 256.0);
+                                static_cast<double>(packed_loss[0]) / 256.0);
                             feedback.cumulative_packets_lost = (std::max)(
                                 feedback.cumulative_packets_lost,
                                 block->getPacketsLostCount());
@@ -631,6 +641,7 @@ public:
         : bitrate_bps_(bitrate_bps), interval_(sanitize_interval(interval)),
           overflow_callback_(std::move(overflow_callback)),
           last_budget_update_(std::chrono::steady_clock::now()),
+          timer_resolution_acquired_(timeBeginPeriod(1) == TIMERR_NOERROR),
           worker_([this] { run(); }) {}
 
     ~AdaptivePacingHandler() override {
@@ -640,6 +651,7 @@ public:
         }
         changed_.notify_all();
         if (worker_.joinable()) worker_.join();
+        if (timer_resolution_acquired_) timeEndPeriod(1);
     }
 
     void outgoing(rtc::message_vector& messages,
@@ -664,7 +676,12 @@ public:
             std::lock_guard lock(mutex_);
             send_ = send;
             const std::size_t limit = queue_limit_bytes_locked();
-            if (!incoming.empty() && queued_bytes_ + incoming_bytes > limit) {
+            // A fixed-quality AV1 access unit can legitimately be larger than
+            // the nominal 200 ms queue budget. Always admit one complete frame
+            // into an empty queue; rejecting it guarantees a sequence gap and
+            // often starts a PLI/IDR feedback loop.
+            if (!incoming.empty() && !queue_.empty() &&
+                queued_bytes_ + incoming_bytes > limit) {
                 ++dropped_batches_;
                 dropped_packets_ += incoming.size();
                 overflow = true;
@@ -703,9 +720,9 @@ public:
         result.pacing_interval = interval_;
         result.queued_bytes = queued_bytes_;
         result.queued_packets = queue_.size();
-        result.queue_delay_ms = bitrate_bps_ == 0 ? 0.0 :
-            static_cast<double>(queued_bytes_) * 8'000.0 /
-                static_cast<double>(bitrate_bps_);
+        result.queue_delay_ms = queue_.empty() ? 0.0 :
+            (std::max)(0.0, std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - queue_.front().queued_at).count());
         result.scheduler_lateness_ms = scheduler_lateness_ms_;
         result.dropped_batches = dropped_batches_;
         result.dropped_packets = dropped_packets_;
@@ -730,16 +747,27 @@ private:
     }
 
     [[nodiscard]] double maximum_batch_bytes_locked() const {
-        // Eight IPv6-safe RTP packets is small enough to avoid the 20 Mbps
-        // microbursts that motivated this controller.
-        return 8.0 * 1'280.0;
+        // One interval of media plus one IPv6-safe RTP packet. This keeps the
+        // burst proportional to the selected interval instead of silently
+        // imposing a 16 Mbps ceiling when the interval is 5 ms.
+        const double interval_bytes = bytes_per_second_locked() *
+            std::chrono::duration<double>(interval_).count();
+        return (std::clamp)(interval_bytes + 1'280.0,
+                            2.0 * 1'280.0, 32.0 * 1'280.0);
+    }
+
+    [[nodiscard]] double maximum_budget_bytes_locked() const {
+        // Preserve credit across a short scheduler stall, then drain it using
+        // small catch-up batches rather than losing effective throughput.
+        return (std::max)(maximum_batch_bytes_locked() * 2.0,
+                          bytes_per_second_locked() * 0.05);
     }
 
     [[nodiscard]] std::size_t queue_limit_bytes_locked() const {
         const auto two_hundred_ms = static_cast<std::size_t>(
             bytes_per_second_locked() * 0.2);
         return (std::clamp)(two_hundred_ms,
-                            std::size_t{512 * 1024}, std::size_t{8 * 1024 * 1024});
+                            std::size_t{256 * 1024}, std::size_t{4 * 1024 * 1024});
     }
 
     void run() {
@@ -766,16 +794,16 @@ private:
             last_budget_update_ = now;
             budget_bytes_ = (std::min)(
                 budget_bytes_ + elapsed * bytes_per_second_locked(),
-                maximum_batch_bytes_locked() * 2.0);
+                maximum_budget_bytes_locked());
 
             rtc::message_vector batch;
             std::size_t batch_bytes = 0;
-            constexpr std::size_t maximum_packets = 8;
-            while (!queue_.empty() && batch.size() < maximum_packets) {
+            constexpr std::size_t maximum_packets = 32;
+            while (!queue_.empty() && batch.size() < maximum_packets &&
+                   budget_bytes_ > 0.0) {
                 const std::size_t size = queue_.front().message->size();
                 if (!batch.empty() &&
-                    (static_cast<double>(batch_bytes + size) > maximum_batch_bytes_locked() ||
-                     budget_bytes_ < static_cast<double>(size))) break;
+                    static_cast<double>(batch_bytes + size) > maximum_batch_bytes_locked()) break;
                 batch_bytes += size;
                 queued_bytes_ -= size;
                 batch.push_back(std::move(queue_.front().message));
@@ -813,6 +841,7 @@ private:
     std::uint64_t dropped_packets_ = 0;
     std::chrono::steady_clock::time_point last_budget_update_;
     bool stopping_ = false;
+    bool timer_resolution_acquired_ = false;
     std::thread worker_;
 };
 

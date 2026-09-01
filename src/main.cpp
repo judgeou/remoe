@@ -1087,14 +1087,6 @@ int run(const Options& options) {
             std::this_thread::sleep_until(next_frame);
             next_frame += frame_interval;
 
-            // Do not encode another stale desktop frame into an already late
-            // queue. The next accepted frame is an IDR so the receiver can
-            // immediately resume from the newest desktop state.
-            if (control_channel->video_pacing_statistics().queue_delay_ms >= 100.0) {
-                key_frame_requested = true;
-                continue;
-            }
-
             const DWORD current_clipboard_sequence = GetClipboardSequenceNumber();
             const DWORD previous_clipboard_sequence =
                 clipboard_sequence.exchange(current_clipboard_sequence);
@@ -1107,6 +1099,17 @@ int run(const Options& options) {
                     session_running = false;
                     break;
                 }
+            }
+
+            const auto pacing_state = control_channel->video_pacing_statistics();
+            // Fixed-quality frames have no bitrate bound and may individually
+            // exceed the nominal pacer queue. Finish the current complete frame
+            // before capturing the newest desktop state. No key frame is needed:
+            // frames skipped before encoding create no RTP or decoder gap.
+            if ((settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
+                 pacing_state.queued_packets != 0) ||
+                pacing_state.queue_delay_ms >= 100.0) {
+                continue;
             }
 #if defined(REMOE_X264_HOST)
             if (!capture.acquire(std::chrono::milliseconds(100))) continue;

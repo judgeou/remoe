@@ -10,9 +10,9 @@
 namespace remoe {
 
 // A deliberately small AIMD controller for Remoe's fixed-rate hardware
-// encoders. The client request remains the upper bound; the controller starts
-// conservatively and raises the working bitrate only after several clean RTCP
-// reports.
+// encoders. The client request is both the initial rate and upper bound; the
+// controller reduces it only after measured congestion and cautiously restores
+// it after several clean RTCP reports.
 class AdaptiveStreamController {
 public:
     struct Decision {
