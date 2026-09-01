@@ -18,7 +18,7 @@ class X264H264Encoder final : public SoftwareH264Encoder {
 public:
     X264H264Encoder(std::uint32_t width, std::uint32_t height, std::uint32_t fps,
                     std::uint32_t bitrate_bps)
-        : width_(width), height_(height) {
+        : width_(width), height_(height), fps_(fps), bitrate_bps_(bitrate_bps) {
         if (width == 0 || height == 0 || (width & 1u) != 0 || (height & 1u) != 0 ||
             fps == 0 || bitrate_bps < 1000) {
             throw std::runtime_error("invalid x264 encoder dimensions or rate");
@@ -136,6 +136,20 @@ public:
         return frames;
     }
 
+    bool reconfigure_bitrate(std::uint32_t bitrate_bps) override {
+        if (!encoder_ || bitrate_bps < 1'000'000u) return false;
+        if (bitrate_bps == bitrate_bps_) return true;
+        x264_param_t parameters{};
+        x264_encoder_parameters(encoder_, &parameters);
+        parameters.rc.i_bitrate = static_cast<int>(bitrate_bps / 1000u);
+        parameters.rc.i_vbv_max_bitrate = parameters.rc.i_bitrate;
+        parameters.rc.i_vbv_buffer_size = (std::max)(
+            parameters.rc.i_bitrate / static_cast<int>(fps_), 1);
+        if (x264_encoder_reconfig(encoder_, &parameters) < 0) return false;
+        bitrate_bps_ = bitrate_bps;
+        return true;
+    }
+
     std::uint32_t profile_level_id() const noexcept override {
         return profile_level_id_;
     }
@@ -189,6 +203,8 @@ private:
 
     std::uint32_t width_ = 0;
     std::uint32_t height_ = 0;
+    std::uint32_t fps_ = 0;
+    std::uint32_t bitrate_bps_ = 0;
     x264_t* encoder_ = nullptr;
     x264_picture_t input_{};
     bool picture_allocated_ = false;

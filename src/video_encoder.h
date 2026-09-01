@@ -24,6 +24,9 @@ public:
     virtual void discard_input() noexcept = 0;
     virtual std::vector<EncodedVideoFrame> encode(bool force_key_frame) = 0;
     virtual std::vector<EncodedVideoFrame> drain() = 0;
+    // Updates a running CBR session. Returns false for fixed-quality encoders
+    // or implementations that cannot change rate without being recreated.
+    virtual bool reconfigure_bitrate(std::uint32_t bitrate_bps) = 0;
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
 
 protected:

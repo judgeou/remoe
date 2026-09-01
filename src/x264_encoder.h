@@ -22,6 +22,7 @@ public:
         std::uint32_t source_height, std::uint32_t source_stride,
         bool force_key_frame) = 0;
     virtual std::vector<EncodedVideoFrame> drain() = 0;
+    virtual bool reconfigure_bitrate(std::uint32_t bitrate_bps) = 0;
     [[nodiscard]] virtual std::uint32_t profile_level_id() const noexcept = 0;
     [[nodiscard]] virtual std::string_view name() const noexcept = 0;
 

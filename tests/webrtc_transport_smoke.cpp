@@ -197,6 +197,16 @@ int main() {
             std::cerr << "WebRTC sender rejected one-time RTP pacing setup\n";
             return 1;
         }
+        if (!answerer.update_video_pacing(12'000'000, std::chrono::milliseconds(3))) {
+            std::cerr << "WebRTC sender rejected runtime RTP pacing update\n";
+            return 1;
+        }
+        const auto pacing = answerer.video_pacing_statistics();
+        if (pacing.pacing_bitrate_bps != 12'000'000 ||
+            pacing.pacing_interval != std::chrono::milliseconds(3)) {
+            std::cerr << "WebRTC sender did not publish updated pacing state\n";
+            return 1;
+        }
 
         constexpr std::string_view text = "remoe-webrtc-smoke";
         const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};

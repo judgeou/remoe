@@ -92,6 +92,27 @@ public:
         std::optional<IceCandidate> remote_candidate;
     };
 
+    struct VideoFeedback {
+        bool receiver_report = false;
+        // RTCP fraction lost converted from the RFC 3550 8-bit fixed point
+        // field into the range [0, 1].
+        double loss_fraction = 0.0;
+        std::uint32_t cumulative_packets_lost = 0;
+        std::uint32_t jitter = 0;
+        std::uint32_t nack_packets = 0;
+    };
+
+    struct VideoPacingStatistics {
+        std::uint64_t pacing_bitrate_bps = 0;
+        std::chrono::milliseconds pacing_interval{0};
+        std::size_t queued_bytes = 0;
+        std::size_t queued_packets = 0;
+        double queue_delay_ms = 0.0;
+        double scheduler_lateness_ms = 0.0;
+        std::uint64_t dropped_batches = 0;
+        std::uint64_t dropped_packets = 0;
+    };
+
     struct Callbacks {
         std::function<void(LocalDescription)> on_local_description;
         std::function<void(IceCandidate)> on_local_candidate;
@@ -109,6 +130,12 @@ public:
                            bool key_frame)> on_video_frame;
         // Raised for RTCP PLI/FIR feedback received by a sending track.
         std::function<void()> on_video_keyframe_requested;
+        // Receiver reports and NACK counts used by the host-side adaptive
+        // bitrate controller.
+        std::function<void(VideoFeedback)> on_video_feedback;
+        // Raised when the bounded video pacer has to reject a complete encoded
+        // frame. The sender should force the next accepted frame to be a key frame.
+        std::function<void()> on_video_pacing_overflow;
         // Low-volume transport diagnostics intended for persistent client logs.
         std::function<void(std::string)> on_diagnostic;
         std::function<void(std::string)> on_error;
@@ -140,6 +167,9 @@ public:
     // Installs the sender-side RTP pacer before the first video frame. The
     // supplied rate is the actual wire pacing rate, not the encoder target.
     [[nodiscard]] bool configure_video_pacing(std::uint64_t bitrate_bps) noexcept;
+    [[nodiscard]] bool update_video_pacing(
+        std::uint64_t bitrate_bps, std::chrono::milliseconds interval) noexcept;
+    [[nodiscard]] VideoPacingStatistics video_pacing_statistics() const noexcept;
     [[nodiscard]] bool request_video_keyframe() noexcept;
 
     void close() noexcept;

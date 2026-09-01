@@ -116,7 +116,8 @@ public:
     VplAv1Encoder(ID3D11Device* device, std::uint32_t width, std::uint32_t height,
                   std::uint32_t fps, std::uint32_t bitrate_bps,
                   protocol::VideoRateControl rate_control, std::uint32_t quality)
-        : width_(width), height_(height) {
+        : width_(width), height_(height), fps_(fps), bitrate_bps_(bitrate_bps),
+          rate_control_(rate_control) {
         loader_ = MFXLoad();
         if (!loader_) {
             throw std::runtime_error(
@@ -160,17 +161,7 @@ public:
             if (rate_control == protocol::VideoRateControl::FixedQuality) {
                 parameters_.mfx.ICQQuality = static_cast<mfxU16>(quality);
             } else {
-                const std::uint32_t target_kbps = (std::max)(1u, bitrate_bps / 1000u);
-                const std::uint32_t multiplier =
-                    (target_kbps + (std::numeric_limits<mfxU16>::max)() - 1u) /
-                    (std::numeric_limits<mfxU16>::max)();
-                parameters_.mfx.BRCParamMultiplier = static_cast<mfxU16>(multiplier);
-                parameters_.mfx.TargetKbps = static_cast<mfxU16>(
-                    (target_kbps + multiplier - 1u) / multiplier);
-                parameters_.mfx.MaxKbps = parameters_.mfx.TargetKbps;
-                parameters_.mfx.BufferSizeInKB = static_cast<mfxU16>((std::min)(
-                    65535u, (std::max)(1u, target_kbps / fps / multiplier)));
-                parameters_.mfx.InitialDelayInKB = parameters_.mfx.BufferSizeInKB;
+                apply_cbr_parameters(parameters_, bitrate_bps, fps);
             }
 
             mfxStatus status = MFXVideoENCODE_Query(session_, &parameters_, &parameters_);
@@ -304,9 +295,43 @@ public:
         return frames;
     }
 
+    bool reconfigure_bitrate(std::uint32_t bitrate_bps) override {
+        if (rate_control_ != protocol::VideoRateControl::Cbr || bitrate_bps < 1'000'000u) {
+            return false;
+        }
+        if (bitrate_bps == bitrate_bps_) return true;
+        mfxVideoParam updated = parameters_;
+        apply_cbr_parameters(updated, bitrate_bps, fps_);
+        mfxStatus status = MFXVideoENCODE_Query(session_, &updated, &updated);
+        if (status != MFX_WRN_INCOMPATIBLE_VIDEO_PARAM) {
+            check_vpl(status, "MFXVideoENCODE_Query(adaptive bitrate)");
+        }
+        check_vpl(MFXVideoENCODE_Reset(session_, &updated),
+                  "MFXVideoENCODE_Reset(adaptive bitrate)");
+        parameters_ = updated;
+        bitrate_bps_ = bitrate_bps;
+        return true;
+    }
+
     std::string_view name() const noexcept override { return name_; }
 
 private:
+    static void apply_cbr_parameters(mfxVideoParam& parameters,
+                                     std::uint32_t bitrate_bps,
+                                     std::uint32_t fps) {
+        const std::uint32_t target_kbps = (std::max)(1u, bitrate_bps / 1000u);
+        const std::uint32_t multiplier =
+            (target_kbps + (std::numeric_limits<mfxU16>::max)() - 1u) /
+            (std::numeric_limits<mfxU16>::max)();
+        parameters.mfx.BRCParamMultiplier = static_cast<mfxU16>(multiplier);
+        parameters.mfx.TargetKbps = static_cast<mfxU16>(
+            (target_kbps + multiplier - 1u) / multiplier);
+        parameters.mfx.MaxKbps = parameters.mfx.TargetKbps;
+        parameters.mfx.BufferSizeInKB = static_cast<mfxU16>((std::min)(
+            65535u, (std::max)(1u, target_kbps / fps / multiplier)));
+        parameters.mfx.InitialDelayInKB = parameters.mfx.BufferSizeInKB;
+    }
+
     void import_input_surface() {
         mfxSurfaceD3D11Tex2D external_surface{};
         external_surface.SurfaceInterface.Header.SurfaceType =
@@ -420,6 +445,9 @@ private:
 
     std::uint32_t width_;
     std::uint32_t height_;
+    std::uint32_t fps_;
+    std::uint32_t bitrate_bps_;
+    protocol::VideoRateControl rate_control_;
     mfxLoader loader_ = nullptr;
     mfxSession session_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D11Device> device_;

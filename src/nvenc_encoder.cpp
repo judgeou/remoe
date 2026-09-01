@@ -65,7 +65,8 @@ public:
     NvencAv1Encoder(ID3D11Device* device, std::uint32_t width, std::uint32_t height,
                     std::uint32_t fps, std::uint32_t bitrate_bps,
                     protocol::VideoRateControl rate_control, std::uint32_t quality)
-        : device_(device), encoder_(device, width, height, NV_ENC_BUFFER_FORMAT_ARGB, 0) {
+        : device_(device), encoder_(device, width, height, NV_ENC_BUFFER_FORMAT_ARGB, 0),
+          fps_(fps), bitrate_bps_(bitrate_bps), rate_control_(rate_control) {
         NV_ENC_INITIALIZE_PARAMS init{NV_ENC_INITIALIZE_PARAMS_VER};
         NV_ENC_CONFIG config{NV_ENC_CONFIG_VER};
         init.encodeConfig = &config;
@@ -127,11 +128,40 @@ public:
         return convert_packets(packets);
     }
 
+    bool reconfigure_bitrate(std::uint32_t bitrate_bps) override {
+        if (rate_control_ != protocol::VideoRateControl::Cbr || bitrate_bps < 1'000'000u) {
+            return false;
+        }
+        if (bitrate_bps == bitrate_bps_) return true;
+
+        NV_ENC_INITIALIZE_PARAMS initialize{NV_ENC_INITIALIZE_PARAMS_VER};
+        NV_ENC_CONFIG config{NV_ENC_CONFIG_VER};
+        initialize.encodeConfig = &config;
+        encoder_.GetInitializeParams(&initialize);
+        config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+        config.rcParams.averageBitRate = bitrate_bps;
+        config.rcParams.maxBitRate = bitrate_bps;
+        config.rcParams.vbvBufferSize = bitrate_bps / fps_;
+        config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
+
+        NV_ENC_RECONFIGURE_PARAMS reconfigure{NV_ENC_RECONFIGURE_PARAMS_VER};
+        reconfigure.reInitEncodeParams = initialize;
+        reconfigure.reInitEncodeParams.encodeConfig = &config;
+        reconfigure.resetEncoder = 1;
+        reconfigure.forceIDR = 1;
+        if (!encoder_.Reconfigure(&reconfigure)) return false;
+        bitrate_bps_ = bitrate_bps;
+        return true;
+    }
+
     std::string_view name() const noexcept override { return "NVIDIA NVENC hardware AV1"; }
 
 private:
     ID3D11Device* device_;
     NvEncoderD3D11 encoder_;
+    std::uint32_t fps_ = 0;
+    std::uint32_t bitrate_bps_ = 0;
+    protocol::VideoRateControl rate_control_ = protocol::VideoRateControl::Cbr;
 };
 
 } // namespace

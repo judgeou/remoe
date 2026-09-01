@@ -3,15 +3,19 @@
 #include <rtc/rtc.hpp>
 
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <queue>
 #include <random>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -561,6 +565,257 @@ void invoke_callback(const Callback& callback, Args&&... args) noexcept {
     }
 }
 
+class RtcpFeedbackObserver final : public rtc::MediaHandler {
+public:
+    explicit RtcpFeedbackObserver(
+        std::function<void(WebRtcTransport::VideoFeedback)> callback)
+        : callback_(std::move(callback)) {}
+
+    void incoming(rtc::message_vector& messages,
+                  const rtc::message_callback&) override {
+        for (const auto& message : messages) {
+            if (!message || message->type != rtc::Message::Control) continue;
+            WebRtcTransport::VideoFeedback feedback;
+            bool has_feedback = false;
+            std::size_t offset = 0;
+            while (offset + sizeof(rtc::RtcpHeader) <= message->size()) {
+                const auto* header = reinterpret_cast<const rtc::RtcpHeader*>(
+                    message->data() + offset);
+                const std::size_t length = header->lengthInBytes();
+                if (length < sizeof(rtc::RtcpHeader) ||
+                    offset + length > message->size()) break;
+
+                if (header->payloadType() == 201 &&
+                    length >= rtc::RtcpRr::SizeWithReportBlocks(0)) {
+                    feedback.receiver_report = true;
+                    const auto* report = reinterpret_cast<const rtc::RtcpRr*>(header);
+                    for (int index = 0; index < header->reportCount(); ++index) {
+                        if (const auto* block = report->getReportBlock(index)) {
+                            feedback.loss_fraction = (std::max)(
+                                feedback.loss_fraction,
+                                static_cast<double>(block->getFractionLost()) / 256.0);
+                            feedback.cumulative_packets_lost = (std::max)(
+                                feedback.cumulative_packets_lost,
+                                block->getPacketsLostCount());
+                            feedback.jitter = (std::max)(feedback.jitter, block->jitter());
+                            has_feedback = true;
+                        }
+                    }
+                } else if (header->payloadType() == 205 &&
+                           header->reportCount() == 1 &&
+                           length >= rtc::RtcpNack::Size(1)) {
+                    auto* nack = reinterpret_cast<rtc::RtcpNack*>(
+                        const_cast<rtc::RtcpHeader*>(header));
+                    const unsigned count = nack->getSeqNoCount();
+                    for (unsigned index = 0; index < count; ++index) {
+                        feedback.nack_packets += 1u +
+                            static_cast<std::uint32_t>(std::popcount(nack->parts[index].blp()));
+                    }
+                    has_feedback = true;
+                }
+                offset += length;
+            }
+            if (has_feedback) invoke_callback(callback_, feedback);
+        }
+    }
+
+private:
+    std::function<void(WebRtcTransport::VideoFeedback)> callback_;
+};
+
+class AdaptivePacingHandler final : public rtc::MediaHandler {
+public:
+    AdaptivePacingHandler(std::uint64_t bitrate_bps,
+                          std::chrono::milliseconds interval,
+                          std::function<void()> overflow_callback)
+        : bitrate_bps_(bitrate_bps), interval_(sanitize_interval(interval)),
+          overflow_callback_(std::move(overflow_callback)),
+          last_budget_update_(std::chrono::steady_clock::now()),
+          worker_([this] { run(); }) {}
+
+    ~AdaptivePacingHandler() override {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        changed_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void outgoing(rtc::message_vector& messages,
+                  const rtc::message_callback& send) override {
+        rtc::message_vector control;
+        std::vector<QueuedPacket> incoming;
+        std::size_t incoming_bytes = 0;
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& message : messages) {
+            if (!message) continue;
+            if (message->type == rtc::Message::Control) {
+                control.push_back(std::move(message));
+            } else {
+                incoming_bytes += message->size();
+                incoming.push_back({std::move(message), now});
+            }
+        }
+        messages.clear();
+
+        bool overflow = false;
+        {
+            std::lock_guard lock(mutex_);
+            send_ = send;
+            const std::size_t limit = queue_limit_bytes_locked();
+            if (!incoming.empty() && queued_bytes_ + incoming_bytes > limit) {
+                ++dropped_batches_;
+                dropped_packets_ += incoming.size();
+                overflow = true;
+            } else {
+                for (auto& packet : incoming) queue_.push(std::move(packet));
+                queued_bytes_ += incoming_bytes;
+            }
+        }
+        changed_.notify_all();
+        for (auto& message : control) {
+            try {
+                send(message);
+            } catch (...) {
+                // The track may close between handler dispatch and transportSend().
+            }
+        }
+        if (overflow) invoke_callback(overflow_callback_);
+    }
+
+    void update(std::uint64_t bitrate_bps, std::chrono::milliseconds interval) {
+        if (bitrate_bps == 0) return;
+        {
+            std::lock_guard lock(mutex_);
+            bitrate_bps_ = bitrate_bps;
+            interval_ = sanitize_interval(interval);
+            // Do not carry a large budget from an earlier, faster setting.
+            budget_bytes_ = (std::min)(budget_bytes_, maximum_batch_bytes_locked());
+        }
+        changed_.notify_all();
+    }
+
+    [[nodiscard]] WebRtcTransport::VideoPacingStatistics statistics() const {
+        std::lock_guard lock(mutex_);
+        WebRtcTransport::VideoPacingStatistics result;
+        result.pacing_bitrate_bps = bitrate_bps_;
+        result.pacing_interval = interval_;
+        result.queued_bytes = queued_bytes_;
+        result.queued_packets = queue_.size();
+        result.queue_delay_ms = bitrate_bps_ == 0 ? 0.0 :
+            static_cast<double>(queued_bytes_) * 8'000.0 /
+                static_cast<double>(bitrate_bps_);
+        result.scheduler_lateness_ms = scheduler_lateness_ms_;
+        result.dropped_batches = dropped_batches_;
+        result.dropped_packets = dropped_packets_;
+        return result;
+    }
+
+private:
+    struct QueuedPacket {
+        rtc::message_ptr message;
+        std::chrono::steady_clock::time_point queued_at;
+    };
+
+    static std::chrono::milliseconds sanitize_interval(
+        std::chrono::milliseconds interval) {
+        if (interval <= std::chrono::milliseconds(2)) return std::chrono::milliseconds(2);
+        if (interval <= std::chrono::milliseconds(3)) return std::chrono::milliseconds(3);
+        return std::chrono::milliseconds(5);
+    }
+
+    [[nodiscard]] double bytes_per_second_locked() const {
+        return static_cast<double>(bitrate_bps_) / 8.0;
+    }
+
+    [[nodiscard]] double maximum_batch_bytes_locked() const {
+        // Eight IPv6-safe RTP packets is small enough to avoid the 20 Mbps
+        // microbursts that motivated this controller.
+        return 8.0 * 1'280.0;
+    }
+
+    [[nodiscard]] std::size_t queue_limit_bytes_locked() const {
+        const auto two_hundred_ms = static_cast<std::size_t>(
+            bytes_per_second_locked() * 0.2);
+        return (std::clamp)(two_hundred_ms,
+                            std::size_t{512 * 1024}, std::size_t{8 * 1024 * 1024});
+    }
+
+    void run() {
+        std::unique_lock lock(mutex_);
+        auto deadline = std::chrono::steady_clock::now() + interval_;
+        while (!stopping_) {
+            if (queue_.empty() || !send_) {
+                changed_.wait(lock, [&] { return stopping_ || (!queue_.empty() && send_); });
+                deadline = std::chrono::steady_clock::now() + interval_;
+                last_budget_update_ = std::chrono::steady_clock::now();
+                if (stopping_) break;
+            }
+
+            changed_.wait_until(lock, deadline, [&] { return stopping_; });
+            if (stopping_) break;
+            const auto now = std::chrono::steady_clock::now();
+            const double lateness = (std::max)(0.0,
+                std::chrono::duration<double, std::milli>(now - deadline).count());
+            scheduler_lateness_ms_ = scheduler_lateness_ms_ == 0.0
+                ? lateness : scheduler_lateness_ms_ * 0.9 + lateness * 0.1;
+
+            const double elapsed = std::chrono::duration<double>(
+                now - last_budget_update_).count();
+            last_budget_update_ = now;
+            budget_bytes_ = (std::min)(
+                budget_bytes_ + elapsed * bytes_per_second_locked(),
+                maximum_batch_bytes_locked() * 2.0);
+
+            rtc::message_vector batch;
+            std::size_t batch_bytes = 0;
+            constexpr std::size_t maximum_packets = 8;
+            while (!queue_.empty() && batch.size() < maximum_packets) {
+                const std::size_t size = queue_.front().message->size();
+                if (!batch.empty() &&
+                    (static_cast<double>(batch_bytes + size) > maximum_batch_bytes_locked() ||
+                     budget_bytes_ < static_cast<double>(size))) break;
+                batch_bytes += size;
+                queued_bytes_ -= size;
+                batch.push_back(std::move(queue_.front().message));
+                queue_.pop();
+                budget_bytes_ -= static_cast<double>(size);
+            }
+            const auto send = send_;
+            const bool catch_up = !queue_.empty() && budget_bytes_ > 0.0;
+            const auto next_delay = catch_up ? std::chrono::milliseconds(1) : interval_;
+            deadline = now + next_delay;
+
+            lock.unlock();
+            for (auto& message : batch) {
+                try {
+                    send(std::move(message));
+                } catch (...) {
+                    // Closing a PeerConnection must not terminate the pacer thread.
+                }
+            }
+            lock.lock();
+        }
+    }
+
+    mutable std::mutex mutex_;
+    std::condition_variable changed_;
+    std::queue<QueuedPacket> queue_;
+    rtc::message_callback send_;
+    std::function<void()> overflow_callback_;
+    std::uint64_t bitrate_bps_ = 0;
+    std::chrono::milliseconds interval_{2};
+    std::size_t queued_bytes_ = 0;
+    double budget_bytes_ = 0.0;
+    double scheduler_lateness_ms_ = 0.0;
+    std::uint64_t dropped_batches_ = 0;
+    std::uint64_t dropped_packets_ = 0;
+    std::chrono::steady_clock::time_point last_budget_update_;
+    bool stopping_ = false;
+    std::thread worker_;
+};
+
 } // namespace
 
 struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Impl> {
@@ -570,6 +825,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     std::shared_ptr<rtc::DataChannel> data_channel;
     std::shared_ptr<rtc::Track> video_track;
     std::shared_ptr<rtc::MediaHandler> video_sender_handler;
+    std::shared_ptr<AdaptivePacingHandler> video_pacer;
     mutable std::mutex channel_mutex;
     std::mutex video_pacing_mutex;
     bool video_pacing_configured = false;
@@ -815,6 +1071,12 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                     invoke_callback(self->callbacks.on_video_keyframe_requested);
                 }
             }));
+            packetizer->addToChain(std::make_shared<RtcpFeedbackObserver>(
+                [weak_self](WebRtcTransport::VideoFeedback feedback) {
+                    if (const auto self = weak_self.lock(); self && !self->closing.load()) {
+                        invoke_callback(self->callbacks.on_video_feedback, feedback);
+                    }
+                }));
             video_sender_handler = packetizer;
             track->setMediaHandler(std::move(packetizer));
         } else {
@@ -910,6 +1172,15 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         if (closing.exchange(true)) return;
         open.store(false);
         video_open.store(false);
+
+        // Stop and join the pacing worker before its Track callbacks disappear.
+        std::shared_ptr<AdaptivePacingHandler> pacer;
+        {
+            std::lock_guard lock(video_pacing_mutex);
+            pacer = std::move(video_pacer);
+            video_pacing_configured = false;
+        }
+        pacer.reset();
 
         try {
             if (const auto channel = current_channel()) {
@@ -1007,15 +1278,53 @@ bool WebRtcTransport::configure_video_pacing(std::uint64_t bitrate_bps) noexcept
             impl_->configuration.video_direction != VideoDirection::SendOnly) return false;
         std::lock_guard lock(impl_->video_pacing_mutex);
         if (impl_->video_pacing_configured || !impl_->video_sender_handler) return false;
-        // libwebrtc's modern pacer uses a task queue; libdatachannel's
-        // PacingHandler is the equivalent leaky-bucket media-handler stage.
-        impl_->video_sender_handler->addToChain(std::make_shared<rtc::PacingHandler>(
-            static_cast<double>(bitrate_bps), std::chrono::milliseconds(5)));
+        const std::weak_ptr<Impl> weak_impl = impl_;
+        impl_->video_pacer = std::make_shared<AdaptivePacingHandler>(
+            bitrate_bps, std::chrono::milliseconds(2), [weak_impl] {
+                if (const auto self = weak_impl.lock(); self && !self->closing.load()) {
+                    invoke_callback(self->callbacks.on_video_pacing_overflow);
+                }
+            });
+        impl_->video_sender_handler->addToChain(impl_->video_pacer);
         impl_->video_pacing_configured = true;
         return true;
     } catch (const std::exception& error) {
         impl_->report_error(error.what());
         return false;
+    }
+}
+
+bool WebRtcTransport::update_video_pacing(
+    std::uint64_t bitrate_bps, std::chrono::milliseconds interval) noexcept {
+    try {
+        if (!impl_ || bitrate_bps == 0 ||
+            impl_->configuration.video_direction != VideoDirection::SendOnly) return false;
+        std::shared_ptr<AdaptivePacingHandler> pacer;
+        {
+            std::lock_guard lock(impl_->video_pacing_mutex);
+            pacer = impl_->video_pacer;
+        }
+        if (!pacer) return false;
+        pacer->update(bitrate_bps, interval);
+        return true;
+    } catch (const std::exception& error) {
+        impl_->report_error(error.what());
+        return false;
+    }
+}
+
+WebRtcTransport::VideoPacingStatistics
+WebRtcTransport::video_pacing_statistics() const noexcept {
+    try {
+        if (!impl_) return {};
+        std::shared_ptr<AdaptivePacingHandler> pacer;
+        {
+            std::lock_guard lock(impl_->video_pacing_mutex);
+            pacer = impl_->video_pacer;
+        }
+        return pacer ? pacer->statistics() : VideoPacingStatistics{};
+    } catch (...) {
+        return {};
     }
 }
 

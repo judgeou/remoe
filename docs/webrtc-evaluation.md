@@ -228,7 +228,8 @@ libwebrtc 的原生 C++ API 存在变动，部分编码器工厂接口明确处�
 
 > 实施状态（协议 v11）：工程最终采用 libdatachannel，并已完成 WSS 信令、STUN-only、键鼠 control
 > DataChannel，以及标准 H.264/AV1 VideoTrack。视频路径现已使用 RTP、RTCP NACK、Sender Report 和
-> PLI；运行时已移除 TCP 视频及 host IP/端口参数。自适应码率与完整拥塞控制仍属于后续工作。
+> PLI；运行时已移除 TCP 视频及 host IP/端口参数。Host 已加入基于 RR/NACK/PLI、RTT 和本地发送队列
+> 的有界 pacer 与 AIMD 码率控制；完整 GCC/TWCC 拥塞控制仍属于后续工作。
 
 ### 阶段 2：WebRTC 视频
 
@@ -236,7 +237,7 @@ libwebrtc 的原生 C++ API 存在变动，部分编码器工厂接口明确处�
 
 - 已完成 NVENC/oneVPL 编解码适配和 D3D11 surface 管理；
 - 已接入标准 H.264/AV1 RTP packetizer、PLI、NACK 和关键帧恢复；
-- 后续接入基于网络反馈的自适应码率与拥塞控制。
+- 已接入基于网络反馈的自适应 CBR；后续可升级为 GCC/TWCC 并联动帧率和分辨率。
 
 ### 阶段 3：公网产品化
 

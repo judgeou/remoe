@@ -5,6 +5,7 @@
 #include "desktop_capture.h"
 #include "video_encoder.h"
 #endif
+#include "adaptive_stream_controller.h"
 #include "clipboard.h"
 #include "encoded_video_frame.h"
 #include "host_identity.h"
@@ -628,9 +629,12 @@ int run(const Options& options) {
         if (frames.empty() || frames.front().data.empty()) {
             throw std::runtime_error("x264 produced no H.264 test frame");
         }
+        if (!encoder->reconfigure_bitrate(4'000'000)) {
+            throw std::runtime_error("x264 rejected runtime bitrate reconfiguration");
+        }
         std::cout << "H.264 encoder check passed: " << frames.front().data.size()
                   << " bytes, " << (frames.front().key_frame ? "key frame" : "frame")
-                  << '\n';
+                  << "; runtime bitrate update passed\n";
         return 0;
 #else
         auto encoder = remoe::create_preferred_av1_encoder(
@@ -647,9 +651,12 @@ int run(const Options& options) {
             if (frames.empty() || frames.front().data.empty()) {
                 throw std::runtime_error("AV1 encoder produced no test frame");
             }
+            if (!encoder->reconfigure_bitrate(10'000'000)) {
+                throw std::runtime_error("AV1 encoder rejected runtime bitrate reconfiguration");
+            }
             std::cout << "AV1 encoder check passed: " << frames.front().data.size()
                       << " bytes, " << (frames.front().key_frame ? "key frame" : "frame")
-                      << '\n';
+                      << "; runtime bitrate update passed\n";
             return 0;
         }
         throw std::runtime_error("desktop capture timed out during AV1 encoder check");
@@ -711,6 +718,13 @@ int run(const Options& options) {
         std::unordered_set<remoe::protocol::InputType> pressed_buttons;
         bool injection_warning_shown = false;
         std::atomic<remoe::WebRtcTransport*> active_transport{nullptr};
+        std::mutex adaptive_controller_mutex;
+        std::shared_ptr<remoe::AdaptiveStreamController> adaptive_controller;
+
+        const auto current_adaptive_controller = [&] {
+            std::lock_guard lock(adaptive_controller_mutex);
+            return adaptive_controller;
+        };
 
         struct SessionHandshake {
             std::mutex mutex;
@@ -738,6 +752,23 @@ int run(const Options& options) {
             std::cout << "WebRTC standard video track connected\n";
         };
         control_callbacks.on_video_keyframe_requested = [&] {
+            key_frame_requested = true;
+            if (auto controller = current_adaptive_controller()) {
+                remoe::AdaptiveStreamController::NetworkFeedback feedback;
+                feedback.pli = true;
+                controller->observe_network(feedback);
+            }
+        };
+        control_callbacks.on_video_feedback = [&](auto feedback) {
+            if (auto controller = current_adaptive_controller()) {
+                remoe::AdaptiveStreamController::NetworkFeedback observation;
+                observation.receiver_report = feedback.receiver_report;
+                observation.loss_fraction = feedback.loss_fraction;
+                observation.nack_packets = feedback.nack_packets;
+                controller->observe_network(observation);
+            }
+        };
+        control_callbacks.on_video_pacing_overflow = [&] {
             key_frame_requested = true;
         };
         control_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
@@ -925,28 +956,43 @@ int run(const Options& options) {
         }
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
 
-        // libwebrtc paces at a multiple of the nominal media rate so encoder
-        // overshoot drains without turning each frame into a UDP microburst.
-        // Its long-standing default multiplier is 2.5.
-        const std::uint64_t pacing_bitrate_bps =
-            static_cast<std::uint64_t>(settings.bitrate_bps) * 5u / 2u;
-        if (!control_channel->configure_video_pacing(pacing_bitrate_bps)) {
+        std::uint32_t working_bitrate_bps = settings.bitrate_bps;
+        std::uint64_t pacing_bitrate_bps =
+            static_cast<std::uint64_t>(settings.bitrate_bps) * 3u / 2u;
+        std::chrono::milliseconds pacing_interval{2};
+        if (settings.rate_control == remoe::protocol::VideoRateControl::Cbr) {
+            auto controller = std::make_shared<remoe::AdaptiveStreamController>(
+                settings.bitrate_bps);
+            const auto initial = controller->initial_decision();
+            working_bitrate_bps = initial.media_bitrate_bps;
+            pacing_bitrate_bps = initial.pacing_bitrate_bps;
+            pacing_interval = initial.pacing_interval;
+            {
+                std::lock_guard lock(adaptive_controller_mutex);
+                adaptive_controller = std::move(controller);
+            }
+        }
+        if (!control_channel->configure_video_pacing(pacing_bitrate_bps) ||
+            !control_channel->update_video_pacing(pacing_bitrate_bps, pacing_interval)) {
             std::cerr << "Could not configure the WebRTC RTP video pacer\n";
             control_channel->close();
             continue;
         }
-        std::cout << "RTP pacing: " << pacing_bitrate_bps / 1'000'000.0 << " Mbps\n";
+        std::cout << "Adaptive RTP pacing: " << pacing_bitrate_bps / 1'000'000.0
+                  << " Mbps, " << pacing_interval.count() << " ms; media starts at "
+                  << working_bitrate_bps / 1'000'000.0 << " Mbps, client ceiling "
+                  << settings.bitrate_bps / 1'000'000.0 << " Mbps\n";
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
 
 #if defined(REMOE_X264_HOST)
         auto encoder = remoe::create_x264_h264_encoder(
-            encoded_width, encoded_height, settings.fps, settings.bitrate_bps);
+            encoded_width, encoded_height, settings.fps, working_bitrate_bps);
 #else
         auto encoder = remoe::create_preferred_av1_encoder(
             capture.device(), encoded_width, encoded_height,
-            settings.fps, settings.bitrate_bps,
+            settings.fps, working_bitrate_bps,
             settings.rate_control, settings.quality);
         capture.use_device(encoder->device());
 #endif
@@ -991,15 +1037,63 @@ int run(const Options& options) {
         const auto frame_interval =
             std::chrono::microseconds(1'000'000 / settings.fps);
         auto next_frame = Clock::now();
+        auto next_adaptive_update = Clock::now() + std::chrono::seconds(1);
         while (g_running && session_running && control_channel->is_open()) {
             // Desktop Duplication may block until the screen changes.  Do not
             // retain a deadline that became stale while acquire() was waiting:
             // otherwise the next burst of desktop updates is sent without any
             // pacing while the loop tries to catch up with the old schedule.
             const auto now = Clock::now();
+            if (now >= next_adaptive_update) {
+                next_adaptive_update = now + std::chrono::seconds(1);
+                if (auto controller = current_adaptive_controller()) {
+                    const auto pacing = control_channel->video_pacing_statistics();
+                    const auto transport_stats = control_channel->statistics();
+                    remoe::AdaptiveStreamController::LocalFeedback local;
+                    local.queue_delay_ms = pacing.queue_delay_ms;
+                    local.scheduler_lateness_ms = pacing.scheduler_lateness_ms;
+                    local.dropped_batches = pacing.dropped_batches;
+                    controller->observe_local(local);
+                    if (transport_stats.round_trip_time) {
+                        remoe::AdaptiveStreamController::NetworkFeedback rtt;
+                        rtt.round_trip_time = transport_stats.round_trip_time;
+                        controller->observe_network(rtt);
+                    }
+                    if (auto decision = controller->take_decision()) {
+                        if (!encoder->reconfigure_bitrate(decision->media_bitrate_bps)) {
+                            std::cerr << "Adaptive bitrate disabled: encoder rejected runtime "
+                                         "reconfiguration\n";
+                            std::lock_guard lock(adaptive_controller_mutex);
+                            adaptive_controller.reset();
+                        } else if (!control_channel->update_video_pacing(
+                                       decision->pacing_bitrate_bps,
+                                       decision->pacing_interval)) {
+                            std::cerr << "Adaptive bitrate failed to update RTP pacing\n";
+                            session_running = false;
+                            break;
+                        } else {
+                            working_bitrate_bps = decision->media_bitrate_bps;
+                            if (decision->force_key_frame) key_frame_requested = true;
+                            std::cout << "Adaptive media rate: "
+                                      << working_bitrate_bps / 1'000'000.0 << " Mbps; pacer "
+                                      << decision->pacing_bitrate_bps / 1'000'000.0 << " Mbps / "
+                                      << decision->pacing_interval.count() << " ms ("
+                                      << decision->reason << ")\n";
+                        }
+                    }
+                }
+            }
             if (now > next_frame) next_frame = now;
             std::this_thread::sleep_until(next_frame);
             next_frame += frame_interval;
+
+            // Do not encode another stale desktop frame into an already late
+            // queue. The next accepted frame is an IDR so the receiver can
+            // immediately resume from the newest desktop state.
+            if (control_channel->video_pacing_statistics().queue_delay_ms >= 100.0) {
+                key_frame_requested = true;
+                continue;
+            }
 
             const DWORD current_clipboard_sequence = GetClipboardSequenceNumber();
             const DWORD previous_clipboard_sequence =

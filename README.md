@@ -308,10 +308,13 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 编码视频由标准 RTP/SRTP VideoTrack 承载。libdatachannel 负责 H.264/AV1 RTP 分片、Sender Report、
 NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
 
-host 在 RTP 发送链末端使用 5 ms 的漏桶 pacer，按 client 请求的网络媒体目标速率的 2.5 倍
-发送。这沿用 libwebrtc 的经典 paced-sender 设计，用来吸收画面突变时编码器产生的瞬时码率峰值，
-避免数百个 RTP 包同时涌入 UDP/socket 队列。固定质量模式下，`quality` 只控制编码质量，
-`bitrate_bps` 仍用于指定网络媒体目标并配置 pacer。
+host 在 RTP 发送链末端使用有界漏桶 pacer。CBR 会把 client 请求值作为上限，初始工作码率不超过
+10 Mbps；发送节奏默认是工作码率的 1.5 倍、每 2 ms 一批，单批最多 8 个 RTP 包。host 根据 RTCP
+Receiver Report、NACK、PLI、连接 RTT、发送队列延迟和本机调度迟滞做 AIMD 调节：连续 3 次干净报告
+才小幅升码率，丢包或排队则立即降码率，并在必要时请求新关键帧。调度不稳时发送间隔可放宽为
+3/5 ms；队列达到 100 ms 时跳过尚未编码的新帧，极端溢出时整批丢弃，因此不会无限积压旧画面。
+NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改变编码质量，仍使用 1.5 倍、2 ms
+的平滑 pacer，但不参与 CBR 自适应。
 
 ### ClientConfig（36 bytes）
 
@@ -322,7 +325,7 @@ host 在 RTP 发送链末端使用 5 ms 的漏桶 pacer，按 client 请求的�
 | 6 | u16 | header_size | `36` |
 | 8 | u32 | fps_num | client 请求的帧率分子 |
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
-| 16 | u32 | bitrate_bps | 网络媒体目标码率；CBR 时也作为编码器目标 |
+| 16 | u32 | bitrate_bps | 网络媒体上限；CBR 时由 host 在该上限内动态选择工作码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
 | 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；其他位必须为 0 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
@@ -340,7 +343,7 @@ host 在 RTP 发送链末端使用 5 ms 的漏桶 pacer，按 client 请求的�
 | 16 | u32 | height | 编码高度 |
 | 20 | u32 | fps_num | 帧率分子 |
 | 24 | u32 | fps_den | 帧率分母，当前为 1 |
-| 28 | u32 | bitrate_bps | 回显网络媒体目标码率 |
+| 28 | u32 | bitrate_bps | 回显 client 请求的网络媒体上限 |
 | 32 | u32 | codec_profile | AV1 为 0；H.264 为 `profile_idc << 16 | constraints << 8 | level_idc` |
 | 36 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 40 | u32 | quality | 固定质量值；CBR 为 0 |
@@ -440,7 +443,8 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - 剪贴板同步当前仅支持最多 1 MiB 的纯文本，不传输图片、文件列表或富文本。网页读写剪贴板还受
   HTTPS、安全上下文、页面焦点和浏览器用户手势策略约束。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
-- VideoTrack 已接入 RTP、Sender Report、NACK 和 PLI；当前仍没有基于 RTCP 反馈的自动码率调节。
+- 自适应控制目前调整码率、发送间隔和关键帧，但尚不动态调整分辨率或帧率，也不等同于完整的
+  WebRTC GCC/TWCC 拥塞控制。
 
 ## 源码结构
 
@@ -448,6 +452,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - `src/gdi_capture.*`：GDI BitBlt 显示器抓取与鼠标指针合成
 - `src/clipboard.*`：Windows UTF-16 剪贴板与 wire UTF-8 文本之间的转换和消息校验
 - `src/main.cpp`：采集/编码循环、键鼠注入与重连逻辑
+- `src/adaptive_stream_controller.*`：RTCP/RTT/发送队列驱动的 CBR AIMD 决策
 - `src/video_encoder.*`：AV1 编码器抽象与 Intel oneVPL → NVIDIA NVENC 选择策略
 - `src/vpl_encoder.cpp`：Intel oneVPL D3D11/NV12 AV1 硬件编码
 - `src/nvenc_encoder.cpp`、`src/nvenc_api_loader.cpp`：NVENC AV1 回退与驱动 DLL 延迟加载

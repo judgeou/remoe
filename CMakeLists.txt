@@ -164,6 +164,8 @@ add_executable(remoe_host
     src/host_identity.cpp
     src/host_identity.h
     src/main.cpp
+    src/adaptive_stream_controller.cpp
+    src/adaptive_stream_controller.h
     src/desktop_capture.cpp
     src/desktop_capture.h
     src/protocol.h
@@ -256,6 +258,8 @@ if(REMOE_BUILD_X264_HOST)
         src/host_identity.cpp
         src/host_identity.h
         src/main.cpp
+        src/adaptive_stream_controller.cpp
+        src/adaptive_stream_controller.h
         src/protocol.h
         src/x264_encoder.cpp
         src/x264_encoder.h)
@@ -339,6 +343,15 @@ if(BUILD_TESTING)
     target_compile_options(remoe_frame_age_test PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     add_test(NAME frame_age COMMAND remoe_frame_age_test)
+
+    add_executable(remoe_adaptive_stream_controller_test
+        tests/adaptive_stream_controller_test.cpp
+        src/adaptive_stream_controller.cpp
+        src/adaptive_stream_controller.h)
+    target_include_directories(remoe_adaptive_stream_controller_test PRIVATE src)
+    target_compile_options(remoe_adaptive_stream_controller_test PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    add_test(NAME adaptive_stream_controller COMMAND remoe_adaptive_stream_controller_test)
 
     if(REMOE_BUILD_X264_HOST)
         add_executable(remoe_x264_encoder_smoke
