@@ -75,6 +75,7 @@ class RtcSession(
     private var remoteReady = false
     private var acknowledgementSent = false
     private var remoteAcknowledged = false
+    @Volatile
     private var bootstrapComplete = false
     private var streamRequested = false
     private var streamHeader: StreamHeader? = null
@@ -364,7 +365,11 @@ class RtcSession(
 
         override fun onFailure(message: String, cause: Throwable?) {
             diagnostics.append("signal", "$message (${cause?.javaClass?.simpleName ?: "no cause"})")
-            fail(message)
+            if (!bootstrapComplete && !stopped) {
+                fail(message)
+            } else {
+                diagnostics.append("signal", "WSS failed after bootstrap; keeping WebRTC session")
+            }
         }
 
         override fun onClosed(reason: String) {

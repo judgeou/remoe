@@ -207,7 +207,11 @@ top.ozaoza.remoe/
 - `SurfaceViewRenderer` 属于 Activity/View 生命周期；Track 与 renderer 必须显式 attach/detach；
 - 所有 `PeerConnection`、Track、renderer、EGL 对象都必须有确定的 `dispose/release` 顺序；
 - WebRTC callback 不直接操作 View，通过线程安全状态/事件交给 ViewModel/UI；
-- 第一版进入后台即主动断开，不做后台长连接和 foreground service；
+- 进入后台时立即取消触摸输入并释放远端按键，但保留现有 `RtcSession`、信令、
+  `PeerConnection` 和 DataChannel；连接明确失败时再清理会话并返回主界面；
+- 远程会话存续期间启动 media playback foreground service 并显示常驻通知，确保系统继续调度
+  WebRTC 与 WSS 网络线程；会话结束时立即停止服务；
+- WebRTC bootstrap 完成后信令 WSS 失效不再中断媒体与 DataChannel，仅记录诊断；
 - 播放界面启用 `FLAG_KEEP_SCREEN_ON`，使用沉浸式横屏；
 - 网络切换第一版采取明确断开并重连，不实现隐式 ICE restart。
 

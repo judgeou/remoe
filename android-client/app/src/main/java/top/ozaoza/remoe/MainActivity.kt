@@ -664,6 +664,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         codecProbeButton.isEnabled = false
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enterRemoteMode()
+        RemoteSessionService.start(this)
         session = RtcSession(
             runtime = app.rtcRuntime,
             httpClient = app.httpClient,
@@ -680,6 +681,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         setPerformanceStatsVisible(false)
         session?.close(reason)
         session = null
+        RemoteSessionService.stop(this)
         connectButton.isEnabled = true
         disconnectButton.isEnabled = false
         codecProbeButton.isEnabled = true
@@ -736,6 +738,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         touchController.cancel()
         detachRemoteTrack()
         session = null
+        RemoteSessionService.stop(this)
         setPerformanceStatsVisible(false)
         connectButton.isEnabled = true
         disconnectButton.isEnabled = false
@@ -755,17 +758,26 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     override fun onStop() {
         bindingForeground = false
         bindingHandler.removeCallbacks(bindingPoll)
-        if (session != null) disconnect("进入后台，连接已断开")
+        touchController.cancel()
+        if (session != null) {
+            app.diagnosticLog.append("lifecycle", "Activity stopped; retaining RtcSession")
+        }
         super.onStop()
     }
 
     override fun onStart() {
         super.onStart()
         bindingForeground = true
+        if (session != null) {
+            app.diagnosticLog.append("lifecycle", "Activity started; resuming retained RtcSession")
+        }
         if (activeBinding != null) scheduleBindingPoll(0)
     }
 
     override fun onDestroy() {
+        session?.close("界面已销毁，连接已断开")
+        session = null
+        RemoteSessionService.stop(this)
         touchController.dispose()
         detachRemoteTrack()
         renderer.release()

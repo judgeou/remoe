@@ -9,4 +9,8 @@
     <string name="connect">连接</string>
     <string name="disconnect">断开</string>
     <string name="run_codec_probe">Codec 探针</string>
+    <string name="remote_session_channel">远程会话</string>
+    <string name="remote_session_channel_description">保持远程桌面连接在后台运行</string>
+    <string name="remote_session_active">远程桌面已连接</string>
+    <string name="remote_session_background_hint">点按返回远程画面</string>
 </resources>
