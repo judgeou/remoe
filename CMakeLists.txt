@@ -297,6 +297,7 @@ if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
         src/client_identity.cpp
         src/client_identity.h
         src/client_main.cpp
+        src/frame_age.h
         src/http_client.cpp
         src/http_client.h
         src/launcher_window.cpp
@@ -332,6 +333,13 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(remoe_frame_age_test
+        tests/frame_age_test.cpp)
+    target_include_directories(remoe_frame_age_test PRIVATE src)
+    target_compile_options(remoe_frame_age_test PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    add_test(NAME frame_age COMMAND remoe_frame_age_test)
+
     if(REMOE_BUILD_X264_HOST)
         add_executable(remoe_x264_encoder_smoke
             tests/x264_encoder_smoke.cpp

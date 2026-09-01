@@ -1,4 +1,5 @@
 #include "clipboard.h"
+#include "frame_age.h"
 #include "launcher_window.h"
 #include "protocol.h"
 #include "video_window.h"
@@ -242,13 +243,10 @@ public:
     }
 
     [[nodiscard]] double relative_age_ms(std::uint64_t host_timestamp_us) const noexcept {
-        if (host_timestamp_us > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::int64_t>::max)())) return 0.0;
         std::lock_guard lock(mutex_);
         if (!synchronized_) return 0.0;
-        const auto age_us = now_us_signed() + host_minus_client_us_ -
-            static_cast<std::int64_t>(host_timestamp_us);
-        return static_cast<double>((std::max<std::int64_t>)(age_us, 0)) / 1000.0;
+        return remoe::frame_age_ms_from_rtp_timestamp(
+            now_us_signed() + host_minus_client_us_, host_timestamp_us);
     }
 
     static std::uint64_t now_us() noexcept {
