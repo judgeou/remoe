@@ -6,8 +6,11 @@ import top.ozaoza.remoe.diagnostics.DiagnosticLog
 import top.ozaoza.remoe.rtc.RtcRuntime
 
 class RemoeApplication : Application() {
-    lateinit var rtcRuntime: RtcRuntime
-        private set
+    val rtcRuntime: RtcRuntime by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        RtcRuntime.create(this).also {
+            diagnosticLog.append("application", "WebRTC runtime initialized on demand")
+        }
+    }
     lateinit var httpClient: OkHttpClient
         private set
     lateinit var diagnosticLog: DiagnosticLog
@@ -17,7 +20,5 @@ class RemoeApplication : Application() {
         super.onCreate()
         diagnosticLog = DiagnosticLog(this)
         httpClient = OkHttpClient.Builder().build()
-        rtcRuntime = RtcRuntime.create(this)
-        diagnosticLog.append("application", "WebRTC runtime initialized")
     }
 }

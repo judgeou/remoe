@@ -10,13 +10,15 @@ class RemoteViewportController(
 
     fun zoomBy(
         scaleFactor: Float,
-        focus: TouchGestureEngine.Point,
-        focusDelta: TouchGestureEngine.Point,
+        focusX: Float,
+        focusY: Float,
+        focusDeltaX: Float,
+        focusDeltaY: Float,
     ) {
         transform.zoomBy(
             scaleFactor,
-            ViewportTransform.Point(focus.x, focus.y),
-            ViewportTransform.Point(focusDelta.x, focusDelta.y),
+            ViewportTransform.Point(focusX, focusY),
+            ViewportTransform.Point(focusDeltaX, focusDeltaY),
             contentView.width,
             contentView.height,
             inputView.width,
@@ -50,32 +52,39 @@ class RemoteViewportController(
     }
 
     fun moveRemotePointer(
-        delta: TouchGestureEngine.Point,
+        deltaX: Float,
+        deltaY: Float,
         currentX: Int,
         currentY: Int,
-    ): Pair<Int, Int>? {
+        result: IntArray,
+    ): Boolean {
         val displayedWidth = contentView.width * transform.scale
         val displayedHeight = contentView.height * transform.scale
-        if (displayedWidth <= 1f || displayedHeight <= 1f) return null
-        return (
-            currentX + delta.x * 65_535f / displayedWidth
-            ).toInt().coerceIn(0, 65_535) to (
-            currentY + delta.y * 65_535f / displayedHeight
-            ).toInt().coerceIn(0, 65_535)
+        if (displayedWidth <= 1f || displayedHeight <= 1f) return false
+        result[0] = (currentX + deltaX * 65_535f / displayedWidth)
+            .toInt().coerceIn(0, 65_535)
+        result[1] = (currentY + deltaY * 65_535f / displayedHeight)
+            .toInt().coerceIn(0, 65_535)
+        return true
     }
 
-    fun viewCoordinates(remoteX: Int, remoteY: Int): TouchGestureEngine.Point? {
+    fun viewCoordinates(
+        remoteX: Int,
+        remoteY: Int,
+        onCoordinates: (Float, Float) -> Unit,
+    ): Boolean {
         if (contentView.width <= 1 || contentView.height <= 1 ||
             inputView.width <= 1 || inputView.height <= 1
-        ) return null
+        ) return false
         val contentX = remoteX.coerceIn(0, 65_535) * (contentView.width - 1f) / 65_535f
         val contentY = remoteY.coerceIn(0, 65_535) * (contentView.height - 1f) / 65_535f
-        return TouchGestureEngine.Point(
-            x = inputView.width / 2f +
+        onCoordinates(
+            inputView.width / 2f +
                 (contentX - contentView.width / 2f) * transform.scale + transform.translationX,
-            y = inputView.height / 2f +
+            inputView.height / 2f +
                 (contentY - contentView.height / 2f) * transform.scale + transform.translationY,
         )
+        return true
     }
 
     fun reset() {

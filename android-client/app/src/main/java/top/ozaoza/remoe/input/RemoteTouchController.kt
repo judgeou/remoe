@@ -9,7 +9,7 @@ class RemoteTouchController(
     private val view: View,
     private val contentView: View,
     send: (RemoteInputEvent) -> Boolean,
-    private val onPointerMoved: (TouchGestureEngine.Point) -> Unit = {},
+    private val onPointerMoved: (Float, Float) -> Unit = { _, _ -> },
 ) : View.OnTouchListener {
     private val viewport = RemoteViewportController(view, contentView)
     private val engine = TouchGestureEngine(
@@ -51,11 +51,11 @@ class RemoteTouchController(
         }
         when (event.actionMasked) {
             MotionEvent.ACTION_POINTER_DOWN -> {
-                engine.pointerDown(event.points())
+                pointerDown(event)
             }
-            MotionEvent.ACTION_MOVE -> engine.move(event.points())
+            MotionEvent.ACTION_MOVE -> move(event)
             MotionEvent.ACTION_POINTER_UP -> {
-                engine.pointerUp(event.getPointerId(event.actionIndex), event.points(event.actionIndex))
+                pointerUp(event)
             }
             MotionEvent.ACTION_UP -> {
                 val index = event.actionIndex
@@ -94,7 +94,7 @@ class RemoteTouchController(
     }
 
     private fun positionPointer(remoteX: Int, remoteY: Int) {
-        viewport.viewCoordinates(remoteX, remoteY)?.let(onPointerMoved)
+        viewport.viewCoordinates(remoteX, remoteY, onPointerMoved)
     }
 
     private fun panViewport(deltaX: Float, deltaY: Float): Boolean =
@@ -104,19 +104,66 @@ class RemoteTouchController(
 
     private fun zoomViewport(
         scale: Float,
-        focus: TouchGestureEngine.Point,
-        delta: TouchGestureEngine.Point,
+        focusX: Float,
+        focusY: Float,
+        deltaX: Float,
+        deltaY: Float,
     ) {
-        viewport.zoomBy(scale, focus, delta)
+        viewport.zoomBy(scale, focusX, focusY, deltaX, deltaY)
         engine.refreshPointer()
     }
 
     private fun MotionEvent.point(index: Int) = TouchGestureEngine.Point(getX(index), getY(index))
 
-    private fun MotionEvent.points(excludedIndex: Int = -1): Map<Int, TouchGestureEngine.Point> =
-        buildMap {
-            for (index in 0 until pointerCount) {
-                if (index != excludedIndex) put(getPointerId(index), point(index))
+    private fun pointerDown(event: MotionEvent) {
+        val secondIndex = if (event.pointerCount > 1) 1 else -1
+        engine.pointerDown(
+            event.getPointerId(0),
+            event.getX(0),
+            event.getY(0),
+            if (secondIndex >= 0) event.getPointerId(secondIndex) else -1,
+            if (secondIndex >= 0) event.getX(secondIndex) else 0f,
+            if (secondIndex >= 0) event.getY(secondIndex) else 0f,
+            event.pointerCount,
+        )
+    }
+
+    private fun move(event: MotionEvent) {
+        val secondIndex = if (event.pointerCount > 1) 1 else -1
+        engine.move(
+            event.getPointerId(0),
+            event.getX(0),
+            event.getY(0),
+            if (secondIndex >= 0) event.getPointerId(secondIndex) else -1,
+            if (secondIndex >= 0) event.getX(secondIndex) else 0f,
+            if (secondIndex >= 0) event.getY(secondIndex) else 0f,
+            event.pointerCount,
+        )
+    }
+
+    private fun pointerUp(event: MotionEvent) {
+        val removedIndex = event.actionIndex
+        var firstIndex = -1
+        var secondIndex = -1
+        for (index in 0 until event.pointerCount) {
+            if (index == removedIndex) continue
+            if (firstIndex < 0) {
+                firstIndex = index
+            } else if (secondIndex < 0) {
+                secondIndex = index
+                break
             }
         }
+        val remainingCount = event.pointerCount - 1
+        engine.pointerUp(
+            event.getPointerId(removedIndex),
+            if (firstIndex >= 0) event.getPointerId(firstIndex) else -1,
+            if (firstIndex >= 0) event.getX(firstIndex) else 0f,
+            if (firstIndex >= 0) event.getY(firstIndex) else 0f,
+            if (secondIndex >= 0) event.getPointerId(secondIndex) else -1,
+            if (secondIndex >= 0) event.getX(secondIndex) else 0f,
+            if (secondIndex >= 0) event.getY(secondIndex) else 0f,
+            remainingCount,
+        )
+    }
 }

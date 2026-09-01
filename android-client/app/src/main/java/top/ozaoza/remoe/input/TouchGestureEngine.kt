@@ -10,14 +10,22 @@ import top.ozaoza.remoe.protocol.RemoteInputEvent
 class TouchGestureEngine(
     private val touchSlopPx: Float,
     private val emit: (RemoteInputEvent) -> Boolean,
-    private val relativeCoordinates: (delta: Point, currentX: Int, currentY: Int) -> Pair<Int, Int>?,
+    private val relativeCoordinates: (
+        deltaX: Float,
+        deltaY: Float,
+        currentX: Int,
+        currentY: Int,
+        result: IntArray,
+    ) -> Boolean,
     private val onPointerMoved: (x: Int, y: Int) -> Unit = { _, _ -> },
     private val panViewport: (deltaX: Float, deltaY: Float) -> Boolean = { _, _ -> false },
     private val zoomViewport: (
         scaleFactor: Float,
-        focus: Point,
-        focusDelta: Point,
-    ) -> Unit = { _, _, _ -> },
+        focusX: Float,
+        focusY: Float,
+        deltaX: Float,
+        deltaY: Float,
+    ) -> Unit = { _, _, _, _, _ -> },
     private val scrollScale: Float = 3f,
     private val tapDistancePx: Float = 18f,
     private val doubleTapDistancePx: Float = 28f,
@@ -26,10 +34,24 @@ class TouchGestureEngine(
     data class Point(val x: Float, val y: Float)
 
     private data class Tap(val timeMs: Long, val point: Point)
+    private data class PointerValues(
+        val firstId: Int,
+        val firstX: Float,
+        val firstY: Float,
+        val secondId: Int,
+        val secondX: Float,
+        val secondY: Float,
+    )
     private enum class Mode { IDLE, SINGLE, DRAG, MULTI }
     private enum class MultiMode { PAN, PINCH }
 
-    private val pointers = mutableMapOf<Int, Point>()
+    private var pointerCount = 0
+    private var firstPointerId = -1
+    private var firstPointerX = 0f
+    private var firstPointerY = 0f
+    private var secondPointerId = -1
+    private var secondPointerX = 0f
+    private var secondPointerY = 0f
     private var mode = Mode.IDLE
     private var primaryPointerId = -1
     private var startedAtMs = 0L
@@ -39,14 +61,17 @@ class TouchGestureEngine(
     private var lastTap: Tap? = null
     private var leftPressed = false
     private var multiMode: MultiMode? = null
-    private var multiStartCenter: Point? = null
-    private var lastCenter: Point? = null
+    private var multiStartCenterX = 0f
+    private var multiStartCenterY = 0f
+    private var lastCenterX = 0f
+    private var lastCenterY = 0f
     private var startSpread = 0f
     private var lastSpread = 0f
     private var verticalWheelRemainder = 0f
     private var horizontalWheelRemainder = 0f
     private var mouseX = 32_768
     private var mouseY = 32_768
+    private val coordinateResult = IntArray(2)
 
     init {
         require(touchSlopPx >= 0f)
@@ -58,7 +83,7 @@ class TouchGestureEngine(
     fun down(pointerId: Int, point: Point) {
         releaseLeft()
         resetGesture()
-        pointers[pointerId] = point
+        setPointers(pointerId, point.x, point.y)
         primaryPointerId = pointerId
         startedAtMs = clockMs()
         start = point
@@ -76,77 +101,186 @@ class TouchGestureEngine(
     }
 
     fun pointerDown(activePointers: Map<Int, Point>) {
-        pointers.clear()
-        pointers.putAll(activePointers)
-        if (pointers.size < 2) return
+        val values = firstTwo(activePointers)
+        pointerDown(
+            values.firstId,
+            values.firstX,
+            values.firstY,
+            values.secondId,
+            values.secondX,
+            values.secondY,
+            activePointers.size,
+        )
+    }
+
+    fun pointerDown(
+        firstId: Int,
+        firstX: Float,
+        firstY: Float,
+        secondId: Int,
+        secondX: Float,
+        secondY: Float,
+        activeCount: Int,
+    ) {
+        setPointers(firstId, firstX, firstY, secondId, secondX, secondY, activeCount)
+        if (pointerCount < 2) return
         releaseLeft()
         lastTap = null
         mode = Mode.MULTI
-        maximumPointers = maxOf(maximumPointers, 2)
+        maximumPointers = maxOf(maximumPointers, activeCount)
         multiMode = null
-        multiStartCenter = center(pointers.values)
-        lastCenter = multiStartCenter
-        startSpread = spread(pointers.values)
+        multiStartCenterX = centerX()
+        multiStartCenterY = centerY()
+        lastCenterX = multiStartCenterX
+        lastCenterY = multiStartCenterY
+        startSpread = spread()
         lastSpread = startSpread
         verticalWheelRemainder = 0f
         horizontalWheelRemainder = 0f
     }
 
     fun move(activePointers: Map<Int, Point>) {
+        val values = firstTwo(activePointers)
+        move(
+            values.firstId,
+            values.firstX,
+            values.firstY,
+            values.secondId,
+            values.secondX,
+            values.secondY,
+            activePointers.size,
+        )
+    }
+
+    fun move(
+        firstId: Int,
+        firstX: Float,
+        firstY: Float,
+        secondId: Int = -1,
+        secondX: Float = 0f,
+        secondY: Float = 0f,
+        activeCount: Int = 1,
+    ) {
         if (mode == Mode.IDLE) return
-        val previousPointers = pointers.toMap()
-        gestureDistance += activePointers.entries.sumOf { (id, point) ->
-            previousPointers[id]?.let { distance(it, point).toDouble() } ?: 0.0
-        }.toFloat()
-        pointers.clear()
-        pointers.putAll(activePointers)
+        val previousFirstId = firstPointerId
+        val previousFirstX = firstPointerX
+        val previousFirstY = firstPointerY
+        val previousSecondId = secondPointerId
+        val previousSecondX = secondPointerX
+        val previousSecondY = secondPointerY
+        gestureDistance += movementDistance(
+            firstId, firstX, firstY,
+            previousFirstId, previousFirstX, previousFirstY,
+            previousSecondId, previousSecondX, previousSecondY,
+        )
+        if (activeCount > 1) {
+            gestureDistance += movementDistance(
+                secondId, secondX, secondY,
+                previousFirstId, previousFirstX, previousFirstY,
+                previousSecondId, previousSecondX, previousSecondY,
+            )
+        }
+        setPointers(firstId, firstX, firstY, secondId, secondX, secondY, activeCount)
 
         if (mode == Mode.MULTI) {
-            if (pointers.size < 2) return
-            val center = center(pointers.values)
-            val spread = spread(pointers.values)
-            val previousCenter = lastCenter ?: center
-            var delta = Point(center.x - previousCenter.x, center.y - previousCenter.y)
+            if (pointerCount < 2) return
+            val centerX = centerX()
+            val centerY = centerY()
+            val spread = spread()
+            var deltaX = centerX - lastCenterX
+            var deltaY = centerY - lastCenterY
             var scaleFactor = if (lastSpread > 0f) spread / lastSpread else 1f
             if (multiMode == null) {
-                val initialCenter = multiStartCenter ?: center
-                val panDistance = distance(initialCenter, center)
+                val panDistance = hypot(centerX - multiStartCenterX, centerY - multiStartCenterY)
                 val pinchDistance = abs(spread - startSpread)
                 if (maxOf(panDistance, pinchDistance) >= touchSlopPx) {
                     multiMode = if (pinchDistance > panDistance) MultiMode.PINCH else MultiMode.PAN
-                    delta = Point(center.x - initialCenter.x, center.y - initialCenter.y)
+                    deltaX = centerX - multiStartCenterX
+                    deltaY = centerY - multiStartCenterY
                     scaleFactor = if (startSpread > 0f) spread / startSpread else 1f
                 }
             }
             when (multiMode) {
-                MultiMode.PINCH -> zoomViewport(scaleFactor, center, delta)
-                MultiMode.PAN -> if (!panViewport(delta.x, delta.y)) {
+                MultiMode.PINCH -> zoomViewport(scaleFactor, centerX, centerY, deltaX, deltaY)
+                MultiMode.PAN -> if (!panViewport(deltaX, deltaY)) {
                     horizontalWheelRemainder = sendWheel(
                         InputType.MOUSE_HORIZONTAL_WHEEL,
-                        horizontalWheelRemainder + delta.x * scrollScale,
+                        horizontalWheelRemainder + deltaX * scrollScale,
                     )
                     verticalWheelRemainder = sendWheel(
                         InputType.MOUSE_WHEEL,
-                        verticalWheelRemainder + delta.y * scrollScale,
+                        verticalWheelRemainder + deltaY * scrollScale,
                     )
                 }
                 null -> Unit
             }
-            lastCenter = center
+            lastCenterX = centerX
+            lastCenterY = centerY
             lastSpread = spread
             return
         }
 
-        val point = pointers[primaryPointerId] ?: return
-        val previous = previousPointers[primaryPointerId] ?: point
-        moveRelative(Point(point.x - previous.x, point.y - previous.y))
+        val currentX: Float
+        val currentY: Float
+        when (primaryPointerId) {
+            firstPointerId -> {
+                currentX = firstPointerX
+                currentY = firstPointerY
+            }
+            secondPointerId -> {
+                currentX = secondPointerX
+                currentY = secondPointerY
+            }
+            else -> return
+        }
+        val previousX: Float
+        val previousY: Float
+        when (primaryPointerId) {
+            previousFirstId -> {
+                previousX = previousFirstX
+                previousY = previousFirstY
+            }
+            previousSecondId -> {
+                previousX = previousSecondX
+                previousY = previousSecondY
+            }
+            else -> {
+                previousX = currentX
+                previousY = currentY
+            }
+        }
+        moveRelative(currentX - previousX, currentY - previousY)
     }
 
     fun pointerUp(pointerId: Int, remainingPointers: Map<Int, Point>) {
-        pointers.remove(pointerId)
-        pointers.clear()
-        pointers.putAll(remainingPointers)
-        if (mode == Mode.MULTI && pointers.isNotEmpty()) lastCenter = center(pointers.values)
+        val values = firstTwo(remainingPointers)
+        pointerUp(
+            pointerId,
+            values.firstId,
+            values.firstX,
+            values.firstY,
+            values.secondId,
+            values.secondX,
+            values.secondY,
+            remainingPointers.size,
+        )
+    }
+
+    fun pointerUp(
+        pointerId: Int,
+        firstId: Int,
+        firstX: Float,
+        firstY: Float,
+        secondId: Int = -1,
+        secondX: Float = 0f,
+        secondY: Float = 0f,
+        activeCount: Int = 1,
+    ) {
+        setPointers(firstId, firstX, firstY, secondId, secondX, secondY, activeCount)
+        if (mode == Mode.MULTI && pointerCount > 0) {
+            lastCenterX = if (pointerCount > 1) centerX() else firstPointerX
+            lastCenterY = if (pointerCount > 1) centerY() else firstPointerY
+        }
     }
 
     fun up(pointerId: Int, point: Point) {
@@ -212,9 +346,11 @@ class TouchGestureEngine(
         emit(RemoteInputEvent(type, flags = Protocol.INPUT_FLAG_RELEASE))
     }
 
-    private fun moveRelative(delta: Point) {
-        if (delta.x == 0f && delta.y == 0f) return
-        val (x, y) = relativeCoordinates(delta, mouseX, mouseY) ?: return
+    private fun moveRelative(deltaX: Float, deltaY: Float) {
+        if (deltaX == 0f && deltaY == 0f) return
+        if (!relativeCoordinates(deltaX, deltaY, mouseX, mouseY, coordinateResult)) return
+        val x = coordinateResult[0]
+        val y = coordinateResult[1]
         if (x == mouseX && y == mouseY) return
         mouseX = x
         mouseY = y
@@ -231,32 +367,87 @@ class TouchGestureEngine(
     }
 
     private fun resetGesture() {
-        pointers.clear()
+        setPointers(-1, 0f, 0f, activeCount = 0)
         mode = Mode.IDLE
         primaryPointerId = -1
         startedAtMs = 0L
         gestureDistance = 0f
         maximumPointers = 0
         multiMode = null
-        multiStartCenter = null
-        lastCenter = null
+        multiStartCenterX = 0f
+        multiStartCenterY = 0f
+        lastCenterX = 0f
+        lastCenterY = 0f
         startSpread = 0f
         lastSpread = 0f
         verticalWheelRemainder = 0f
         horizontalWheelRemainder = 0f
     }
 
-    private fun center(points: Collection<Point>): Point = Point(
-        points.sumOf { it.x.toDouble() }.toFloat() / points.size,
-        points.sumOf { it.y.toDouble() }.toFloat() / points.size,
-    )
-
     private fun distance(left: Point, right: Point): Float = hypot(right.x - left.x, right.y - left.y)
 
-    private fun spread(points: Collection<Point>): Float {
-        val values = points.take(2)
-        return if (values.size < 2) 0f else distance(values[0], values[1])
+    private fun setPointers(
+        firstId: Int,
+        firstX: Float,
+        firstY: Float,
+        secondId: Int = -1,
+        secondX: Float = 0f,
+        secondY: Float = 0f,
+        activeCount: Int = 1,
+    ) {
+        pointerCount = activeCount
+        firstPointerId = firstId
+        firstPointerX = firstX
+        firstPointerY = firstY
+        secondPointerId = if (activeCount > 1) secondId else -1
+        secondPointerX = if (activeCount > 1) secondX else 0f
+        secondPointerY = if (activeCount > 1) secondY else 0f
     }
+
+    private fun firstTwo(pointers: Map<Int, Point>): PointerValues {
+        var firstId = -1
+        var firstX = 0f
+        var firstY = 0f
+        var secondId = -1
+        var secondX = 0f
+        var secondY = 0f
+        for ((id, point) in pointers) {
+            if (firstId < 0) {
+                firstId = id
+                firstX = point.x
+                firstY = point.y
+            } else if (secondId < 0) {
+                secondId = id
+                secondX = point.x
+                secondY = point.y
+                break
+            }
+        }
+        return PointerValues(firstId, firstX, firstY, secondId, secondX, secondY)
+    }
+
+    private fun movementDistance(
+        id: Int,
+        x: Float,
+        y: Float,
+        previousFirstId: Int,
+        previousFirstX: Float,
+        previousFirstY: Float,
+        previousSecondId: Int,
+        previousSecondX: Float,
+        previousSecondY: Float,
+    ): Float = when (id) {
+        previousFirstId -> hypot(x - previousFirstX, y - previousFirstY)
+        previousSecondId -> hypot(x - previousSecondX, y - previousSecondY)
+        else -> 0f
+    }
+
+    private fun centerX(): Float = (firstPointerX + secondPointerX) / 2f
+
+    private fun centerY(): Float = (firstPointerY + secondPointerY) / 2f
+
+    private fun spread(): Float = if (pointerCount < 2) 0f else
+        hypot(secondPointerX - firstPointerX, secondPointerY - firstPointerY)
 
     private companion object {
         const val TAP_TIMEOUT_MS = 500L

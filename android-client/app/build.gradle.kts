@@ -30,8 +30,8 @@ android {
         applicationId = "top.ozaoza.remoe"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.5.3"
+        versionCode = 3
+        versionName = "0.5.4"
 
         ndk {
             abiFilters += "arm64-v8a"

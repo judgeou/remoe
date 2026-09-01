@@ -42,6 +42,7 @@ import top.ozaoza.remoe.input.RemoteCursorView
 import top.ozaoza.remoe.input.RemoteTouchController
 import top.ozaoza.remoe.rtc.RtcCodecProbe
 import top.ozaoza.remoe.rtc.RtcPerformanceStats
+import top.ozaoza.remoe.rtc.RtcRuntime
 import top.ozaoza.remoe.rtc.RtcSession
 import top.ozaoza.remoe.rtc.TextureViewVideoRenderer
 import top.ozaoza.remoe.signaling.InviteParser
@@ -55,9 +56,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.RendererEvents {
     private val probeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var app: RemoeApplication
-    private lateinit var renderer: TextureViewVideoRenderer
+    private lateinit var remoteRoot: FrameLayout
+    private lateinit var remoteTouchLayer: View
+    private var renderer: TextureViewVideoRenderer? = null
     private lateinit var remoteCursor: RemoteCursorView
-    private lateinit var touchController: RemoteTouchController
+    private var touchController: RemoteTouchController? = null
     private lateinit var inviteInput: EditText
     private lateinit var fpsInput: EditText
     private lateinit var bitrateInput: EditText
@@ -94,6 +97,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private var showPerformanceStats = false
     private var remoteMenuExpanded = false
     private var remoteModeActive = false
+    private var connectionPreparing = false
     private val firstSinkFrame = AtomicBoolean(false)
     private val remoteVideoSink = VideoSink { frame ->
         if (firstSinkFrame.compareAndSet(false, true)) {
@@ -102,7 +106,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 "first sink frame=${frame.buffer.width}x${frame.buffer.height} rotation=${frame.rotation}",
             )
         }
-        renderer.onFrame(frame)
+        renderer?.onFrame(frame)
     }
     private val qrScannerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -121,19 +125,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         videoSettingsStore = VideoSettingsStore(this)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
 
-        renderer = TextureViewVideoRenderer(this).apply {
-            init(app.rtcRuntime.eglBase.eglBaseContext, this@MainActivity)
-            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
-            setMirror(false)
-        }
-        val remoteTouchLayer = View(this)
+        remoteTouchLayer = View(this)
         remoteCursor = RemoteCursorView(this).apply { visibility = View.GONE }
-        touchController = RemoteTouchController(
-            view = remoteTouchLayer,
-            contentView = renderer,
-            send = { input -> session?.sendInput(input) == true },
-            onPointerMoved = ::positionRemoteCursor,
-        )
 
         controlPanel = createControlPanel()
         remoteStopButton = secondaryButton("断开").apply {
@@ -170,13 +163,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         }
         renderPerformanceStats(RtcPerformanceStats())
 
-        val root = FrameLayout(this).apply {
+        remoteRoot = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
-            addView(renderer, FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER,
-            ))
             addView(remoteTouchLayer, FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -197,7 +185,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 Gravity.TOP or Gravity.START,
             ).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
         }
-        setContentView(root)
+        setContentView(remoteRoot)
         showStatus("登录后选择一台在线电脑")
         restoreNativeSession()
     }
@@ -235,6 +223,9 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         diagnosticsView = textView(11f, Color.rgb(205, 214, 228)).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
+            maxHeight = dp(180)
+            isVerticalScrollBarEnabled = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
         }
         connectButton = primaryButton(getString(R.string.connect)).apply { setOnClickListener { connect() } }
         disconnectButton = secondaryButton(getString(R.string.disconnect)).apply {
@@ -634,7 +625,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun connect() {
-        if (session != null) return
+        if (session != null || connectionPreparing) return
         val invite = try {
             InviteParser.parse(inviteInput.text.toString())
         } catch (error: IllegalArgumentException) {
@@ -663,20 +654,39 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         disconnectButton.isEnabled = true
         codecProbeButton.isEnabled = false
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        connectionPreparing = true
         enterRemoteMode()
-        RemoteSessionService.start(this)
-        session = RtcSession(
-            runtime = app.rtcRuntime,
-            httpClient = app.httpClient,
-            invite = invite,
-            clientConfig = config,
-            diagnostics = app.diagnosticLog,
-            observer = this,
-        ).also { it.connect() }
+        showStatus("正在准备 WebRTC 解码器…")
+        probeExecutor.execute {
+            val runtime = runCatching { app.rtcRuntime }
+            postUi {
+                if (!connectionPreparing) return@postUi
+                runtime.onSuccess { readyRuntime ->
+                    try {
+                        ensureRemoteRenderer(readyRuntime)
+                        val readySession = RtcSession(
+                            runtime = readyRuntime,
+                            httpClient = app.httpClient,
+                            invite = invite,
+                            clientConfig = config,
+                            diagnostics = app.diagnosticLog,
+                            observer = this,
+                        )
+                        session = readySession
+                        connectionPreparing = false
+                        RemoteSessionService.start(this)
+                        readySession.connect()
+                    } catch (error: Throwable) {
+                        failConnectionPreparation(error)
+                    }
+                }.onFailure(::failConnectionPreparation)
+            }
+        }
     }
 
     private fun disconnect(reason: String) {
-        touchController.cancel()
+        connectionPreparing = false
+        touchController?.cancel()
         detachRemoteTrack()
         setPerformanceStatsVisible(false)
         session?.close(reason)
@@ -686,12 +696,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         disconnectButton.isEnabled = false
         codecProbeButton.isEnabled = true
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        renderer.clearImage()
+        releaseRemoteRenderer()
         leaveRemoteMode()
     }
 
     private fun runCodecProbe() {
-        if (session != null) return
+        if (session != null || connectionPreparing) return
         codecProbeButton.isEnabled = false
         diagnosticsView.text = getString(R.string.codec_probe_running)
         probeExecutor.execute {
@@ -703,6 +713,51 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 }
             }
         }
+    }
+
+    private fun ensureRemoteRenderer(runtime: RtcRuntime) {
+        if (renderer != null) return
+        val readyRenderer = TextureViewVideoRenderer(this).apply {
+            init(runtime.eglBase.eglBaseContext, this@MainActivity)
+            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT)
+            setMirror(false)
+        }
+        renderer = readyRenderer
+        touchController = RemoteTouchController(
+            view = remoteTouchLayer,
+            contentView = readyRenderer,
+            send = { input -> session?.sendInput(input) == true },
+            onPointerMoved = ::positionRemoteCursor,
+        )
+        remoteRoot.addView(readyRenderer, 0, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER,
+        ))
+    }
+
+    private fun releaseRemoteRenderer() {
+        touchController?.dispose()
+        touchController = null
+        renderer?.let { readyRenderer ->
+            remoteRoot.removeView(readyRenderer)
+            readyRenderer.release()
+        }
+        renderer = null
+    }
+
+    private fun failConnectionPreparation(error: Throwable) {
+        connectionPreparing = false
+        session?.close("WebRTC 初始化失败")
+        session = null
+        RemoteSessionService.stop(this)
+        connectButton.isEnabled = true
+        disconnectButton.isEnabled = false
+        codecProbeButton.isEnabled = true
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        releaseRemoteRenderer()
+        leaveRemoteMode()
+        showStatus("WebRTC 初始化失败：${error.message ?: error.javaClass.simpleName}", true)
     }
 
     override fun onStatus(message: String) = postUi { showStatus(message) }
@@ -723,7 +778,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
             "${header.bitrateBps / 1_000_000.0} Mbps CBR"
         }
         showStatus("${header.codec} ${header.width}×${header.height} · ${header.fpsNum} FPS · $rate")
-        touchController.syncPointerPosition()
+        touchController?.syncPointerPosition()
     }
 
     override fun onPerformanceStats(stats: RtcPerformanceStats) = postUi {
@@ -735,7 +790,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     override fun onError(message: String) = postUi {
-        touchController.cancel()
+        connectionPreparing = false
+        touchController?.cancel()
         detachRemoteTrack()
         session = null
         RemoteSessionService.stop(this)
@@ -744,6 +800,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         disconnectButton.isEnabled = false
         codecProbeButton.isEnabled = true
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        releaseRemoteRenderer()
         leaveRemoteMode()
         showStatus(message, true)
     }
@@ -752,13 +809,13 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onFrameResolutionChanged(width: Int, height: Int, rotation: Int) = postUi {
         app.diagnosticLog.append("renderer", "resolution=${width}x$height rotation=$rotation")
-        touchController.refreshPointerPosition()
+        touchController?.refreshPointerPosition()
     }
 
     override fun onStop() {
         bindingForeground = false
         bindingHandler.removeCallbacks(bindingPoll)
-        touchController.cancel()
+        touchController?.cancel()
         if (session != null) {
             app.diagnosticLog.append("lifecycle", "Activity stopped; retaining RtcSession")
         }
@@ -775,12 +832,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     override fun onDestroy() {
+        connectionPreparing = false
         session?.close("界面已销毁，连接已断开")
         session = null
         RemoteSessionService.stop(this)
-        touchController.dispose()
         detachRemoteTrack()
-        renderer.release()
+        releaseRemoteRenderer()
         probeExecutor.shutdownNow()
         bindingHandler.removeCallbacks(bindingPoll)
         super.onDestroy()
@@ -788,7 +845,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus && ::touchController.isInitialized) touchController.cancel()
+        if (!hasFocus) touchController?.cancel()
     }
 
     private fun detachRemoteTrack() {
@@ -809,7 +866,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private fun enterRemoteMode() {
         remoteModeActive = true
         remoteCursor.visibility = View.INVISIBLE
-        touchController.resetViewport()
+        touchController?.resetViewport()
         setRemoteMenuExpanded(false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         controlPanel.visibility = View.GONE
@@ -825,7 +882,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private fun leaveRemoteMode() {
         remoteModeActive = false
         remoteCursor.visibility = View.GONE
-        touchController.resetViewport()
+        touchController?.resetViewport()
         setRemoteMenuExpanded(false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         remoteToolbar.visibility = View.GONE
@@ -956,9 +1013,9 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         )
     }
 
-    private fun positionRemoteCursor(point: top.ozaoza.remoe.input.TouchGestureEngine.Point) {
-        remoteCursor.translationX = point.x - dp(3)
-        remoteCursor.translationY = point.y - dp(2)
+    private fun positionRemoteCursor(x: Float, y: Float) {
+        remoteCursor.translationX = x - dp(3)
+        remoteCursor.translationY = y - dp(2)
         if (remoteModeActive) remoteCursor.visibility = View.VISIBLE
     }
 

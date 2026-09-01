@@ -1,6 +1,7 @@
 package top.ozaoza.remoe.rtc
 
 import android.os.SystemClock
+import android.view.Choreographer
 import okhttp3.OkHttpClient
 import org.webrtc.DataChannel
 import org.webrtc.CandidatePairChangeEvent
@@ -21,6 +22,7 @@ import top.ozaoza.remoe.protocol.ClientConfig
 import top.ozaoza.remoe.protocol.ClientConfigCodec
 import top.ozaoza.remoe.protocol.ClipboardCodec
 import top.ozaoza.remoe.protocol.InputEventCodec
+import top.ozaoza.remoe.protocol.InputType
 import top.ozaoza.remoe.protocol.Protocol
 import top.ozaoza.remoe.protocol.RemoteInputEvent
 import top.ozaoza.remoe.protocol.SignalFrame
@@ -86,6 +88,10 @@ class RtcSession(
     private val receivedSignalCounts = mutableMapOf<SignalType, Int>()
     private var remoteSdpObserver: SdpObserver? = null
     private var inputSequence = 0u
+    private val inputChoreographer = Choreographer.getInstance()
+    private val inputFrameCallback = Choreographer.FrameCallback { flushPendingMove() }
+    private var pendingMove: RemoteInputEvent? = null
+    private var inputFrameScheduled = false
     @Volatile
     private var stopped = false
     @Volatile
@@ -101,7 +107,15 @@ class RtcSession(
     @Synchronized
     fun sendInput(event: RemoteInputEvent): Boolean {
         if (stopped || !bootstrapComplete || streamHeader == null) return false
-        return sendControl(InputEventCodec.encode(event.copy(sequence = inputSequence++)))
+        if (event.type == InputType.MOUSE_MOVE) {
+            // Pointer moves are absolute, so only the newest unsent position matters.
+            pendingMove = event
+            schedulePendingMove()
+            return true
+        }
+        // Preserve ordering for button and wheel input, especially drag release.
+        if (!flushPendingMove(force = true)) return false
+        return sendInputNow(event)
     }
 
     @Synchronized
@@ -121,6 +135,11 @@ class RtcSession(
     fun close(reason: String = "已断开") {
         if (stopped) return
         stopped = true
+        pendingMove = null
+        if (inputFrameScheduled) {
+            inputChoreographer.removeFrameCallback(inputFrameCallback)
+            inputFrameScheduled = false
+        }
         statsTask?.cancel(false)
         statsTask = null
         statsExecutor.shutdownNow()
@@ -513,6 +532,31 @@ class RtcSession(
             channel.send(DataChannel.Buffer(ByteBuffer.wrap(bytes), true))
     }
 
+    @Synchronized
+    private fun flushPendingMove(force: Boolean = false): Boolean {
+        inputFrameScheduled = false
+        val event = pendingMove ?: return true
+        val channel = control
+        // Do not add replaceable input to an already congested reliable channel.
+        if (!force && channel != null && channel.bufferedAmount() > MAX_BUFFERED_INPUT_BYTES) {
+            schedulePendingMove()
+            return true
+        }
+        pendingMove = null
+        return sendInputNow(event)
+    }
+
+    private fun schedulePendingMove() {
+        if (inputFrameScheduled || stopped) return
+        inputFrameScheduled = true
+        inputChoreographer.postFrameCallback(inputFrameCallback)
+    }
+
+    private fun sendInputNow(event: RemoteInputEvent): Boolean {
+        if (stopped || !bootstrapComplete || streamHeader == null) return false
+        return sendControl(InputEventCodec.encode(event.copy(sequence = inputSequence++)))
+    }
+
     private fun startStats() {
         if (statsTask != null) return
         statsTask = statsExecutor.scheduleAtFixedRate(
@@ -634,5 +678,9 @@ class RtcSession(
         override fun onSetSuccess() = Unit
         override fun onCreateFailure(error: String) = fail(error)
         override fun onSetFailure(error: String) = fail(error)
+    }
+
+    private companion object {
+        const val MAX_BUFFERED_INPUT_BYTES = 8L * 1024L
     }
 }

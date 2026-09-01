@@ -22,16 +22,19 @@ class TouchGestureEngineTest {
             events += it
             true
         },
-        relativeCoordinates = { delta, currentX, currentY ->
-            (currentX + delta.x * 65_535f / contentWidth).toInt().coerceIn(0, 65_535) to
-                (currentY + delta.y * 65_535f / contentHeight).toInt().coerceIn(0, 65_535)
+        relativeCoordinates = { deltaX, deltaY, currentX, currentY, result ->
+            result[0] = (currentX + deltaX * 65_535f / contentWidth)
+                .toInt().coerceIn(0, 65_535)
+            result[1] = (currentY + deltaY * 65_535f / contentHeight)
+                .toInt().coerceIn(0, 65_535)
+            true
         },
         onPointerMoved = { x, y -> pointerPositions += x to y },
         panViewport = { x, y ->
             viewportPans += point(x, y)
             viewportConsumesPan
         },
-        zoomViewport = { scale, _, _ -> viewportZooms += scale },
+        zoomViewport = { scale, _, _, _, _ -> viewportZooms += scale },
         clockMs = { nowMs },
     )
 
