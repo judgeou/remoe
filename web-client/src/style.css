@@ -141,7 +141,7 @@ button:disabled { opacity: .45; cursor: default; }
   background: #020304;
 }
 .viewer > * { grid-area: 1 / 1; }
-canvas { display: block; width: 100%; height: auto; }
+.viewer-video { display: block; width: 100%; height: auto; object-fit: contain; }
 .telemetry { display: flex; justify-content: space-between; gap: 20px; padding: 14px 2px; font-size: 13px; }
 #status.error { color: #ff766f; }
 .control-gate {
@@ -234,6 +234,8 @@ body.remote-active .remote-toolbar {
 .performance-stats div { display: flex; justify-content: space-between; gap: 8px; }
 .performance-stats dt { color: #8492a1; }
 .performance-stats dd { margin: 0; color: #eef3f8; }
+.performance-stats .performance-decoder { grid-column: 1 / -1; }
+.performance-decoder dd { overflow-wrap: anywhere; text-align: right; }
 .mobile-controls { display: none; }
 .mobile-toolbar-handle { display: none; }
 .remote-toolbar button.active { background: #297e68; color: #effff9; }
@@ -241,9 +243,9 @@ body.remote-active .remote-toolbar {
 .remote-toolbar .error { color: #ff766f; }
 body.control-active:not(.touch-control-active) .remote-toolbar { opacity: .15; pointer-events: none; }
 body.control-active:not(.touch-control-active) .remote-toolbar.show-performance { opacity: .85; }
-body.control-active canvas { cursor: none; }
+body.control-active .viewer-video { cursor: none; }
 body.control-active .remote-cursor { display: block; }
-body.touch-control-active canvas { touch-action: none; }
+body.touch-control-active .viewer-video { touch-action: none; }
 
 .diagnostics-page { width: min(1180px, 100%); margin: 0 auto; padding: 50px 24px; }
 .diagnostics-header { max-width: 800px; margin-bottom: 26px; }

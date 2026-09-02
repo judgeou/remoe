@@ -50,7 +50,13 @@ interface PerformanceStats {
   fps: number;
   bitrateMbps: number;
   dataRateKBps: number;
-  lossEvents: number;
+  lostPackets: number;
+  droppedFrames: number;
+  jitterBufferMs: number;
+  decodeMs: number;
+  processingMs: number;
+  decoderImplementation: string;
+  powerEfficientDecoder: boolean | null;
 }
 
 type LockableScreenOrientation = ScreenOrientation & {
@@ -81,13 +87,19 @@ const remoteActive = ref(false);
 const controlActive = ref(false);
 const frameVisible = ref(false);
 const viewportZoom = ref(1);
-const canvasStyle = reactive<CSSProperties>({});
+const videoStyle = reactive<CSSProperties>({});
 const cursorStyle = reactive<CSSProperties>({});
 const performanceStats = reactive<PerformanceStats>({
   fps: 0,
   bitrateMbps: 0,
   dataRateKBps: 0,
-  lossEvents: 0,
+  lostPackets: 0,
+  droppedFrames: 0,
+  jitterBufferMs: 0,
+  decodeMs: 0,
+  processingMs: 0,
+  decoderImplementation: '',
+  powerEfficientDecoder: null,
 });
 const touchPreferred = ref(false);
 const touchMode = ref<'trackpad' | 'direct'>('trackpad');
@@ -106,9 +118,9 @@ let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
 let remoteClipboardText = '';
 
-function canvas(): HTMLCanvasElement {
+function video(): HTMLVideoElement {
   if (!viewer.value) throw new Error('远程画面尚未挂载');
-  return viewer.value.getCanvas();
+  return viewer.value.getVideo();
 }
 
 function setStatus(message: string, isError = false) {
@@ -124,7 +136,7 @@ function setRemoteActive(active: boolean) {
 
 function positionRemoteCursor(position: CursorPosition = cursorPosition) {
   cursorPosition = position;
-  const point = cursorViewportPosition(position.x, position.y, canvas().getBoundingClientRect());
+  const point = cursorViewportPosition(position.x, position.y, video().getBoundingClientRect());
   cursorStyle.left = `${point.left}px`;
   cursorStyle.top = `${point.top}px`;
 }
@@ -145,11 +157,11 @@ function applyViewportTransform() {
   clampViewportPan();
   if (viewportZoom.value <= 1) {
     viewportZoom.value = 1;
-    delete canvasStyle.transform;
-    delete canvasStyle.transformOrigin;
+    delete videoStyle.transform;
+    delete videoStyle.transformOrigin;
   } else {
-    canvasStyle.transformOrigin = 'center center';
-    canvasStyle.transform = `translate3d(${viewportPan.x}px, ${viewportPan.y}px, 0) ` +
+    videoStyle.transformOrigin = 'center center';
+    videoStyle.transform = `translate3d(${viewportPan.x}px, ${viewportPan.y}px, 0) ` +
       `scale(${viewportZoom.value})`;
   }
   void nextTick(() => positionRemoteCursor());
@@ -196,8 +208,8 @@ function fitRemoteVideo() {
     viewportWidth,
     viewportHeight,
   );
-  canvasStyle.width = `${fitted.width}px`;
-  canvasStyle.height = `${fitted.height}px`;
+  videoStyle.width = `${fitted.width}px`;
+  videoStyle.height = `${fitted.height}px`;
   fittedVideoSize = fitted;
   applyViewportTransform();
 }
@@ -212,11 +224,22 @@ function leaveRemoteMode() {
   fittedVideoSize = null;
   viewportZoom.value = 1;
   viewportPan = { x: 0, y: 0 };
-  delete canvasStyle.width;
-  delete canvasStyle.height;
-  delete canvasStyle.transform;
-  delete canvasStyle.transformOrigin;
-  Object.assign(performanceStats, { fps: 0, bitrateMbps: 0, dataRateKBps: 0, lossEvents: 0 });
+  delete videoStyle.width;
+  delete videoStyle.height;
+  delete videoStyle.transform;
+  delete videoStyle.transformOrigin;
+  Object.assign(performanceStats, {
+    fps: 0,
+    bitrateMbps: 0,
+    dataRateKBps: 0,
+    lostPackets: 0,
+    droppedFrames: 0,
+    jitterBufferMs: 0,
+    decodeMs: 0,
+    processingMs: 0,
+    decoderImplementation: '',
+    powerEfficientDecoder: null,
+  });
   remoteClipboardPending.value = false;
   remoteClipboardText = '';
   document.body.classList.remove('touch-control-active');
@@ -407,20 +430,14 @@ async function connect(inviteOverride?: string) {
       onIceState: (state: string) => { details.value = `ICE: ${state}`; },
       onStream: (stream: StreamDescription) => {
         streamSize = { width: stream.width, height: stream.height };
-        const target = canvas();
-        target.width = stream.width;
-        target.height = stream.height;
         const rate = stream.rateControl === 1
-          ? `固定质量 ${stream.quality} · 网络 ${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps`
+          ? `固定质量 ${stream.quality}`
           : `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps CBR`;
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
           `${rate} · ${stream.codec}`;
       },
-      onFrame: (frame: CanvasImageSource) => {
-        const target = canvas();
-        const context = target.getContext('2d', { alpha: false });
-        if (!context) throw new Error('浏览器无法创建 Canvas 2D context');
-        context.drawImage(frame, 0, 0, target.width, target.height);
+      onFirstFrame: () => {
+        const target = video();
         if (frameVisible.value) return;
         frameVisible.value = true;
         setRemoteActive(true);
@@ -448,7 +465,7 @@ async function connect(inviteOverride?: string) {
         setStatus(error.message, true);
         running.value = false;
       },
-    });
+    }, video());
     client.value = nextClient;
     await nextClient.connect();
   } catch (error) {
@@ -706,7 +723,7 @@ onBeforeUnmount(() => {
       :control-active="controlActive"
       :status="status"
       :status-error="statusError"
-      :canvas-style="canvasStyle"
+      :video-style="videoStyle"
       :cursor-style="cursorStyle"
       :performance-stats="performanceStats"
       :touch-preferred="touchPreferred"

@@ -89,10 +89,17 @@ export class RemoeBrowserClient {
   #inputReady = false;
   #clipboardSequence = 0;
 
-  constructor(invite, settings, events = {}) {
+  /**
+   * @param {object} invite
+   * @param {object} settings
+   * @param {object} events
+   * @param {HTMLVideoElement} videoElement
+   */
+  constructor(invite, settings, events, videoElement) {
     this.#invite = invite;
     this.#settings = settings;
     this.#events = events;
+    this.#remoteVideo = videoElement;
   }
 
   async connect() {
@@ -264,12 +271,15 @@ export class RemoeBrowserClient {
     }
     this.#remoteTrack = event.track;
     this.#remoteStream = event.streams[0] ?? new MediaStream([event.track]);
-    const video = document.createElement('video');
+    const video = this.#remoteVideo;
+    if (!video) {
+      this.#fail(new Error('远端视频元素尚未挂载'));
+      return;
+    }
     video.muted = true;
     video.autoplay = true;
     video.playsInline = true;
     video.srcObject = this.#remoteStream;
-    this.#remoteVideo = video;
     event.track.onended = () => {
       if (!this.#stopped) this.#fail(new Error('远端视频 Track 已结束'));
     };
@@ -293,28 +303,30 @@ export class RemoeBrowserClient {
     const codec = isH264 ? h264CodecString(header) : av1CodecString(header);
     this.#streamHeader = header;
     this.#events.onStream?.({ ...header, codec });
+    // Arm first-frame observation before StreamReady lets the Host send. This
+    // avoids missing the only fresh frame when a fixed-quality desktop is idle.
+    this.#waitForFirstVideoFrame();
     this.#control.send(encodeStreamReady());
     this.#inputReady = true;
-    this.#startVideoFrames();
     this.#statsTimer = setInterval(() => {
       this.#reportPeerStats().catch((error) => this.#fail(error));
     }, 1_000);
     this.#status(`等待第一张 ${isH264 ? 'H.264' : 'AV1'} 画面…`);
   }
 
-  #startVideoFrames() {
+  #waitForFirstVideoFrame() {
     if (!this.#remoteVideo || !this.#streamHeader) return;
     const video = this.#remoteVideo;
     if (!video.requestVideoFrameCallback) {
       this.#fail(new Error('浏览器不支持 requestVideoFrameCallback'));
       return;
     }
-    const render = () => {
+    const notify = () => {
+      this.#videoFrameCallback = 0;
       if (this.#stopped) return;
-      this.#events.onFrame?.(video, this.#streamHeader);
-      this.#videoFrameCallback = video.requestVideoFrameCallback(render);
+      this.#events.onFirstFrame?.(this.#streamHeader);
     };
-    this.#videoFrameCallback = video.requestVideoFrameCallback(render);
+    this.#videoFrameCallback = video.requestVideoFrameCallback(notify);
   }
 
   async #reportPeerStats() {
@@ -328,16 +340,47 @@ export class RemoeBrowserClient {
       bytes: inbound.bytesReceived ?? 0,
       frames: inbound.framesDecoded ?? inbound.framesReceived ?? 0,
       lost: inbound.packetsLost ?? 0,
+      dropped: inbound.framesDropped ?? 0,
+      jitterBufferDelay: inbound.jitterBufferDelay ?? 0,
+      jitterBufferFrames: inbound.jitterBufferEmittedCount ?? 0,
+      decodeTime: inbound.totalDecodeTime ?? 0,
+      processingDelay: inbound.totalProcessingDelay ?? 0,
+      decoderImplementation: inbound.decoderImplementation ?? '',
+      powerEfficientDecoder: inbound.powerEfficientDecoder ?? null,
     };
     if (this.#lastInboundStats) {
       const elapsedMs = current.timestamp - this.#lastInboundStats.timestamp;
       if (elapsedMs > 0) {
         const bytes = Math.max(0, current.bytes - this.#lastInboundStats.bytes);
+        const decodedFrames = Math.max(0, current.frames - this.#lastInboundStats.frames);
+        const jitterFrames = Math.max(
+          0, current.jitterBufferFrames - this.#lastInboundStats.jitterBufferFrames);
+        const averageMs = (total, previousTotal, count) => count > 0
+          ? Math.max(0, total - previousTotal) * 1_000 / count
+          : 0;
         this.#events.onStats?.({
-          fps: Math.max(0, current.frames - this.#lastInboundStats.frames) * 1_000 / elapsedMs,
+          fps: decodedFrames * 1_000 / elapsedMs,
           bitrateMbps: bytes * 8 / elapsedMs / 1_000,
           dataRateKBps: bytes / elapsedMs,
-          lossEvents: Math.max(0, current.lost - this.#lastInboundStats.lost),
+          lostPackets: Math.max(0, current.lost - this.#lastInboundStats.lost),
+          droppedFrames: Math.max(0, current.dropped - this.#lastInboundStats.dropped),
+          jitterBufferMs: averageMs(
+            current.jitterBufferDelay,
+            this.#lastInboundStats.jitterBufferDelay,
+            jitterFrames,
+          ),
+          decodeMs: averageMs(
+            current.decodeTime,
+            this.#lastInboundStats.decodeTime,
+            decodedFrames,
+          ),
+          processingMs: averageMs(
+            current.processingDelay,
+            this.#lastInboundStats.processingDelay,
+            decodedFrames,
+          ),
+          decoderImplementation: current.decoderImplementation,
+          powerEfficientDecoder: current.powerEfficientDecoder,
         });
       }
     }

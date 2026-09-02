@@ -9,7 +9,7 @@
 <body class="remote-active control-active touch-control-active">
   <main>
     <section class="viewer">
-      <canvas id="video" width="2560" height="1440"></canvas>
+      <video id="video" class="viewer-video" autoplay muted playsinline></video>
       <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
       <div class="remote-toolbar">
         <div class="remote-toolbar-main">
@@ -28,13 +28,13 @@
   </main>
   <script type="module">
     import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
-    const canvas = document.querySelector('#video');
+    const video = document.querySelector('#video');
     const cursor = document.querySelector('#remote-cursor');
     const fitted = fitVideoSize(2560, 1440,
       document.documentElement.clientWidth, document.documentElement.clientHeight);
-    canvas.style.width = `${fitted.width}px`;
-    canvas.style.height = `${fitted.height}px`;
-    const point = cursorViewportPosition(32768, 32768, canvas.getBoundingClientRect());
+    video.style.width = `${fitted.width}px`;
+    video.style.height = `${fitted.height}px`;
+    const point = cursorViewportPosition(32768, 32768, video.getBoundingClientRect());
     cursor.style.left = `${point.left}px`;
     cursor.style.top = `${point.top}px`;
   </script>

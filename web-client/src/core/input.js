@@ -80,7 +80,7 @@ function wheelDelta(value) {
 }
 
 export class RemoteInputController {
-  #canvas;
+  #target;
   #send;
   #onActiveChanged;
   #onPointerMoved;
@@ -99,7 +99,7 @@ export class RemoteInputController {
   #lastTap = null;
 
   /**
-   * @param {HTMLCanvasElement} canvas
+   * @param {HTMLElement} target
    * @param {(event: {type: number, flags?: number, value1?: number, value2?: number}) => boolean} send
    * @param {(active: boolean) => void} onActiveChanged
    * @param {(position: {x: number, y: number}) => void} onPointerMoved
@@ -107,9 +107,9 @@ export class RemoteInputController {
    *   {type: 'pinch', scale: number, clientX: number, clientY: number,
    *    deltaX: number, deltaY: number})) => boolean} onViewportGesture
    */
-  constructor(canvas, send, onActiveChanged = () => {}, onPointerMoved = () => {},
+  constructor(target, send, onActiveChanged = () => {}, onPointerMoved = () => {},
               onViewportGesture = () => false) {
-    this.#canvas = canvas;
+    this.#target = target;
     this.#send = send;
     this.#onActiveChanged = onActiveChanged;
     this.#onPointerMoved = onPointerMoved;
@@ -121,15 +121,15 @@ export class RemoteInputController {
     this.#listen(document, 'wheel', (event) => this.#wheel(event), { passive: false });
     this.#listen(document, 'keydown', (event) => this.#keyboard(event, false));
     this.#listen(document, 'keyup', (event) => this.#keyboard(event, true));
-    this.#listen(this.#canvas, 'pointerdown', (event) => this.#touchPointerDown(event));
-    this.#listen(this.#canvas, 'pointermove', (event) => this.#touchPointerMove(event));
-    this.#listen(this.#canvas, 'pointerup', (event) => this.#touchPointerUp(event));
-    this.#listen(this.#canvas, 'pointercancel', (event) => this.#touchPointerUp(event));
+    this.#listen(this.#target, 'pointerdown', (event) => this.#touchPointerDown(event));
+    this.#listen(this.#target, 'pointermove', (event) => this.#touchPointerMove(event));
+    this.#listen(this.#target, 'pointerup', (event) => this.#touchPointerUp(event));
+    this.#listen(this.#target, 'pointercancel', (event) => this.#touchPointerUp(event));
     this.#listen(window, 'blur', () => this.releaseAll());
     this.#listen(document, 'visibilitychange', () => {
       if (document.hidden) this.releaseAll();
     });
-    this.#listen(this.#canvas, 'contextmenu', (event) => event.preventDefault());
+    this.#listen(this.#target, 'contextmenu', (event) => event.preventDefault());
   }
 
   get active() { return this.#active; }
@@ -138,9 +138,9 @@ export class RemoteInputController {
   async capture() {
     this.#touchMode = null;
     try {
-      await this.#canvas.requestPointerLock({ unadjustedMovement: true });
+      await this.#target.requestPointerLock({ unadjustedMovement: true });
     } catch {
-      await this.#canvas.requestPointerLock();
+      await this.#target.requestPointerLock();
     }
   }
 
@@ -152,7 +152,7 @@ export class RemoteInputController {
     this.#touchMode = mode;
     this.#touches.clear();
     this.#touchGesture = null;
-    if (document.pointerLockElement === this.#canvas) document.exitPointerLock();
+    if (document.pointerLockElement === this.#target) document.exitPointerLock();
     this.#setActive(true);
   }
 
@@ -220,7 +220,7 @@ export class RemoteInputController {
 
   dispose() {
     this.releaseAll();
-    if (document.pointerLockElement === this.#canvas) document.exitPointerLock();
+    if (document.pointerLockElement === this.#target) document.exitPointerLock();
     for (const [target, type, listener, options] of this.#listeners) {
       target.removeEventListener(type, listener, options);
     }
@@ -236,7 +236,7 @@ export class RemoteInputController {
   }
 
   #pointerLockChanged() {
-    const pointerLocked = document.pointerLockElement === this.#canvas;
+    const pointerLocked = document.pointerLockElement === this.#target;
     const active = pointerLocked || this.#touchMode !== null;
     if (!active) this.releaseAll();
     else {
@@ -256,8 +256,8 @@ export class RemoteInputController {
   }
 
   #mouseMove(event) {
-    if (document.pointerLockElement !== this.#canvas) return;
-    const rect = this.#canvas.getBoundingClientRect();
+    if (document.pointerLockElement !== this.#target) return;
+    const rect = this.#target.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     this.#x = Math.max(0, Math.min(65535, this.#x + event.movementX * 65535 / rect.width));
     this.#y = Math.max(0, Math.min(65535, this.#y + event.movementY * 65535 / rect.height));
@@ -276,7 +276,7 @@ export class RemoteInputController {
   }
 
   #moveRelative(deltaX, deltaY) {
-    const rect = this.#canvas.getBoundingClientRect();
+    const rect = this.#target.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     this.#x = Math.max(0, Math.min(65535, this.#x + deltaX * 65535 / rect.width));
     this.#y = Math.max(0, Math.min(65535, this.#y + deltaY * 65535 / rect.height));
@@ -284,7 +284,7 @@ export class RemoteInputController {
   }
 
   #moveAbsolute(clientX, clientY) {
-    const rect = this.#canvas.getBoundingClientRect();
+    const rect = this.#target.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     this.#x = Math.max(0, Math.min(65535, (clientX - rect.left) * 65535 / rect.width));
     this.#y = Math.max(0, Math.min(65535, (clientY - rect.top) * 65535 / rect.height));
@@ -294,7 +294,7 @@ export class RemoteInputController {
   #touchPointerDown(event) {
     if (!this.#touchMode || (event.pointerType !== 'touch' && event.pointerType !== 'pen')) return;
     event.preventDefault();
-    this.#canvas.setPointerCapture?.(event.pointerId);
+    this.#target.setPointerCapture?.(event.pointerId);
     const point = { x: event.clientX, y: event.clientY };
     this.#touches.set(event.pointerId, point);
     if (!this.#touchGesture) {
@@ -461,7 +461,7 @@ export class RemoteInputController {
   }
 
   #mouseButton(event, release) {
-    if (document.pointerLockElement !== this.#canvas) return;
+    if (document.pointerLockElement !== this.#target) return;
     const type = mouseTypes.get(event.button);
     if (!type) return;
     event.preventDefault();
@@ -471,7 +471,7 @@ export class RemoteInputController {
   }
 
   #wheel(event) {
-    if (document.pointerLockElement !== this.#canvas) return;
+    if (document.pointerLockElement !== this.#target) return;
     event.preventDefault();
     const vertical = wheelDelta(event.deltaY);
     const horizontal = wheelDelta(event.deltaX);

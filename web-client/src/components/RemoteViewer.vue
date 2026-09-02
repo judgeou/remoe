@@ -5,7 +5,13 @@ interface PerformanceStats {
   fps: number;
   bitrateMbps: number;
   dataRateKBps: number;
-  lossEvents: number;
+  lostPackets: number;
+  droppedFrames: number;
+  jitterBufferMs: number;
+  decodeMs: number;
+  processingMs: number;
+  decoderImplementation: string;
+  powerEfficientDecoder: boolean | null;
 }
 
 defineProps<{
@@ -13,7 +19,7 @@ defineProps<{
   controlActive: boolean;
   status: string;
   statusError: boolean;
-  canvasStyle: CSSProperties;
+  videoStyle: CSSProperties;
   cursorStyle: CSSProperties;
   performanceStats: PerformanceStats;
   touchPreferred: boolean;
@@ -42,7 +48,7 @@ const emit = defineEmits<{
   resetViewport: [];
 }>();
 
-const canvas = ref<HTMLCanvasElement | null>(null);
+const video = ref<HTMLVideoElement | null>(null);
 const viewerElement = ref<HTMLElement | null>(null);
 const mobileInput = ref<HTMLInputElement | null>(null);
 const showPerformance = ref(false);
@@ -113,9 +119,9 @@ function clearMobileInput(event: Event) {
 }
 
 defineExpose({
-  getCanvas: () => {
-    if (!canvas.value) throw new Error('视频 Canvas 尚未挂载');
-    return canvas.value;
+  getVideo: () => {
+    if (!video.value) throw new Error('视频元素尚未挂载');
+    return video.value;
   },
   getElement: () => {
     if (!viewerElement.value) throw new Error('远程画面容器尚未挂载');
@@ -126,7 +132,16 @@ defineExpose({
 
 <template>
   <section v-show="frameVisible" ref="viewerElement" class="viewer" aria-live="polite">
-    <canvas id="video" ref="canvas" :style="canvasStyle"></canvas>
+    <video
+      id="video"
+      ref="video"
+      class="viewer-video"
+      :style="videoStyle"
+      autoplay
+      muted
+      playsinline
+      disablepictureinpicture
+    ></video>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
     <div v-if="frameVisible && !controlActive" id="control-gate" class="control-gate">
       <button id="capture-input" type="button" @click="emit('capture')">
@@ -167,7 +182,14 @@ defineExpose({
         <div><dt>解码 FPS</dt><dd>{{ performanceStats.fps.toFixed(1) }}</dd></div>
         <div><dt>接收码率</dt><dd>{{ performanceStats.bitrateMbps.toFixed(1) }} Mbps</dd></div>
         <div><dt>实际网速</dt><dd>{{ performanceStats.dataRateKBps.toFixed(1) }} KB/s</dd></div>
-        <div><dt>丢帧事件</dt><dd>{{ performanceStats.lossEvents }}</dd></div>
+        <div><dt>抖动缓冲</dt><dd>{{ performanceStats.jitterBufferMs.toFixed(1) }} ms</dd></div>
+        <div><dt>解码耗时</dt><dd>{{ performanceStats.decodeMs.toFixed(1) }} ms</dd></div>
+        <div><dt>接收到解码</dt><dd>{{ performanceStats.processingMs.toFixed(1) }} ms</dd></div>
+        <div><dt>本周期丢包</dt><dd>{{ performanceStats.lostPackets }}</dd></div>
+        <div><dt>本周期掉帧</dt><dd>{{ performanceStats.droppedFrames }}</dd></div>
+        <div><dt>节能解码</dt><dd>{{ performanceStats.powerEfficientDecoder === null
+          ? '未知' : (performanceStats.powerEfficientDecoder ? '是' : '否') }}</dd></div>
+        <div class="performance-decoder"><dt>解码器</dt><dd>{{ performanceStats.decoderImplementation || '未知' }}</dd></div>
       </dl>
       <div v-show="!mobileToolbarHidden" class="mobile-controls" :class="{ expanded: showMobilePanel || showMobileKeyboard }">
         <div class="mobile-quick-actions">

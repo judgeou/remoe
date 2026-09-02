@@ -151,17 +151,17 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
   fakeDocument.hidden = false;
   fakeDocument.exitPointerLock = () => {};
   const fakeWindow = new EventTarget();
-  const canvas = new EventTarget();
-  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 50 });
-  canvas.setPointerCapture = () => {};
-  canvas.requestPointerLock = async () => {};
+  const target = new EventTarget();
+  target.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 50 });
+  target.setPointerCapture = () => {};
+  target.requestPointerLock = async () => {};
   globalThis.document = fakeDocument;
   globalThis.window = fakeWindow;
 
   const inputs = [];
   const viewportGestures = [];
   let viewportZoomed = false;
-  const controller = new RemoteInputController(canvas, (event) => {
+  const controller = new RemoteInputController(target, (event) => {
     inputs.push(event);
     return true;
   }, undefined, undefined, (gesture) => {
@@ -178,7 +178,7 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
       pointerId: { value: id }, pointerType: { value: 'touch' },
       clientX: { value: x }, clientY: { value: y },
     });
-    canvas.dispatchEvent(event);
+    target.dispatchEvent(event);
   };
 
   try {
