@@ -228,13 +228,13 @@ defineExpose({
             <button type="button" :disabled="viewportZoom <= 1" @click="emit('resetViewport')">
               画面 {{ Math.round(viewportZoom * 100) }}%
             </button>
-            <button type="button" @click="emit('sendClipboard')">发送剪贴板</button>
+            <!-- <button type="button" @click="emit('sendClipboard')">发送剪贴板</button>
             <button
               type="button"
               :class="{ active: remoteClipboardPending }"
               :disabled="!remoteClipboardPending"
               @click="emit('receiveClipboard')"
-            >接收剪贴板</button>
+            >接收剪贴板</button> -->
           </div>
         </div>
         <div v-show="showMobileKeyboard" class="mobile-keyboard">

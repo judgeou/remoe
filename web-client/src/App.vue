@@ -252,11 +252,11 @@ function setInputActive(active: boolean) {
   document.body.classList.toggle('control-active', active);
   const touchActive = active && inputController?.touchMode !== null;
   document.body.classList.toggle('touch-control-active', touchActive);
-  setStatus(active
-    ? (touchActive ? '正在触控远程桌面' : '正在控制远程桌面 · 按 Esc 释放键鼠')
-    : (touchPreferred.value
-      ? '画面已连接 · 点击画面开始触控'
-      : '画面已连接 · 点击画面接管键鼠'));
+  // setStatus(active
+  //   ? (touchActive ? '正在触控远程桌面' : '正在控制远程桌面 · 按 Esc 释放键鼠')
+  //   : (touchPreferred.value
+  //     ? '画面已连接 · 点击画面开始触控'
+  //     : '画面已连接 · 点击画面接管键鼠'));
 }
 
 function selectTouchMode(mode: 'trackpad' | 'direct') {
@@ -454,9 +454,9 @@ async function connect(inviteOverride?: string) {
             (gesture: ViewportGesture) => handleViewportGesture(gesture),
           );
         });
-        setStatus(touchPreferred.value
-          ? '画面已连接 · 点击画面开始触控'
-          : '画面已连接 · 点击画面接管键鼠');
+        // setStatus(touchPreferred.value
+        //   ? '画面已连接 · 点击画面开始触控'
+        //   : '画面已连接 · 点击画面接管键鼠');
       },
       onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
       onClipboard: (text: string) => { void handleRemoteClipboard(text); },
