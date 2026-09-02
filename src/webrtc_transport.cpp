@@ -20,6 +20,10 @@
 #include <unordered_set>
 #include <utility>
 
+#ifndef REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
+#define REMOE_ENABLE_NATIVE_VIDEO_RECEIVER 0
+#endif
+
 #ifdef _WIN32
 #include <Windows.h>
 #include <mmsystem.h>
@@ -107,6 +111,7 @@ std::uint32_t random_ssrc() {
     return value;
 }
 
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
 bool h264_is_key_frame(std::span<const std::uint8_t> frame) noexcept {
     for (std::size_t index = 0; index + 4 < frame.size(); ++index) {
         std::size_t header = std::string_view::npos;
@@ -559,6 +564,7 @@ private:
     std::size_t suppressed_frames_ = 0;
     std::size_t suppressed_loss_diagnostics_ = 0;
 };
+#endif
 
 template <typename Callback, typename... Args>
 void invoke_callback(const Callback& callback, Args&&... args) noexcept {
@@ -858,10 +864,12 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     mutable std::mutex channel_mutex;
     std::mutex video_pacing_mutex;
     bool video_pacing_configured = false;
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
     std::mutex video_timestamp_mutex;
     std::uint32_t last_video_timestamp = 0;
     std::uint64_t video_timestamp_wraps = 0;
     bool have_video_timestamp = false;
+#endif
     std::atomic<State> connection_state{State::New};
     std::atomic<IceState> current_ice_state{IceState::New};
     std::atomic<GatheringState> current_gathering_state{GatheringState::New};
@@ -886,6 +894,12 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
             configuration.role != Role::Offerer) {
             throw std::invalid_argument("WebRTC receiving video track must use the offerer role");
         }
+#if !REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
+        if (configuration.video_direction == VideoDirection::ReceiveOnly) {
+            throw std::invalid_argument(
+                "Native WebRTC video receive support is not enabled in this build");
+        }
+#endif
         if (configuration.port_range_begin > configuration.port_range_end) {
             throw std::invalid_argument("WebRTC ICE port range is invalid");
         }
@@ -977,6 +991,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         if (closing.load()) throw std::logic_error("WebRTC transport is closed");
         if (started.exchange(true)) throw std::logic_error("WebRTC transport is already started");
         if (configuration.role == Role::Offerer) {
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
             if (configuration.video_direction == VideoDirection::ReceiveOnly) {
                 rtc::Description::Video media(
                     "video", rtc::Description::Direction::RecvOnly);
@@ -987,6 +1002,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                 }
                 attach_video_track(peer_connection->addTrack(std::move(media)), false);
             }
+#endif
             attach_data_channel(peer_connection->createDataChannel(configuration.data_channel_label));
         }
     }
@@ -1109,6 +1125,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
             video_sender_handler = packetizer;
             track->setMediaHandler(std::move(packetizer));
         } else {
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
             auto receiver = std::make_shared<rtc::RtcpReceivingSession>();
             std::shared_ptr<rtc::MediaHandler> depacketizer;
             const std::weak_ptr<Impl> weak_self = weak_from_this();
@@ -1158,6 +1175,11 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                                     std::move(frame), timestamp_us, key_frame);
                 }
             });
+#else
+            track->close();
+            report_error("Native WebRTC video receive support is not enabled in this build");
+            return;
+#endif
         }
 
         const std::weak_ptr<Impl> weak_self = weak_from_this();
@@ -1357,6 +1379,7 @@ WebRtcTransport::video_pacing_statistics() const noexcept {
     }
 }
 
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
 bool WebRtcTransport::request_video_keyframe() noexcept {
     try {
         const auto track = impl_->current_video_track();
@@ -1368,6 +1391,7 @@ bool WebRtcTransport::request_video_keyframe() noexcept {
         return false;
     }
 }
+#endif
 
 void WebRtcTransport::close() noexcept {
     if (impl_) impl_->close();

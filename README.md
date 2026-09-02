@@ -52,7 +52,7 @@ Web、Android 和 Windows 原生客户端共享同一连接协议。账号以 pa
 | 兼容 Host | `remoe_host_x264.exe` | GDI 桌面捕获与 x264 H.264 软件编码 |
 | Web Client | `web-client/` | 浏览器登录、设备管理、WebRTC 播放和远程控制 |
 | Android Client | `android-client/` | 原生设备绑定、硬件解码、触控板式远程操作 |
-| Windows Client | `remoe_client.exe` | oneVPL AV1 硬件解码与 D3D11 低开销呈现 |
+| Windows Client（实验性） | `remoe_client.exe` | 可选 oneVPL AV1 硬件解码与 D3D11 呈现；默认不构建 |
 | 信令服务 | `signaling-server/` | passkey、设备状态、一次性邀请和 SDP/ICE 协商 |
 | 部署配置 | `deploy/` | Caddy、systemd 与 coturn STUN-only 生产配置 |
 
@@ -101,21 +101,23 @@ Web、Android 和 Windows 原生客户端共享同一连接协议。账号以 pa
 .\build.cmd Debug
 ```
 
-默认生成文件为 `build-local/Release/remoe_host.exe`；启用 oneVPL 客户端时还会生成
+默认只生成 `build-local/Release/remoe_host.exe`；显式启用实验性 oneVPL 客户端时还会生成
 `remoe_client.exe`。libdatachannel 及其加密、SCTP/SRTP 依赖均静态链接，不需要随程序分发
 `datachannel.dll`。脚本要求 Visual Studio 安装了
 “Desktop development with C++”，并且 PATH 中存在 Ninja；Visual Studio 的 C++ CMake tools
 组件或单独安装的 Ninja 均可。
 
-当 `third_party/libvpl` 存在时，host 会编入 Intel AV1 编码支持并生成
-`build-local/Release/remoe_client.exe`。如果 oneVPL 源码不在默认位置，可在手动配置 CMake 时
-传入 `-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时 host 仍可构建，但只使用 NVENC。NVENC DLL
+当 `third_party/libvpl` 存在时，host 会编入 Intel AV1 编码支持。原生 client 已退出默认构建；仅在
+兼容或诊断需要时手动配置 `-DREMOE_BUILD_CLIENT=ON` 才会生成
+`build-local/Release/remoe_client.exe`。如果 oneVPL 源码不在默认位置，可同时传入
+`-DVPL_ROOT="D:/path/to/libvpl"`。依赖缺失时 host 仍可构建，但只使用 NVENC。NVENC DLL
 在发生回退时才动态加载，因此没有安装 NVIDIA 驱动不会影响 Intel 路径启动。
 
 libdatachannel 使用随项目编译的 Mbed TLS 静态加密后端，因此不要求开发机额外安装 OpenSSL SDK。
 WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed TLS，用于验证服务器证书链及
 域名；证书无效时连接会直接失败，不会退化为跳过验证。
-`src/webrtc_transport.*` 提供 host/client 共用的 WebRTC 传输封装。可靠有序的 control DataChannel
+`src/webrtc_transport.*` 提供 WebRTC 传输封装。默认 Host 目标只编译发送路径；实验性 native client
+和端到端测试使用单独的接收兼容目标。可靠有序的 control DataChannel
 承载参数协商和键鼠输入；标准 VideoTrack 通过 RTP 承载 H.264 或 AV1 编码帧。SDP/ICE 经 WSS 中继，
 STUN 地址由信令 URL 自动派生，TURN 有意禁用。
 
@@ -165,7 +167,7 @@ cmake --build build-local --config Release --target remoe_host_x264
 Windows x64 Release 构建和原生测试。构建结果可从对应 GitHub Actions 运行记录的 Artifacts 中下载。
 
 推送以 `v` 开头的版本标签时，工作流还会创建 GitHub Release，并上传包含
-`remoe_host.exe`、可用时的 `remoe_client.exe` 以及本说明文件的 `remoe-windows-x64.zip`：
+`remoe_host.exe` 以及本说明文件的 `remoe-windows-x64.zip`：
 
 ```powershell
 git tag v0.1.0
@@ -229,6 +231,9 @@ WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首�
 仍可接触 Host 后使用 `--repair` 绑定到新账号。
 
 ## Windows 原生 Client
+
+此客户端当前只作为实验性兼容与诊断工具保留，默认构建和发布包均不包含它。需要时可用
+`cmake -S . -B build-local -G "Ninja Multi-Config" -DREMOE_BUILD_CLIENT=ON` 显式启用。
 
 直接启动 `remoe_client.exe` 会显示 Windows 登录窗口。输入与网页相同的 HTTPS 服务 origin（例如
 `https://signal.example.com`），点击“使用 passkey 登录”后，程序会打开系统默认浏览器。浏览器使用

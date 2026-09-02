@@ -43,9 +43,6 @@ jobs:
           New-Item -ItemType Directory -Force $packageDir | Out-Null
 
           Copy-Item "build-local/Release/remoe_host.exe" $packageDir
-          if (Test-Path "build-local/Release/remoe_client.exe") {
-            Copy-Item "build-local/Release/remoe_client.exe" $packageDir
-          }
           Copy-Item "README.md" $packageDir
 
           Compress-Archive `

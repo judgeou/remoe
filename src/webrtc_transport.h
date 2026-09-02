@@ -11,6 +11,10 @@
 #include <string_view>
 #include <vector>
 
+#ifndef REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
+#define REMOE_ENABLE_NATIVE_VIDEO_RECEIVER 0
+#endif
+
 namespace remoe {
 
 // A signaling-agnostic WebRTC transport with one reliable control DataChannel
@@ -124,10 +128,13 @@ public:
         std::function<void()> on_closed;
         std::function<void(std::string)> on_text;
         std::function<void(std::vector<std::uint8_t>)> on_binary;
-        // Receives one complete encoded video access unit after RTP
-        // depacketization. timestamp_us is derived from the 90 kHz RTP clock.
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
+        // Native-client compatibility: receives one complete encoded video
+        // access unit after RTP depacketization. timestamp_us is derived from
+        // the 90 kHz RTP clock.
         std::function<void(std::vector<std::uint8_t>, std::uint64_t timestamp_us,
                            bool key_frame)> on_video_frame;
+#endif
         // Raised for RTCP PLI/FIR feedback received by a sending track.
         std::function<void()> on_video_keyframe_requested;
         // Receiver reports and NACK counts used by the host-side adaptive
@@ -136,8 +143,10 @@ public:
         // Raised when the bounded video pacer has to reject a complete encoded
         // frame. The sender should force the next accepted frame to be a key frame.
         std::function<void()> on_video_pacing_overflow;
-        // Low-volume transport diagnostics intended for persistent client logs.
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
+        // Low-volume receive diagnostics intended for persistent native-client logs.
         std::function<void(std::string)> on_diagnostic;
+#endif
         std::function<void(std::string)> on_error;
     };
 
@@ -170,7 +179,9 @@ public:
     [[nodiscard]] bool update_video_pacing(
         std::uint64_t bitrate_bps, std::chrono::milliseconds interval) noexcept;
     [[nodiscard]] VideoPacingStatistics video_pacing_statistics() const noexcept;
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
     [[nodiscard]] bool request_video_keyframe() noexcept;
+#endif
 
     void close() noexcept;
 

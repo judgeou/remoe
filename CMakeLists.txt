@@ -7,6 +7,8 @@ endif()
 
 project(remoe_host VERSION 0.1.0 LANGUAGES C CXX RC)
 
+include(CTest)
+
 if(NOT WIN32)
     message(FATAL_ERROR "remoe_host currently supports Windows only")
 endif()
@@ -86,30 +88,46 @@ set(ENABLE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${LIBDATACHANNEL_ROOT}" third_party/libdatachannel EXCLUDE_FROM_ALL)
 set_target_properties(datachannel PROPERTIES EXCLUDE_FROM_ALL TRUE)
 
-add_library(remoe_webrtc_transport STATIC
+set(REMOE_WEBRTC_TRANSPORT_SOURCES
     src/webrtc_tcp_bootstrap.cpp
     src/webrtc_tcp_bootstrap.h
     src/webrtc_transport.cpp
     src/webrtc_transport.h
     src/webrtc_websocket_signaling.cpp
     src/webrtc_websocket_signaling.h)
-target_include_directories(remoe_webrtc_transport PUBLIC src)
-target_compile_definitions(remoe_webrtc_transport PRIVATE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-    _WIN32_WINNT=0x0A00)
-target_compile_options(remoe_webrtc_transport PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-target_link_libraries(remoe_webrtc_transport
-    PUBLIC LibDataChannel::LibDataChannelStatic bcrypt crypt32 winmm)
+
+function(add_remoe_webrtc_transport target enable_native_receiver)
+    add_library(${target} STATIC ${REMOE_WEBRTC_TRANSPORT_SOURCES})
+    target_include_directories(${target} PUBLIC src)
+    target_compile_definitions(${target}
+        PUBLIC REMOE_ENABLE_NATIVE_VIDEO_RECEIVER=${enable_native_receiver}
+        PRIVATE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00)
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_libraries(${target}
+        PUBLIC LibDataChannel::LibDataChannelStatic bcrypt crypt32 winmm)
+endfunction()
+
+# The shipping Host only answers browser/Android offers and sends encoded video.
+# Keep the experimental C++ receive path out of that binary.
+add_remoe_webrtc_transport(remoe_webrtc_transport 0)
 
 # The oneVPL dispatcher is shared by the host encoder and optional native client
 # decoder. If the vendored source is absent, the host remains buildable with its
 # NVENC fallback.
 set(VPL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvpl"
     CACHE PATH "Path to Intel oneVPL source")
-option(REMOE_BUILD_CLIENT "Build the Intel oneVPL AV1 client when available" ON)
+option(REMOE_BUILD_CLIENT "Build the experimental Intel oneVPL AV1 client" OFF)
 option(REMOE_BUILD_X264_HOST "Build the GPL GDI/libyuv/x264 host" OFF)
+
+# Native-client and end-to-end transport tests still exercise the legacy C++
+# receive path without adding it back to remoe_host.exe.
+if(REMOE_BUILD_CLIENT OR BUILD_TESTING)
+    add_remoe_webrtc_transport(remoe_webrtc_transport_with_receiver 1)
+endif()
 
 if(EXISTS "${VPL_ROOT}/api/vpl/mfxvideo.h")
     # Build only the dispatcher. This avoids oneVPL's standalone packaging CMake,
@@ -323,7 +341,7 @@ if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
     target_compile_options(remoe_client PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     target_link_libraries(remoe_client PRIVATE
-        remoe_webrtc_transport
+        remoe_webrtc_transport_with_receiver
         remoe_vpl_dispatcher
         d3d11
         dxgi
@@ -335,7 +353,6 @@ elseif(REMOE_BUILD_CLIENT)
     message(STATUS "Intel oneVPL source not found at ${VPL_ROOT}; skipping remoe_client")
 endif()
 
-include(CTest)
 if(BUILD_TESTING)
     add_executable(remoe_frame_age_test
         tests/frame_age_test.cpp)
@@ -377,7 +394,8 @@ if(BUILD_TESTING)
         _WIN32_WINNT=0x0A00)
     target_compile_options(remoe_webrtc_transport_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-    target_link_libraries(remoe_webrtc_transport_smoke PRIVATE remoe_webrtc_transport)
+    target_link_libraries(remoe_webrtc_transport_smoke PRIVATE
+        remoe_webrtc_transport_with_receiver)
     add_test(NAME webrtc_transport_smoke COMMAND remoe_webrtc_transport_smoke)
     set_tests_properties(webrtc_transport_smoke PROPERTIES TIMEOUT 30)
 
@@ -389,7 +407,8 @@ if(BUILD_TESTING)
         _WIN32_WINNT=0x0A00)
     target_compile_options(remoe_webrtc_tcp_bootstrap_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-    target_link_libraries(remoe_webrtc_tcp_bootstrap_smoke PRIVATE remoe_webrtc_transport)
+    target_link_libraries(remoe_webrtc_tcp_bootstrap_smoke PRIVATE
+        remoe_webrtc_transport_with_receiver)
     add_test(NAME webrtc_tcp_bootstrap_smoke COMMAND remoe_webrtc_tcp_bootstrap_smoke)
     set_tests_properties(webrtc_tcp_bootstrap_smoke PROPERTIES TIMEOUT 30)
 
@@ -401,5 +420,6 @@ if(BUILD_TESTING)
         _WIN32_WINNT=0x0A00)
     target_compile_options(remoe_webrtc_websocket_signaling_smoke PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
-    target_link_libraries(remoe_webrtc_websocket_signaling_smoke PRIVATE remoe_webrtc_transport)
+    target_link_libraries(remoe_webrtc_websocket_signaling_smoke PRIVATE
+        remoe_webrtc_transport_with_receiver)
 endif()

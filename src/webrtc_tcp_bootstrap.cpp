@@ -196,18 +196,22 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     transport_callbacks.on_binary = [state](std::vector<std::uint8_t> value) {
         invoke_callback(state->application_callbacks.on_binary, std::move(value));
     };
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
     transport_callbacks.on_video_frame = [state](std::vector<std::uint8_t> value,
                                                   std::uint64_t timestamp_us,
                                                   bool key_frame) {
         invoke_callback(state->application_callbacks.on_video_frame,
                         std::move(value), timestamp_us, key_frame);
     };
+#endif
     transport_callbacks.on_video_keyframe_requested = [state] {
         invoke_callback(state->application_callbacks.on_video_keyframe_requested);
     };
+#if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
     transport_callbacks.on_diagnostic = [state](std::string value) {
         invoke_callback(state->application_callbacks.on_diagnostic, std::move(value));
     };
+#endif
     transport_callbacks.on_error = [state](std::string value) {
         state->fail(std::move(value));
     };
