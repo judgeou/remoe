@@ -272,10 +272,11 @@ https://signal.example.com/
 
 通过 passkey 登录，选择在线 Host 并点击“连接”。页面成功建立 control DataChannel，并从标准
 H.264/AV1 VideoTrack 显示第一帧后，会让画面
-自动占满网页。点击画面中央的按钮即可通过 Pointer Lock 接管键鼠，按 `Esc` 释放；右上角按钮用于
-断开。页面会按视频与浏览器视口的实际尺寸等比缩放，保证整张远程画面可见，并绘制一个与发送到
+自动占满网页。点击远程画面即可进入全屏并通过 Pointer Lock 和 Keyboard Lock 接管键鼠；单独按
+`Esc` 会发送给 Host，按 `Ctrl+Alt+Shift` 释放本地键鼠。右上角按钮用于断开。页面会按视频与浏览器
+视口的实际尺寸等比缩放，保证整张远程画面可见，并绘制一个与发送到
 Host 的绝对坐标同步的本地鼠标指针。浏览器要求 Pointer Lock 由一次明确的用户操作触发，因此它
-不能在异步连接完成时自动启用。
+不能在异步连接完成时自动启用。Keyboard Lock 需要 Chromium 的安全上下文和脚本全屏环境。
 
 若页面报告无法协商视频 codec，先在 `chrome://gpu` 或 `edge://gpu` 检查硬件视频解码情况，并通过
 `chrome://webrtc-internals` 或 `edge://webrtc-internals` 确认 SDP 是否包含 Host 使用的 AV1 或 H.264。

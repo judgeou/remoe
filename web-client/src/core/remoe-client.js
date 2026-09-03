@@ -482,7 +482,7 @@ export class RemoeBrowserClient {
   }
 
   #status(message) {
-    this.#events.onStatus?.(message);
+    // this.#events.onStatus?.(message);
   }
 
   #fail(value) {

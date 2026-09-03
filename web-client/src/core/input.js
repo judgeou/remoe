@@ -49,6 +49,11 @@ const mouseTypes = new Map([
 ]);
 
 const twoFingerThreshold = 8;
+const releaseModifiers = new Set([
+  'ControlLeft', 'ControlRight',
+  'AltLeft', 'AltRight',
+  'ShiftLeft', 'ShiftRight',
+]);
 
 const printableKeys = new Map();
 for (const letter of 'abcdefghijklmnopqrstuvwxyz') {
@@ -135,12 +140,29 @@ export class RemoteInputController {
   get active() { return this.#active; }
   get touchMode() { return this.#touchMode; }
 
-  async capture() {
+  async capture(fullscreenTarget = this.#target) {
     this.#touchMode = null;
+    const keyboard = navigator.keyboard;
+    if (!keyboard?.lock || !keyboard?.unlock) {
+      throw new Error('当前浏览器不支持 Keyboard Lock，无法保留远端 Esc 键');
+    }
+
+    const enterFullscreen = !document.fullscreenElement;
     try {
-      await this.#target.requestPointerLock({ unadjustedMovement: true });
-    } catch {
-      await this.#target.requestPointerLock();
+      // Pointer Lock must be requested before Fullscreen consumes this click's
+      // transient activation. Keyboard Lock can capture Escape once fullscreen
+      // has become active.
+      const pointerLock = this.#target.requestPointerLock();
+      const fullscreen = enterFullscreen
+        ? fullscreenTarget.requestFullscreen({ navigationUI: 'hide' })
+        : Promise.resolve();
+      await Promise.all([pointerLock, fullscreen]);
+      await keyboard.lock(['Escape']);
+    } catch (error) {
+      keyboard.unlock();
+      if (document.pointerLockElement === this.#target) document.exitPointerLock();
+      if (enterFullscreen && document.fullscreenElement) await document.exitFullscreen();
+      throw error;
     }
   }
 
@@ -152,7 +174,7 @@ export class RemoteInputController {
     this.#touchMode = mode;
     this.#touches.clear();
     this.#touchGesture = null;
-    if (document.pointerLockElement === this.#target) document.exitPointerLock();
+    if (document.pointerLockElement === this.#target) this.#exitCapture();
     this.#setActive(true);
   }
 
@@ -220,6 +242,7 @@ export class RemoteInputController {
 
   dispose() {
     this.releaseAll();
+    this.#unlockKeyboard();
     if (document.pointerLockElement === this.#target) document.exitPointerLock();
     for (const [target, type, listener, options] of this.#listeners) {
       target.removeEventListener(type, listener, options);
@@ -238,7 +261,10 @@ export class RemoteInputController {
   #pointerLockChanged() {
     const pointerLocked = document.pointerLockElement === this.#target;
     const active = pointerLocked || this.#touchMode !== null;
-    if (!active) this.releaseAll();
+    if (!active) {
+      this.releaseAll();
+      this.#unlockKeyboard();
+    }
     else {
       if (pointerLocked) {
         this.#x = 32768;
@@ -253,6 +279,17 @@ export class RemoteInputController {
     if (this.#active === active) return;
     this.#active = active;
     this.#onActiveChanged(active);
+  }
+
+  #unlockKeyboard() {
+    navigator.keyboard?.unlock?.();
+  }
+
+  #exitCapture() {
+    this.releaseAll();
+    this.#unlockKeyboard();
+    this.#setActive(false);
+    if (document.pointerLockElement === this.#target) document.exitPointerLock();
   }
 
   #mouseMove(event) {
@@ -481,6 +518,13 @@ export class RemoteInputController {
 
   #keyboard(event, release) {
     if (!this.#active || event.repeat) return;
+    if (!release && document.pointerLockElement === this.#target &&
+        event.ctrlKey && event.altKey && event.shiftKey &&
+        releaseModifiers.has(event.code)) {
+      event.preventDefault();
+      this.#exitCapture();
+      return;
+    }
     const key = windowsScanCode(event.code);
     if (!key) return;
     event.preventDefault();

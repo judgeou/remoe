@@ -146,14 +146,9 @@ defineExpose({
       muted
       playsinline
       disablepictureinpicture
+      @click="!controlActive && emit('capture')"
     ></video>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
-    <div v-if="frameVisible && !controlActive" id="control-gate" class="control-gate">
-      <button id="capture-input" type="button" @click="emit('capture')">
-        {{ touchPreferred ? '点击画面开始触控' : '点击画面接管键鼠' }}
-      </button>
-      <span>{{ touchPreferred ? '可在工具栏切换触控方式' : '按 Esc 随时释放' }}</span>
-    </div>
     <div
       class="remote-toolbar"
       :class="{ 'show-performance': showPerformance, 'mobile-toolbar-hidden': mobileToolbarHidden }"

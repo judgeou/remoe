@@ -144,17 +144,6 @@ button:disabled { opacity: .45; cursor: default; }
 .viewer-video { display: block; width: 100%; height: auto; object-fit: contain; }
 .telemetry { display: flex; justify-content: space-between; gap: 20px; padding: 14px 2px; font-size: 13px; }
 #status.error { color: #ff766f; }
-.control-gate {
-  z-index: 3;
-  display: grid;
-  justify-items: center;
-  gap: 10px;
-  padding: 20px;
-  border-radius: 14px;
-  background: rgba(5, 9, 13, .78);
-  backdrop-filter: blur(10px);
-}
-.control-gate span { color: #a9b4c0; font-size: 12px; }
 .remote-toolbar { display: none; }
 .remote-cursor {
   position: fixed;
@@ -179,6 +168,16 @@ button:disabled { opacity: .45; cursor: default; }
 body.remote-active { overflow: hidden; background: #000; }
 body.remote-active { overscroll-behavior: none; }
 body.remote-active main { width: 100%; height: 100dvh; margin: 0; padding: 0; }
+body.remote-window { overflow: hidden; background: #000; }
+body.remote-window main { width: 100%; height: 100dvh; margin: 0; padding: 0; }
+body.remote-window:not(.remote-active) .telemetry {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  color: #c9d2dc;
+}
 body.remote-active header,
 body.remote-active form,
 body.remote-active .account-panel,
@@ -345,7 +344,6 @@ body.touch-control-active .viewer-video { touch-action: none; }
   .virtual-key-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
   .virtual-key-grid.modifiers { grid-template-columns: repeat(4, 1fr); }
   .virtual-key-grid button { min-width: 0; padding: 8px 4px; }
-  .control-gate { max-width: calc(100vw - 32px); }
 }
 
 @media (max-width: 420px) {

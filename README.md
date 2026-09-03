@@ -297,7 +297,8 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 根据网络和解码器能力提高实际缓冲。性能面板使用 `requestVideoFrameCallback` 的 `captureTime`、
 `receiveTime` 和 `presentationTime` 显示端到端、捕获到接收、接收到呈现延迟，并同时显示实际抖动
 缓冲、目标和网络条件下限。不提供这些可选字段的浏览器会把对应指标显示为 `0.0 ms`。
-画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
+画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用全屏、Pointer Lock 和
+Keyboard Lock。单独按 `Esc` 会发送给 Host，按 `Ctrl+Alt+Shift` 释放本地键鼠。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
 网页使用 Vite、Vue 3 和 TypeScript 构建。开发与生产构建命令：

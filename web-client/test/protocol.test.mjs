@@ -249,6 +249,107 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
   }
 });
 
+test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const originalNavigator = globalThis.navigator;
+  const fakeDocument = new EventTarget();
+  const fakeWindow = new EventTarget();
+  const fullscreenTarget = new EventTarget();
+  const target = new EventTarget();
+  const keyboardLocks = [];
+  let keyboardUnlocks = 0;
+
+  fakeDocument.pointerLockElement = null;
+  fakeDocument.fullscreenElement = null;
+  fakeDocument.hidden = false;
+  fakeDocument.exitPointerLock = () => {
+    fakeDocument.pointerLockElement = null;
+    fakeDocument.dispatchEvent(new Event('pointerlockchange'));
+  };
+  fakeDocument.exitFullscreen = async () => { fakeDocument.fullscreenElement = null; };
+  fullscreenTarget.requestFullscreen = async () => {
+    fakeDocument.fullscreenElement = fullscreenTarget;
+  };
+  target.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 50 });
+  target.requestPointerLock = async () => {
+    fakeDocument.pointerLockElement = target;
+    fakeDocument.dispatchEvent(new Event('pointerlockchange'));
+  };
+
+  globalThis.document = fakeDocument;
+  globalThis.window = fakeWindow;
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      keyboard: {
+        lock: async (keys) => { keyboardLocks.push(keys); },
+        unlock: () => { keyboardUnlocks += 1; },
+      },
+    },
+  });
+
+  const inputs = [];
+  const activeChanges = [];
+  const controller = new RemoteInputController(
+    target,
+    (event) => { inputs.push(event); return true; },
+    (active) => activeChanges.push(active),
+  );
+  const key = (type, code, modifiers = {}) => {
+    const event = new Event(type, { cancelable: true });
+    Object.defineProperties(event, {
+      code: { value: code },
+      repeat: { value: false },
+      ctrlKey: { value: modifiers.ctrlKey ?? false },
+      altKey: { value: modifiers.altKey ?? false },
+      shiftKey: { value: modifiers.shiftKey ?? false },
+    });
+    fakeDocument.dispatchEvent(event);
+    return event;
+  };
+
+  try {
+    await controller.capture(fullscreenTarget);
+    assert.equal(controller.active, true);
+    assert.deepEqual(keyboardLocks, [['Escape']]);
+    assert.equal(fakeDocument.fullscreenElement, fullscreenTarget);
+
+    key('keydown', 'Escape');
+    key('keyup', 'Escape');
+    assert.deepEqual(inputs.slice(-2), [
+      { type: 9, flags: 0, value1: 0x01 },
+      { type: 9, flags: 1, value1: 0x01 },
+    ]);
+    assert.equal(controller.active, true);
+
+    key('keydown', 'ControlLeft', { ctrlKey: true });
+    key('keydown', 'AltLeft', { ctrlKey: true, altKey: true });
+    const release = key('keydown', 'ShiftLeft', {
+      ctrlKey: true,
+      altKey: true,
+      shiftKey: true,
+    });
+    assert.equal(release.defaultPrevented, true);
+    assert.equal(controller.active, false);
+    assert.equal(fakeDocument.pointerLockElement, null);
+    assert.ok(keyboardUnlocks >= 1);
+    assert.deepEqual(inputs.slice(-2), [
+      { type: 9, flags: 1, value1: 0x1d },
+      { type: 9, flags: 1, value1: 0x38 },
+    ]);
+    assert.deepEqual(activeChanges, [true, false]);
+  } finally {
+    controller.dispose();
+    globalThis.document = originalDocument;
+    globalThis.window = originalWindow;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: originalNavigator,
+    });
+  }
+});
+
 test('fits the whole remote frame inside differently shaped browser viewports', () => {
   assert.deepEqual(fitVideoSize(2560, 1440, 1920, 1000), { width: 1777, height: 1000 });
   assert.deepEqual(fitVideoSize(1280, 1024, 1920, 1080), { width: 1350, height: 1080 });

@@ -64,11 +64,22 @@ interface PerformanceStats {
   powerEfficientDecoder: boolean | null;
 }
 
+interface RemoteWindowPayload {
+  invite: string;
+  fps: number;
+  bitrate: number;
+  rateControl: 'cbr' | 'fixed-quality';
+  quality: number;
+  scale: number;
+}
+
 type LockableScreenOrientation = ScreenOrientation & {
   lock?: (orientation: 'landscape') => Promise<void>;
 };
 
 const viewer = ref<InstanceType<typeof RemoteViewer> | null>(null);
+const remoteWindowMode = new URLSearchParams(location.search).get('remote') === '1';
+const remoteWindowPayloadPrefix = 'remoe-remote:';
 const account = reactive<AccountState>({ authenticated: false, accountId: null, hosts: [], passkeys: [] });
 const accountLoading = ref(true);
 const accountBusy = ref(false);
@@ -134,8 +145,87 @@ function video(): HTMLVideoElement {
 }
 
 function setStatus(message: string, isError = false) {
-  status.value = message;
-  statusError.value = isError;
+  // status.value = message;
+  // statusError.value = isError;
+}
+
+function createRemoteWindow(): Window | null {
+  const popupScreen = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const width = Math.max(320, popupScreen.availWidth);
+  const height = Math.max(240, popupScreen.availHeight);
+  const left = popupScreen.availLeft ?? 0;
+  const top = popupScreen.availTop ?? 0;
+  const features = [
+    'popup=yes',
+    'toolbar=no',
+    'location=no',
+    'menubar=no',
+    'status=no',
+    'scrollbars=no',
+    'resizable=yes',
+    `width=${width}`,
+    `height=${height}`,
+    `left=${left}`,
+    `top=${top}`,
+  ].join(',');
+  const popup = window.open('about:blank', '_blank', features);
+  if (!popup) return null;
+  try {
+    popup.moveTo(left, top);
+    popup.resizeTo(width, height);
+  } catch {
+    // Browsers may ignore window sizing outside a desktop popup context.
+  }
+  return popup;
+}
+
+function remoteWindowPayload(inviteUrl: string): RemoteWindowPayload {
+  return {
+    invite: inviteUrl,
+    fps: fps.value,
+    bitrate: bitrate.value,
+    rateControl: rateControl.value,
+    quality: quality.value,
+    scale: scale.value,
+  };
+}
+
+function launchRemoteWindow(popup: Window, inviteUrl: string) {
+  const target = new URL(location.href);
+  target.search = '';
+  target.searchParams.set('remote', '1');
+  target.hash = '';
+  popup.name = `${remoteWindowPayloadPrefix}${JSON.stringify(remoteWindowPayload(inviteUrl))}`;
+  popup.location.replace(target.href);
+  popup.focus();
+}
+
+function readRemoteWindowPayload(): RemoteWindowPayload {
+  if (!window.name.startsWith(remoteWindowPayloadPrefix)) {
+    throw new Error('远程窗口缺少连接信息，请从设备列表重新连接');
+  }
+  const serialized = window.name.slice(remoteWindowPayloadPrefix.length);
+  window.name = '';
+  const payload = JSON.parse(serialized) as Partial<RemoteWindowPayload>;
+  if (typeof payload.invite !== 'string' || typeof payload.fps !== 'number' ||
+      typeof payload.bitrate !== 'number' ||
+      (payload.rateControl !== 'cbr' && payload.rateControl !== 'fixed-quality') ||
+      typeof payload.quality !== 'number' || typeof payload.scale !== 'number') {
+    throw new Error('远程窗口的连接信息无效，请从设备列表重新连接');
+  }
+  return payload as RemoteWindowPayload;
+}
+
+function openInviteRemoteWindow() {
+  try {
+    const inviteUrl = invite.value.trim() || location.href;
+    parseInvite(inviteUrl);
+    const popup = createRemoteWindow();
+    if (!popup) throw new Error('浏览器阻止了远程窗口，请允许本站弹出窗口后重试');
+    launchRemoteWindow(popup, inviteUrl);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), true);
+  }
 }
 
 function setRemoteActive(active: boolean) {
@@ -428,6 +518,11 @@ function stopSession() {
   running.value = false;
 }
 
+function stopRemoteWindowSession() {
+  stopSession();
+  if (remoteWindowMode) window.close();
+}
+
 async function connect(inviteOverride?: string) {
   try {
     stopSession();
@@ -584,10 +679,20 @@ function pair(code: string, name: string) {
   });
 }
 
-function connectManagedHost(id: string) {
+async function connectManagedHost(id: string) {
+  const popup = createRemoteWindow();
+  if (!popup) {
+    accountError.value = '浏览器阻止了远程窗口，请允许本站弹出窗口后重试';
+    return;
+  }
   return accountAction(async () => {
-    const managedInvite = await requestHostConnection(id);
-    await connect(managedInvite);
+    try {
+      const managedInvite = await requestHostConnection(id);
+      launchRemoteWindow(popup, managedInvite);
+    } catch (error) {
+      popup.close();
+      throw error;
+    }
   });
 }
 
@@ -626,14 +731,14 @@ async function copyRecoveryCode() {
 async function captureInput() {
   try {
     if (touchPreferred.value) selectTouchMode(touchMode.value);
-    else await inputController?.capture();
+    else await inputController?.capture(viewer.value?.getElement());
   } catch (error) {
     setStatus(`无法锁定鼠标：${error instanceof Error ? error.message : String(error)}`, true);
   }
 }
 
 onMounted(() => {
-  if (location.hash.length > 1) invite.value = location.href;
+  if (!remoteWindowMode && location.hash.length > 1) invite.value = location.href;
   if (!globalThis.RTCPeerConnection ||
       !HTMLVideoElement.prototype.requestVideoFrameCallback) {
     supported.value = false;
@@ -645,6 +750,23 @@ onMounted(() => {
   document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener('blur', handleWindowBlur);
   touchPreferred.value = navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches;
+  if (remoteWindowMode) {
+    document.body.classList.add('remote-window');
+    accountLoading.value = false;
+    try {
+      const payload = readRemoteWindowPayload();
+      fps.value = payload.fps;
+      bitrate.value = payload.bitrate;
+      rateControl.value = payload.rateControl;
+      quality.value = payload.quality;
+      scale.value = payload.scale;
+      setStatus('正在建立远程连接…');
+      void nextTick(() => connect(payload.invite));
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error), true);
+    }
+    return;
+  }
   void refreshAccount();
   accountRefreshTimer = window.setInterval(() => {
     if (account.authenticated && !accountBusy.value && !running.value) void refreshAccount();
@@ -659,13 +781,14 @@ onBeforeUnmount(() => {
   window.removeEventListener('blur', handleWindowBlur);
   if (accountRefreshTimer !== null) window.clearInterval(accountRefreshTimer);
   stopSession();
+  document.body.classList.remove('remote-window');
 });
 </script>
 
 <template>
   <main>
-    <p v-if="accountLoading" class="loading-state">正在载入账号…</p>
-    <template v-else-if="!account.authenticated">
+    <p v-if="!remoteWindowMode && accountLoading" class="loading-state">正在载入账号…</p>
+    <template v-else-if="!remoteWindowMode && !account.authenticated">
       <AccountPanel
         :busy="accountBusy"
         :error="accountError"
@@ -686,12 +809,12 @@ onBeforeUnmount(() => {
           compact
           :running="running"
           :supported="supported"
-          @connect="connect()"
+          @connect="openInviteRemoteWindow"
           @stop="stopSession"
         />
       </details>
     </template>
-    <template v-else>
+    <template v-else-if="!remoteWindowMode">
       <aside v-if="nativeClientCode && !nativeClientAuthorized" class="recovery-banner">
         <strong>授权 {{ nativeClientName }}</strong>
         <code>{{ nativeClientCode }}</code>
@@ -753,7 +876,7 @@ onBeforeUnmount(() => {
       :remote-clipboard-pending="remoteClipboardPending"
       :viewport-zoom="viewportZoom"
       @capture="captureInput"
-      @stop="stopSession"
+      @stop="stopRemoteWindowSession"
       @touch-mode="selectTouchMode"
       @virtual-key="sendVirtualKey"
       @virtual-modifier="toggleVirtualModifier"
