@@ -68,6 +68,10 @@ public:
     struct Configuration {
         Role role = Role::Answerer;
         std::string data_channel_label = "remoe-control";
+        // Optional unordered, non-retransmitted channel used by the browser's
+        // WebCodecs low-latency path alongside the standard video track.
+        bool enable_video_data_channel = false;
+        std::string video_data_channel_label = "remoe-video";
         VideoDirection video_direction = VideoDirection::Disabled;
         VideoCodec video_codec = VideoCodec::H264;
         // Only explicit stun: URLs are accepted; TURN is intentionally disabled.
@@ -125,9 +129,11 @@ public:
         std::function<void(GatheringState)> on_gathering_state_changed;
         std::function<void()> on_open;
         std::function<void()> on_video_open;
+        std::function<void()> on_video_data_open;
         std::function<void()> on_closed;
         std::function<void(std::string)> on_text;
         std::function<void(std::vector<std::uint8_t>)> on_binary;
+        std::function<void(std::vector<std::uint8_t>)> on_video_binary;
 #if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
         // Native-client compatibility: receives one complete encoded video
         // access unit after RTP depacketization. timestamp_us is derived from
@@ -169,6 +175,7 @@ public:
     // internally for SCTP backpressure; that is still considered success.
     [[nodiscard]] bool send_text(std::string_view message) noexcept;
     [[nodiscard]] bool send_binary(std::span<const std::uint8_t> message) noexcept;
+    [[nodiscard]] bool send_video_binary(std::span<const std::uint8_t> message) noexcept;
     // Sends one complete encoded access unit through the configured RTP
     // packetizer. The timestamp is expressed in the caller's monotonic epoch.
     [[nodiscard]] bool send_video_frame(std::span<const std::uint8_t> frame,
@@ -190,7 +197,9 @@ public:
     [[nodiscard]] IceState ice_state() const noexcept;
     [[nodiscard]] GatheringState gathering_state() const noexcept;
     [[nodiscard]] std::size_t buffered_amount() const noexcept;
+    [[nodiscard]] std::size_t video_buffered_amount() const noexcept;
     [[nodiscard]] bool is_video_open() const noexcept;
+    [[nodiscard]] bool is_video_data_open() const noexcept;
     [[nodiscard]] Statistics statistics() const;
 
 private:

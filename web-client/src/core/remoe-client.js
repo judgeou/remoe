@@ -1,13 +1,19 @@
 import {
+  FRAME_FLAG_KEY,
   SIGNAL_TYPE,
   SignalFrameBuffer,
+  VideoDecodeGate,
+  VideoFrameAssembler,
   av1CodecString,
   h264CodecString,
   MAGIC,
   decodeClipboardText,
+  decodeClockSyncResponse,
   decodeStreamHeader,
   decodeStreamStatus,
   encodeClientConfig,
+  encodeClockSyncRequest,
+  encodeKeyFrameRequest,
   encodeInputEvent,
   encodeClipboardText,
   encodeSignal,
@@ -67,28 +73,35 @@ export class RemoeBrowserClient {
   #websocket = null;
   #peer = null;
   #control = null;
-  #remoteVideo = null;
-  #remoteStream = null;
+  #video = null;
   #remoteTrack = null;
   #streamHeader = null;
-  #videoFrameCallback = 0;
+  #decoder = null;
+  #decoderConfig = null;
+  #assembler = new VideoFrameAssembler();
+  #decodeGate = new VideoDecodeGate();
   #firstFrameNotified = false;
-  #lastFrameTimingReport = 0;
-  #frameTimingTotals = {
-    endToEndMs: 0,
-    endToEndCount: 0,
-    captureToReceiveMs: 0,
-    captureToReceiveCount: 0,
-    receiveToPresentMs: 0,
-    receiveToPresentCount: 0,
-  };
-  #statsTimer = 0;
-  #lastInboundStats = null;
+  #decodeReceiveTimes = new Map();
+  #statsStartedAt = 0;
+  #statsBytes = 0;
+  #statsFrames = 0;
+  #statsLossEvents = 0;
+  #statsDecodeMs = 0;
+  #statsReceiveToPresentMs = 0;
+  #statsCaptureToReceiveMs = 0;
+  #statsEndToEndMs = 0;
+  #statsTimingFrames = 0;
+  #clockTimer = 0;
+  #clockSequence = 0;
+  #clockPending = new Map();
+  #clockSamples = [];
+  #hostMinusClientUs = null;
   #signalBuffer = new SignalFrameBuffer();
   #pendingCandidates = [];
   #remoteDescription = false;
   #controlOpen = false;
   #videoTrackReady = false;
+  #videoDataOpen = false;
   #gatheringComplete = false;
   #remoteReady = false;
   #ackSent = false;
@@ -99,18 +112,17 @@ export class RemoeBrowserClient {
   #inputSequence = 0;
   #inputReady = false;
   #clipboardSequence = 0;
+  #lastKeyFrameRequest = Number.NEGATIVE_INFINITY;
 
   /**
    * @param {object} invite
    * @param {object} settings
    * @param {object} events
-   * @param {HTMLVideoElement} videoElement
    */
-  constructor(invite, settings, events, videoElement) {
+  constructor(invite, settings, events = {}) {
     this.#invite = invite;
     this.#settings = settings;
     this.#events = events;
-    this.#remoteVideo = videoElement;
   }
 
   async connect() {
@@ -118,6 +130,7 @@ export class RemoeBrowserClient {
       throw new Error('网页客户端必须运行在 HTTPS 安全上下文中');
     }
     if (!('RTCPeerConnection' in globalThis)) throw new Error('浏览器不支持 WebRTC');
+    if (!('VideoDecoder' in globalThis)) throw new Error('浏览器不支持 WebCodecs VideoDecoder');
     this.#status('正在注册邀请…');
     await this.#connectWebSocket();
     this.#createPeerConnection();
@@ -130,13 +143,10 @@ export class RemoeBrowserClient {
   stop() {
     if (this.#stopped) return;
     this.#stopped = true;
-    if (this.#statsTimer) clearInterval(this.#statsTimer);
-    if (this.#videoFrameCallback && this.#remoteVideo?.cancelVideoFrameCallback) {
-      this.#remoteVideo.cancelVideoFrameCallback(this.#videoFrameCallback);
-    }
-    if (this.#remoteVideo) this.#remoteVideo.srcObject = null;
-    for (const track of this.#remoteStream?.getTracks?.() ?? []) track.stop();
+    if (this.#clockTimer) clearInterval(this.#clockTimer);
+    try { this.#decoder?.close(); } catch { /* already closed */ }
     try { this.#control?.close(); } catch { /* already closed */ }
+    try { this.#video?.close(); } catch { /* already closed */ }
     try { this.#peer?.close(); } catch { /* already closed */ }
     try { this.#websocket?.close(1000, 'Client stopped'); } catch { /* already closed */ }
     this.#status('已停止');
@@ -210,7 +220,6 @@ export class RemoeBrowserClient {
     peer.ontrack = (event) => this.#attachRemoteTrack(event);
 
     const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
-    this.#configureLowLatencyReceiver(transceiver.receiver);
     const capabilities = globalThis.RTCRtpReceiver?.getCapabilities?.('video');
     if (capabilities?.codecs && transceiver.setCodecPreferences) {
       const codecs = capabilities.codecs.filter(({ mimeType }) =>
@@ -229,6 +238,21 @@ export class RemoeBrowserClient {
     this.#control.onerror = () => this.#fail(new Error('控制 DataChannel 出错'));
     this.#control.onclose = () => {
       if (!this.#stopped) this.#fail(new Error('控制 DataChannel 已关闭'));
+    };
+
+    this.#video = peer.createDataChannel('remoe-video', {
+      ordered: false,
+      maxRetransmits: 0,
+    });
+    this.#video.binaryType = 'arraybuffer';
+    this.#video.onopen = () => {
+      this.#videoDataOpen = true;
+      this.#maybeStartStream();
+    };
+    this.#video.onmessage = (event) => this.#handleVideo(event.data);
+    this.#video.onerror = () => this.#fail(new Error('低延迟视频 DataChannel 出错'));
+    this.#video.onclose = () => {
+      if (!this.#stopped) this.#fail(new Error('低延迟视频 DataChannel 已关闭'));
     };
   }
 
@@ -270,7 +294,8 @@ export class RemoeBrowserClient {
   }
 
   #maybeStartStream() {
-    if (!this.#bootstrapComplete || !this.#videoTrackReady || this.#streamStarted) return;
+    if (!this.#bootstrapComplete || !this.#videoTrackReady ||
+        !this.#videoDataOpen || this.#streamStarted) return;
     this.#streamStarted = true;
     this.#control.send(encodeClientConfig(this.#settings));
   }
@@ -282,23 +307,10 @@ export class RemoeBrowserClient {
       return;
     }
     this.#remoteTrack = event.track;
-    this.#configureLowLatencyReceiver(event.receiver);
-    this.#remoteStream = event.streams[0] ?? new MediaStream([event.track]);
-    const video = this.#remoteVideo;
-    if (!video) {
-      this.#fail(new Error('远端视频元素尚未挂载'));
-      return;
-    }
-    video.muted = true;
-    video.autoplay = true;
-    video.playsInline = true;
-    video.srcObject = this.#remoteStream;
     event.track.onended = () => {
       if (!this.#stopped) this.#fail(new Error('远端视频 Track 已结束'));
     };
     this.#videoTrackReady = true;
-    void video.play().catch((error) => this.#fail(
-      new Error(`无法启动远端视频播放：${error.message}`)));
     this.#maybeStartStream();
   }
 
@@ -316,170 +328,181 @@ export class RemoeBrowserClient {
       this.#events.onStreamStatus?.(decodeStreamStatus(bytes));
       return;
     }
+    if (magic === MAGIC.clockSync) {
+      this.#handleClockSync(bytes);
+      return;
+    }
     const header = decodeStreamHeader(bytes);
+    if (this.#streamHeader) throw new Error('Host 发来了多个 StreamHeader');
     const isH264 = header.codec === MAGIC.h264;
     const codec = isH264 ? h264CodecString(header) : av1CodecString(header);
+    const config = {
+      codec,
+      codedWidth: header.width,
+      codedHeight: header.height,
+      hardwareAcceleration: 'prefer-hardware',
+      optimizeForLatency: true,
+    };
+    const support = await VideoDecoder.isConfigSupported(config);
+    if (!support.supported) throw new Error(`浏览器不支持此视频配置：${codec}`);
+    this.#decoder = new VideoDecoder({
+      output: (frame) => {
+        try {
+          const now = performance.now();
+          const timing = this.#decodeReceiveTimes.get(frame.timestamp);
+          this.#decodeReceiveTimes.delete(frame.timestamp);
+          if (timing) {
+            this.#statsDecodeMs += now - timing.receivedAt;
+            this.#events.onFrame?.(frame, header);
+            const presentedAt = performance.now();
+            this.#statsReceiveToPresentMs += presentedAt - timing.receivedAt;
+            if (this.#hostMinusClientUs !== null) {
+              const captureToReceive = (timing.receivedAt * 1_000 +
+                this.#hostMinusClientUs - timing.hostTimestampUs) / 1_000;
+              const endToEnd = (presentedAt * 1_000 +
+                this.#hostMinusClientUs - timing.hostTimestampUs) / 1_000;
+              if (captureToReceive >= 0 && captureToReceive <= 60_000) {
+                this.#statsCaptureToReceiveMs += captureToReceive;
+                this.#statsTimingFrames += 1;
+              }
+              if (endToEnd >= 0 && endToEnd <= 60_000) this.#statsEndToEndMs += endToEnd;
+            }
+          } else {
+            this.#events.onFrame?.(frame, header);
+          }
+          this.#statsFrames += 1;
+          if (!this.#firstFrameNotified) {
+            this.#firstFrameNotified = true;
+            this.#events.onFirstFrame?.(header);
+          }
+          this.#maybeReportStats();
+        } finally {
+          frame.close();
+        }
+      },
+      error: (error) => this.#fail(new Error(`WebCodecs 解码失败：${error.message}`)),
+    });
+    this.#decoderConfig = support.config ?? config;
+    this.#decoder.configure(this.#decoderConfig);
     this.#streamHeader = header;
-    this.#events.onStream?.({ ...header, codec });
-    // Arm first-frame observation before StreamReady lets the Host send. This
-    // avoids missing the only fresh frame when a fixed-quality desktop is idle.
-    this.#waitForFirstVideoFrame();
+    this.#statsStartedAt = performance.now();
+    this.#events.onStream?.({ ...header, codec, lowLatency: true });
     this.#control.send(encodeStreamReady());
     this.#inputReady = true;
-    this.#statsTimer = setInterval(() => {
-      this.#reportPeerStats().catch((error) => this.#fail(error));
-    }, 1_000);
+    this.#sendClockSync();
+    this.#clockTimer = setInterval(() => this.#sendClockSync(), 2_000);
     this.#status(`等待第一张 ${isH264 ? 'H.264' : 'AV1'} 画面…`);
   }
 
-  #waitForFirstVideoFrame() {
-    if (!this.#remoteVideo || !this.#streamHeader) return;
-    const video = this.#remoteVideo;
-    if (!video.requestVideoFrameCallback) {
-      this.#fail(new Error('浏览器不支持 requestVideoFrameCallback'));
-      return;
-    }
-    const notify = (now, metadata) => {
-      this.#videoFrameCallback = 0;
-      if (this.#stopped) return;
-      if (!this.#firstFrameNotified) {
-        this.#firstFrameNotified = true;
-        this.#events.onFirstFrame?.(this.#streamHeader);
-      }
-      this.#observeFrameTiming(now, metadata);
-      this.#videoFrameCallback = video.requestVideoFrameCallback(notify);
-    };
-    this.#videoFrameCallback = video.requestVideoFrameCallback(notify);
-  }
-
-  #configureLowLatencyReceiver(receiver) {
-    if (!receiver || !('jitterBufferTarget' in receiver)) return;
+  #handleVideo(value) {
     try {
-      // Remote desktop has no audio/video sync requirement. Ask the browser to
-      // render as soon as possible; the user agent may still clamp this target
-      // upward when the network or decoder requires more buffering.
-      receiver.jitterBufferTarget = 0;
-    } catch {
-      // Older implementations may expose a read-only experimental property.
-    }
-  }
-
-  #observeFrameTiming(now, metadata) {
-    const duration = (end, start) => {
-      if (!Number.isFinite(end) || !Number.isFinite(start)) return null;
-      const value = end - start;
-      return value >= 0 && value <= 60_000 ? value : null;
-    };
-    const endToEndMs = duration(metadata.presentationTime, metadata.captureTime);
-    const captureToReceiveMs = duration(metadata.receiveTime, metadata.captureTime);
-    const receiveToPresentMs = duration(metadata.presentationTime, metadata.receiveTime);
-    if (endToEndMs !== null) {
-      this.#frameTimingTotals.endToEndMs += endToEndMs;
-      this.#frameTimingTotals.endToEndCount += 1;
-    }
-    if (captureToReceiveMs !== null) {
-      this.#frameTimingTotals.captureToReceiveMs += captureToReceiveMs;
-      this.#frameTimingTotals.captureToReceiveCount += 1;
-    }
-    if (receiveToPresentMs !== null) {
-      this.#frameTimingTotals.receiveToPresentMs += receiveToPresentMs;
-      this.#frameTimingTotals.receiveToPresentCount += 1;
-    }
-    if (now - this.#lastFrameTimingReport < 250) return;
-    this.#lastFrameTimingReport = now;
-    const average = (total, count) => count > 0 ? total / count : 0;
-    this.#events.onFrameTiming?.({
-      endToEndMs: average(
-        this.#frameTimingTotals.endToEndMs,
-        this.#frameTimingTotals.endToEndCount,
-      ),
-      captureToReceiveMs: average(
-        this.#frameTimingTotals.captureToReceiveMs,
-        this.#frameTimingTotals.captureToReceiveCount,
-      ),
-      receiveToPresentMs: average(
-        this.#frameTimingTotals.receiveToPresentMs,
-        this.#frameTimingTotals.receiveToPresentCount,
-      ),
-    });
-    Object.assign(this.#frameTimingTotals, {
-      endToEndMs: 0,
-      endToEndCount: 0,
-      captureToReceiveMs: 0,
-      captureToReceiveCount: 0,
-      receiveToPresentMs: 0,
-      receiveToPresentCount: 0,
-    });
-  }
-
-  async #reportPeerStats() {
-    if (!this.#peer) return;
-    const reports = await this.#peer.getStats(this.#remoteTrack ?? undefined);
-    const inbound = [...reports.values()].find((report) =>
-      report.type === 'inbound-rtp' && report.kind === 'video');
-    if (!inbound) return;
-    const current = {
-      timestamp: inbound.timestamp,
-      bytes: inbound.bytesReceived ?? 0,
-      frames: inbound.framesDecoded ?? inbound.framesReceived ?? 0,
-      lost: inbound.packetsLost ?? 0,
-      dropped: inbound.framesDropped ?? 0,
-      jitterBufferDelay: inbound.jitterBufferDelay ?? 0,
-      jitterBufferFrames: inbound.jitterBufferEmittedCount ?? 0,
-      jitterBufferMinimumDelay: inbound.jitterBufferMinimumDelay ?? 0,
-      jitterBufferTargetDelay: inbound.jitterBufferTargetDelay ?? 0,
-      decodeTime: inbound.totalDecodeTime ?? 0,
-      processingDelay: inbound.totalProcessingDelay ?? 0,
-      decoderImplementation: inbound.decoderImplementation ?? '',
-      powerEfficientDecoder: inbound.powerEfficientDecoder ?? null,
-    };
-    if (this.#lastInboundStats) {
-      const elapsedMs = current.timestamp - this.#lastInboundStats.timestamp;
-      if (elapsedMs > 0) {
-        const bytes = Math.max(0, current.bytes - this.#lastInboundStats.bytes);
-        const decodedFrames = Math.max(0, current.frames - this.#lastInboundStats.frames);
-        const jitterFrames = Math.max(
-          0, current.jitterBufferFrames - this.#lastInboundStats.jitterBufferFrames);
-        const averageMs = (total, previousTotal, count) => count > 0
-          ? Math.max(0, total - previousTotal) * 1_000 / count
-          : 0;
-        this.#events.onStats?.({
-          fps: decodedFrames * 1_000 / elapsedMs,
-          bitrateMbps: bytes * 8 / elapsedMs / 1_000,
-          dataRateKBps: bytes / elapsedMs,
-          lostPackets: Math.max(0, current.lost - this.#lastInboundStats.lost),
-          droppedFrames: Math.max(0, current.dropped - this.#lastInboundStats.dropped),
-          jitterBufferMs: averageMs(
-            current.jitterBufferDelay,
-            this.#lastInboundStats.jitterBufferDelay,
-            jitterFrames,
-          ),
-          jitterMinimumMs: averageMs(
-            current.jitterBufferMinimumDelay,
-            this.#lastInboundStats.jitterBufferMinimumDelay,
-            jitterFrames,
-          ),
-          jitterTargetMs: averageMs(
-            current.jitterBufferTargetDelay,
-            this.#lastInboundStats.jitterBufferTargetDelay,
-            jitterFrames,
-          ),
-          decodeMs: averageMs(
-            current.decodeTime,
-            this.#lastInboundStats.decodeTime,
-            decodedFrames,
-          ),
-          processingMs: averageMs(
-            current.processingDelay,
-            this.#lastInboundStats.processingDelay,
-            decodedFrames,
-          ),
-          decoderImplementation: current.decoderImplementation,
-          powerEfficientDecoder: current.powerEfficientDecoder,
-        });
+      const bytes = toBytes(value);
+      this.#statsBytes += bytes.byteLength;
+      const { frame, lossDetected } = this.#assembler.consume(bytes);
+      const decision = this.#decodeGate.evaluate(frame, lossDetected);
+      if (decision.recoveryStarted) {
+        this.#statsLossEvents += 1;
+        this.#assembler.clear();
+        this.#decodeReceiveTimes.clear();
+        this.#decoder?.reset();
+        if (this.#decoder && this.#decoderConfig) this.#decoder.configure(this.#decoderConfig);
+        this.#requestKeyFrame();
       }
+      this.#maybeReportStats();
+      if (!decision.frame || !this.#decoder) return;
+      if (this.#decoder.decodeQueueSize > 2) {
+        this.#statsLossEvents += 1;
+        this.#assembler.clear();
+        this.#decodeGate = new VideoDecodeGate();
+        this.#decodeReceiveTimes.clear();
+        this.#decoder.reset();
+        this.#decoder.configure(this.#decoderConfig);
+        this.#requestKeyFrame();
+        return;
+      }
+      const timestamp = Number(decision.frame.timestampUs);
+      this.#decodeReceiveTimes.set(timestamp, {
+        receivedAt: performance.now(),
+        hostTimestampUs: timestamp,
+      });
+      this.#decoder.decode(new EncodedVideoChunk({
+        type: (decision.frame.flags & FRAME_FLAG_KEY) ? 'key' : 'delta',
+        timestamp,
+        data: decision.frame.data,
+      }));
+    } catch (error) {
+      this.#fail(error);
     }
-    this.#lastInboundStats = current;
+  }
+
+  #maybeReportStats() {
+    if (!this.#statsStartedAt) return;
+    const now = performance.now();
+    const elapsed = now - this.#statsStartedAt;
+    if (elapsed < 1_000) return;
+    const average = (total) => this.#statsFrames > 0 ? total / this.#statsFrames : 0;
+    const timingAverage = (total) => this.#statsTimingFrames > 0
+      ? total / this.#statsTimingFrames : 0;
+    this.#events.onStats?.({
+      fps: this.#statsFrames * 1_000 / elapsed,
+      bitrateMbps: this.#statsBytes * 8 / elapsed / 1_000,
+      dataRateKBps: this.#statsBytes / elapsed,
+      lostPackets: this.#statsLossEvents,
+      droppedFrames: this.#statsLossEvents,
+      jitterBufferMs: 0,
+      jitterMinimumMs: 0,
+      jitterTargetMs: 0,
+      endToEndMs: timingAverage(this.#statsEndToEndMs),
+      captureToReceiveMs: timingAverage(this.#statsCaptureToReceiveMs),
+      receiveToPresentMs: average(this.#statsReceiveToPresentMs),
+      decodeMs: average(this.#statsDecodeMs),
+      processingMs: average(this.#statsReceiveToPresentMs),
+      decoderImplementation: 'WebCodecs low-latency',
+      powerEfficientDecoder: null,
+    });
+    this.#statsStartedAt = now;
+    this.#statsBytes = 0;
+    this.#statsFrames = 0;
+    this.#statsLossEvents = 0;
+    this.#statsDecodeMs = 0;
+    this.#statsReceiveToPresentMs = 0;
+    this.#statsCaptureToReceiveMs = 0;
+    this.#statsEndToEndMs = 0;
+    this.#statsTimingFrames = 0;
+  }
+
+  #sendClockSync() {
+    if (this.#control?.readyState !== 'open' || !this.#inputReady) return;
+    const clientSendUs = performance.now() * 1_000;
+    const sequence = this.#clockSequence++ >>> 0;
+    this.#clockPending.set(sequence, clientSendUs);
+    while (this.#clockPending.size > 8) this.#clockPending.delete(this.#clockPending.keys().next().value);
+    this.#control.send(encodeClockSyncRequest(sequence, clientSendUs));
+  }
+
+  #handleClockSync(bytes) {
+    const response = decodeClockSyncResponse(bytes);
+    const clientReceiveUs = performance.now() * 1_000;
+    const clientSendUs = this.#clockPending.get(response.sequence);
+    this.#clockPending.delete(response.sequence);
+    if (!Number.isFinite(clientSendUs) ||
+        Math.abs(clientSendUs - response.clientSendUs) > 2) return;
+    const rttUs = (clientReceiveUs - clientSendUs) -
+      (response.hostSendUs - response.hostReceiveUs);
+    if (rttUs < 0) return;
+    const offsetUs = ((response.hostReceiveUs - clientSendUs) +
+      (response.hostSendUs - clientReceiveUs)) / 2;
+    this.#clockSamples.push({ rttUs, offsetUs });
+    if (this.#clockSamples.length > 8) this.#clockSamples.shift();
+    this.#hostMinusClientUs = this.#clockSamples.reduce((best, sample) =>
+      sample.rttUs < best.rttUs ? sample : best).offsetUs;
+  }
+
+  #requestKeyFrame() {
+    const now = performance.now();
+    if (now - this.#lastKeyFrameRequest < 500 || this.#control?.readyState !== 'open') return;
+    this.#lastKeyFrameRequest = now;
+    this.#control.send(encodeKeyFrameRequest(this.#inputSequence++));
   }
 
   #sendSignal(type, value = '', metadata = '') {

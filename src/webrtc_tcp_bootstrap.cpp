@@ -187,6 +187,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     transport_callbacks.on_video_open = [state] {
         invoke_callback(state->application_callbacks.on_video_open);
     };
+    transport_callbacks.on_video_data_open = [state] {
+        invoke_callback(state->application_callbacks.on_video_data_open);
+    };
     transport_callbacks.on_closed = [state] {
         invoke_callback(state->application_callbacks.on_closed);
     };
@@ -195,6 +198,9 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     };
     transport_callbacks.on_binary = [state](std::vector<std::uint8_t> value) {
         invoke_callback(state->application_callbacks.on_binary, std::move(value));
+    };
+    transport_callbacks.on_video_binary = [state](std::vector<std::uint8_t> value) {
+        invoke_callback(state->application_callbacks.on_video_binary, std::move(value));
     };
 #if REMOE_ENABLE_NATIVE_VIDEO_RECEIVER
     transport_callbacks.on_video_frame = [state](std::vector<std::uint8_t> value,
@@ -219,6 +225,8 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Configuration configuration;
     configuration.role = role;
     configuration.ice_servers = std::move(ice_servers);
+    // Browser offerers may add the optional remoe-video WebCodecs channel.
+    configuration.enable_video_data_channel = role == WebRtcTransport::Role::Answerer;
     if (video_codec) {
         configuration.video_codec = *video_codec;
         configuration.video_direction = role == WebRtcTransport::Role::Offerer

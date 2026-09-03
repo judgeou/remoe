@@ -450,7 +450,7 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-enum class VideoSendResult { Sent, Failed };
+enum class VideoSendResult { Sent, Dropped, Failed };
 
 VideoSendResult send_packet(remoe::WebRtcTransport& transport,
                             const remoe::EncodedVideoFrame& packet,
@@ -463,6 +463,43 @@ VideoSendResult send_packet(remoe::WebRtcTransport& transport,
         ? VideoSendResult::Sent : VideoSendResult::Failed;
 }
 
+VideoSendResult send_webcodecs_packet(remoe::WebRtcTransport& transport,
+                                      const remoe::EncodedVideoFrame& packet,
+                                      std::uint64_t frame_number,
+                                      std::uint64_t timestamp_us,
+                                      std::size_t maximum_buffered_bytes) {
+    const std::span<const std::uint8_t> encoded_video(packet.data);
+    if (encoded_video.empty() ||
+        encoded_video.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+        return VideoSendResult::Failed;
+    }
+    if (transport.video_buffered_amount() > maximum_buffered_bytes) {
+        return VideoSendResult::Dropped;
+    }
+
+    remoe::protocol::VideoChunkHeader header;
+    header.frame_size = static_cast<std::uint32_t>(encoded_video.size());
+    header.frame_number = frame_number;
+    header.timestamp_us = timestamp_us;
+    if (packet.key_frame) header.flags |= remoe::protocol::kFrameKey;
+    std::vector<std::uint8_t> message(
+        sizeof(header) + remoe::protocol::kVideoChunkPayloadSize);
+    for (std::size_t offset = 0; offset < encoded_video.size();
+         offset += remoe::protocol::kVideoChunkPayloadSize) {
+        const std::size_t chunk_size = (std::min)(
+            remoe::protocol::kVideoChunkPayloadSize, encoded_video.size() - offset);
+        header.chunk_offset = static_cast<std::uint32_t>(offset);
+        std::memcpy(message.data(), &header, sizeof(header));
+        std::memcpy(message.data() + sizeof(header), encoded_video.data() + offset,
+                    chunk_size);
+        if (!transport.send_video_binary(std::span<const std::uint8_t>(
+                message.data(), sizeof(header) + chunk_size))) {
+            return VideoSendResult::Failed;
+        }
+    }
+    return VideoSendResult::Sent;
+}
+
 bool validate_client_settings(const remoe::protocol::ClientConfig& request,
                               const Options& options, StreamSettings& settings) {
     const bool cbr = request.rate_control == remoe::protocol::VideoRateControl::Cbr;
@@ -472,7 +509,8 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
         (request.flags & ~(remoe::protocol::kClientClipboardText |
-                           remoe::protocol::kClientStreamStatus)) != 0 ||
+                           remoe::protocol::kClientStreamStatus |
+                           remoe::protocol::kClientLowLatencyVideo)) != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -742,6 +780,7 @@ int run(const Options& options) {
             std::condition_variable changed;
             std::optional<remoe::protocol::ClientConfig> request;
             bool video_open = false;
+            bool video_data_open = false;
             bool client_ready = false;
         } handshake;
 
@@ -761,6 +800,14 @@ int run(const Options& options) {
             }
             handshake.changed.notify_all();
             std::cout << "WebRTC standard video track connected\n";
+        };
+        control_callbacks.on_video_data_open = [&] {
+            {
+                std::lock_guard lock(handshake.mutex);
+                handshake.video_data_open = true;
+            }
+            handshake.changed.notify_all();
+            std::cout << "WebRTC low-latency video DataChannel connected\n";
         };
         control_callbacks.on_video_keyframe_requested = [&] {
             key_frame_requested = true;
@@ -873,6 +920,17 @@ int run(const Options& options) {
             const bool valid_header = event.magic == remoe::protocol::kInputMagic &&
                 event.version == remoe::protocol::kVersion &&
                 event.header_size == sizeof(event);
+            if (valid_header &&
+                event.type == remoe::protocol::InputType::RequestKeyFrame) {
+                if (event.flags != 0 || event.value1 != 0 || event.value2 != 0) {
+                    std::cerr << "Invalid key-frame request over WebRTC\n";
+                    session_running = false;
+                    handshake.changed.notify_all();
+                } else {
+                    key_frame_requested = true;
+                }
+                return;
+            }
             if (!valid_header ||
                 !inject_input_event(event, capture.left(), capture.top(), capture.width(),
                                     capture.height(), pressed_keys, pressed_buttons,
@@ -960,6 +1018,18 @@ int run(const Options& options) {
             control_channel->close();
             continue;
         }
+        const bool low_latency_video =
+            (request.flags & remoe::protocol::kClientLowLatencyVideo) != 0;
+        if (low_latency_video) {
+            std::unique_lock lock(handshake.mutex);
+            while (g_running && session_running && !handshake.video_data_open) {
+                handshake.changed.wait_for(lock, std::chrono::milliseconds(250));
+            }
+            if (!g_running || !session_running) {
+                control_channel->close();
+                continue;
+            }
+        }
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
         const bool stream_status_enabled =
             (request.flags & remoe::protocol::kClientStreamStatus) != 0;
@@ -969,10 +1039,11 @@ int run(const Options& options) {
         }
 
         std::uint32_t working_bitrate_bps = settings.bitrate_bps;
-        std::uint64_t pacing_bitrate_bps =
+        std::uint64_t pacing_bitrate_bps = low_latency_video ? 0 :
             static_cast<std::uint64_t>(settings.bitrate_bps) * 2u;
         std::chrono::milliseconds pacing_interval{2};
-        if (settings.rate_control == remoe::protocol::VideoRateControl::Cbr) {
+        if (!low_latency_video &&
+            settings.rate_control == remoe::protocol::VideoRateControl::Cbr) {
             auto controller = std::make_shared<remoe::AdaptiveStreamController>(
                 settings.bitrate_bps);
             const auto initial = controller->initial_decision();
@@ -984,16 +1055,22 @@ int run(const Options& options) {
                 adaptive_controller = std::move(controller);
             }
         }
-        if (!control_channel->configure_video_pacing(pacing_bitrate_bps) ||
-            !control_channel->update_video_pacing(pacing_bitrate_bps, pacing_interval)) {
+        if (!low_latency_video &&
+            (!control_channel->configure_video_pacing(pacing_bitrate_bps) ||
+             !control_channel->update_video_pacing(pacing_bitrate_bps, pacing_interval))) {
             std::cerr << "Could not configure the WebRTC RTP video pacer\n";
             control_channel->close();
             continue;
         }
-        std::cout << "Adaptive RTP pacing: " << pacing_bitrate_bps / 1'000'000.0
-                  << " Mbps, " << pacing_interval.count() << " ms; media starts at "
-                  << working_bitrate_bps / 1'000'000.0 << " Mbps, client ceiling "
-                  << settings.bitrate_bps / 1'000'000.0 << " Mbps\n";
+        if (low_latency_video) {
+            std::cout << "WebCodecs low-latency channel: immediate frame delivery; media "
+                      << working_bitrate_bps / 1'000'000.0 << " Mbps\n";
+        } else {
+            std::cout << "Adaptive RTP pacing: " << pacing_bitrate_bps / 1'000'000.0
+                      << " Mbps, " << pacing_interval.count() << " ms; media starts at "
+                      << working_bitrate_bps / 1'000'000.0 << " Mbps, client ceiling "
+                      << settings.bitrate_bps / 1'000'000.0 << " Mbps\n";
+        }
 
         const std::uint32_t encoded_width = scaled_dimension(capture.width(), settings.scale_percent);
         const std::uint32_t encoded_height = scaled_dimension(capture.height(), settings.scale_percent);
@@ -1053,6 +1130,10 @@ int run(const Options& options) {
 
         bool first_input = true;
         bool first_clipboard_poll = true;
+        std::uint64_t frame_number = 0;
+        const std::size_t low_latency_buffer_limit = (std::clamp)(
+            static_cast<std::size_t>(settings.bitrate_bps / 8u / 40u),
+            std::size_t{64 * 1024}, std::size_t{512 * 1024});
         const auto frame_interval =
             std::chrono::microseconds(1'000'000 / settings.fps);
         auto next_frame = Clock::now();
@@ -1132,9 +1213,12 @@ int run(const Options& options) {
             // exceed the nominal pacer queue. Finish the current complete frame
             // before capturing the newest desktop state. No key frame is needed:
             // frames skipped before encoding create no RTP or decoder gap.
-            if ((settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
+            if ((!low_latency_video &&
+                 settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
                  pacing_state.queued_packets != 0) ||
-                pacing_state.queue_delay_ms >= 100.0) {
+                (!low_latency_video && pacing_state.queue_delay_ms >= 100.0) ||
+                (low_latency_video &&
+                 control_channel->video_buffered_amount() > low_latency_buffer_limit)) {
                 continue;
             }
 #if defined(REMOE_X264_HOST)
@@ -1167,9 +1251,14 @@ int run(const Options& options) {
 #endif
             bool failed = false;
             for (const auto& packet : packets) {
-                const auto result = send_packet(*control_channel, packet,
-                                                static_cast<std::uint64_t>(timestamp));
-                if (result == VideoSendResult::Failed) {
+                const auto result = low_latency_video
+                    ? send_webcodecs_packet(*control_channel, packet, frame_number++,
+                          static_cast<std::uint64_t>(timestamp), low_latency_buffer_limit)
+                    : send_packet(*control_channel, packet,
+                          static_cast<std::uint64_t>(timestamp));
+                if (result == VideoSendResult::Dropped) {
+                    key_frame_requested = true;
+                } else if (result == VideoSendResult::Failed) {
                     failed = true;
                     break;
                 }

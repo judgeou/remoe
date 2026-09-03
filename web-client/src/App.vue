@@ -145,7 +145,7 @@ let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
 let remoteClipboardText = '';
 
-function video(): HTMLVideoElement {
+function video(): HTMLCanvasElement {
   if (!viewer.value) throw new Error('远程画面尚未挂载');
   return viewer.value.getVideo();
 }
@@ -549,6 +549,9 @@ async function connect(inviteOverride?: string) {
       onIceState: (state: string) => { details.value = `ICE: ${state}`; },
       onStream: (stream: StreamDescription) => {
         streamSize = { width: stream.width, height: stream.height };
+        const target = video();
+        target.width = stream.width;
+        target.height = stream.height;
         performanceStats.requestedBitrateMbps = stream.bitrateBps / 1_000_000;
         const rate = stream.rateControl === 1
           ? `固定质量 ${stream.quality}`
@@ -561,6 +564,12 @@ async function connect(inviteOverride?: string) {
       }) => {
         performanceStats.hostBitrateMbps = streamStatus.mediaBitrateBps / 1_000_000;
         performanceStats.pacingBitrateMbps = streamStatus.pacingBitrateBps / 1_000_000;
+      },
+      onFrame: (frame: VideoFrame) => {
+        const target = video();
+        const context = target.getContext('2d', { alpha: false });
+        if (!context) throw new Error('浏览器无法创建 Canvas 2D context');
+        context.drawImage(frame, 0, 0, target.width, target.height);
       },
       onFirstFrame: () => {
         const target = video();
@@ -594,7 +603,7 @@ async function connect(inviteOverride?: string) {
         setStatus(error.message, true);
         running.value = false;
       },
-    }, video());
+    });
     client.value = nextClient;
     await nextClient.connect();
   } catch (error) {
@@ -755,10 +764,9 @@ async function captureInput() {
 
 onMounted(() => {
   if (!remoteWindowMode && location.hash.length > 1) invite.value = location.href;
-  if (!globalThis.RTCPeerConnection ||
-      !HTMLVideoElement.prototype.requestVideoFrameCallback) {
+  if (!globalThis.RTCPeerConnection || !globalThis.VideoDecoder) {
     supported.value = false;
-    setStatus('当前浏览器不支持标准 WebRTC 视频播放，请使用最新版浏览器', true);
+    setStatus('当前浏览器不支持 WebRTC + WebCodecs 低延迟播放，请使用最新版 Chromium', true);
   }
   window.addEventListener('resize', fitRemoteVideo);
   window.visualViewport?.addEventListener('resize', fitRemoteVideo);

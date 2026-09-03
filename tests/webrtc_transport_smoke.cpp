@@ -36,9 +36,12 @@ struct SharedState {
     bool answerer_open = false;
     bool offerer_video_open = false;
     bool answerer_video_open = false;
+    bool offerer_video_data_open = false;
+    bool answerer_video_data_open = false;
     std::string answerer_text;
     std::vector<std::uint8_t> offerer_binary;
     std::vector<std::uint8_t> offerer_video_frame;
+    std::vector<std::uint8_t> offerer_video_binary;
     bool answerer_keyframe_requested = false;
     std::vector<std::string> errors;
 };
@@ -77,6 +80,13 @@ remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer
         }
         state.changed.notify_all();
     };
+    callbacks.on_video_data_open = [&state, offerer] {
+        {
+            std::lock_guard lock(state.mutex);
+            (offerer ? state.offerer_video_data_open : state.answerer_video_data_open) = true;
+        }
+        state.changed.notify_all();
+    };
     callbacks.on_text = [&state, offerer](std::string message) {
         if (offerer) return;
         {
@@ -90,6 +100,14 @@ remoe::WebRtcTransport::Callbacks callbacks_for(SharedState& state, bool offerer
         {
             std::lock_guard lock(state.mutex);
             state.offerer_binary = std::move(message);
+        }
+        state.changed.notify_all();
+    };
+    callbacks.on_video_binary = [&state, offerer](std::vector<std::uint8_t> message) {
+        if (!offerer) return;
+        {
+            std::lock_guard lock(state.mutex);
+            state.offerer_video_binary = std::move(message);
         }
         state.changed.notify_all();
     };
@@ -172,12 +190,14 @@ int main() {
         answerer_config.role = remoe::WebRtcTransport::Role::Answerer;
         answerer_config.video_direction = remoe::WebRtcTransport::VideoDirection::SendOnly;
         answerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::H264;
+        answerer_config.enable_video_data_channel = true;
         remoe::WebRtcTransport answerer(answerer_config, callbacks_for(state, false));
 
         remoe::WebRtcTransport::Configuration offerer_config;
         offerer_config.role = remoe::WebRtcTransport::Role::Offerer;
         offerer_config.video_direction = remoe::WebRtcTransport::VideoDirection::ReceiveOnly;
         offerer_config.video_codec = remoe::WebRtcTransport::VideoCodec::H264;
+        offerer_config.enable_video_data_channel = true;
         remoe::WebRtcTransport offerer(offerer_config, callbacks_for(state, true));
 
         answerer.start();
@@ -186,7 +206,8 @@ int main() {
         const auto open_deadline = std::chrono::steady_clock::now() + 15s;
         const bool connected = pump_until(state, offerer, answerer, open_deadline, [&] {
             return state.offerer_open && state.answerer_open &&
-                state.offerer_video_open && state.answerer_video_open;
+                state.offerer_video_open && state.answerer_video_open &&
+                state.offerer_video_data_open && state.answerer_video_data_open;
         });
         if (!connected) {
             std::cerr << "Timed out opening the host-candidate DataChannel\n";
@@ -210,9 +231,11 @@ int main() {
 
         constexpr std::string_view text = "remoe-webrtc-smoke";
         const std::array<std::uint8_t, 4> binary = {0x52, 0x4d, 0x4f, 0x45};
+        const std::array<std::uint8_t, 3> video_binary = {0x56, 0x43, 0x48};
         const std::vector<std::uint8_t> video = {
             0x00, 0x00, 0x00, 0x01, 0x65, 0x52, 0x4d, 0x4f, 0x45};
         if (!offerer.send_text(text) || !answerer.send_binary(binary) ||
+            !answerer.send_video_binary(video_binary) ||
             !answerer.send_video_frame(video, 123'456)) {
             std::cerr << "WebRTC transport rejected an outbound message\n";
             return 1;
@@ -222,6 +245,8 @@ int main() {
         const bool delivered = pump_until(state, offerer, answerer, message_deadline, [&] {
             return state.answerer_text == text && state.offerer_binary ==
                 std::vector<std::uint8_t>(binary.begin(), binary.end()) &&
+                state.offerer_video_binary ==
+                    std::vector<std::uint8_t>(video_binary.begin(), video_binary.end()) &&
                 state.offerer_video_frame == video;
         });
         if (!delivered) {

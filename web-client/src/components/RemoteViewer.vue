@@ -56,7 +56,7 @@ const emit = defineEmits<{
   resetViewport: [];
 }>();
 
-const video = ref<HTMLVideoElement | null>(null);
+const video = ref<HTMLCanvasElement | null>(null);
 const viewerElement = ref<HTMLElement | null>(null);
 const mobileInput = ref<HTMLInputElement | null>(null);
 const showPerformance = ref(false);
@@ -140,17 +140,13 @@ defineExpose({
 
 <template>
   <section v-show="frameVisible" ref="viewerElement" class="viewer" aria-live="polite">
-    <video
+    <canvas
       id="video"
       ref="video"
       class="viewer-video"
       :style="videoStyle"
-      autoplay
-      muted
-      playsinline
-      disablepictureinpicture
       @click="!controlActive && emit('capture')"
-    ></video>
+    ></canvas>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
     <div
       class="remote-toolbar"
@@ -188,7 +184,8 @@ defineExpose({
           ? '—' : (performanceStats.hostBitrateMbps === 0
             ? '固定质量' : `${performanceStats.hostBitrateMbps.toFixed(1)} Mbps`) }}</dd></div>
         <div><dt>发送节奏</dt><dd>{{ performanceStats.pacingBitrateMbps === null
-          ? '—' : `${performanceStats.pacingBitrateMbps.toFixed(1)} Mbps` }}</dd></div>
+          ? '—' : (performanceStats.pacingBitrateMbps === 0
+            ? '即时发送' : `${performanceStats.pacingBitrateMbps.toFixed(1)} Mbps`) }}</dd></div>
         <div><dt>接收码率</dt><dd>{{ performanceStats.bitrateMbps.toFixed(1) }} Mbps</dd></div>
         <div><dt>实际网速</dt><dd>{{ performanceStats.dataRateKBps.toFixed(1) }} KB/s</dd></div>
         <div><dt>端到端</dt><dd>{{ performanceStats.endToEndMs.toFixed(1) }} ms</dd></div>

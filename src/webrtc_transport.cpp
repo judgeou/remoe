@@ -864,6 +864,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     Callbacks callbacks;
     std::shared_ptr<rtc::PeerConnection> peer_connection;
     std::shared_ptr<rtc::DataChannel> data_channel;
+    std::shared_ptr<rtc::DataChannel> video_data_channel;
     std::shared_ptr<rtc::Track> video_track;
     std::shared_ptr<rtc::MediaHandler> video_sender_handler;
     std::shared_ptr<AdaptivePacingHandler> video_pacer;
@@ -882,6 +883,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     std::atomic_bool started{false};
     std::atomic_bool open{false};
     std::atomic_bool video_open{false};
+    std::atomic_bool video_data_open{false};
     std::atomic_bool closing{false};
     std::atomic_bool closed_notified{false};
 
@@ -891,6 +893,11 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
     void initialize() {
         if (configuration.data_channel_label.empty()) {
             throw std::invalid_argument("WebRTC data channel label must not be empty");
+        }
+        if (configuration.enable_video_data_channel &&
+            (configuration.video_data_channel_label.empty() ||
+             configuration.video_data_channel_label == configuration.data_channel_label)) {
+            throw std::invalid_argument("WebRTC video data channel label is invalid");
         }
         if (configuration.video_direction == VideoDirection::SendOnly &&
             configuration.role != Role::Answerer) {
@@ -970,7 +977,12 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                     return;
                 }
                 if (channel->label() == self->configuration.data_channel_label) {
-                    self->attach_data_channel(std::move(channel));
+                    self->attach_data_channel(std::move(channel), false);
+                    return;
+                }
+                if (self->configuration.enable_video_data_channel &&
+                    channel->label() == self->configuration.video_data_channel_label) {
+                    self->attach_data_channel(std::move(channel), true);
                     return;
                 }
                 {
@@ -1009,18 +1021,26 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
                 attach_video_track(peer_connection->addTrack(std::move(media)), false);
             }
 #endif
-            attach_data_channel(peer_connection->createDataChannel(configuration.data_channel_label));
+            attach_data_channel(peer_connection->createDataChannel(configuration.data_channel_label), false);
+            if (configuration.enable_video_data_channel) {
+                rtc::DataChannelInit init;
+                init.reliability.unordered = true;
+                init.reliability.maxRetransmits = 0;
+                attach_data_channel(peer_connection->createDataChannel(
+                    configuration.video_data_channel_label, std::move(init)), true);
+            }
         }
     }
 
-    void attach_data_channel(std::shared_ptr<rtc::DataChannel> channel) {
+    void attach_data_channel(std::shared_ptr<rtc::DataChannel> channel, bool video_data) {
         bool already_attached = false;
         {
             std::lock_guard lock(channel_mutex);
-            if (data_channel && !data_channel->isClosed()) {
+            auto& target = video_data ? video_data_channel : data_channel;
+            if (target && !target->isClosed()) {
                 already_attached = true;
             } else {
-                data_channel = channel;
+                target = channel;
             }
         }
         if (already_attached) {
@@ -1030,15 +1050,21 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         }
 
         const std::weak_ptr<Impl> weak_self = weak_from_this();
-        channel->onOpen([weak_self] {
+        channel->onOpen([weak_self, video_data] {
             if (const auto self = weak_self.lock(); self && !self->closing.load()) {
-                self->open.store(true);
-                invoke_callback(self->callbacks.on_open);
+                if (video_data) {
+                    self->video_data_open.store(true);
+                    invoke_callback(self->callbacks.on_video_data_open);
+                } else {
+                    self->open.store(true);
+                    invoke_callback(self->callbacks.on_open);
+                }
             }
         });
-        channel->onClosed([weak_self] {
+        channel->onClosed([weak_self, video_data] {
             if (const auto self = weak_self.lock()) {
-                self->open.store(false);
+                if (video_data) self->video_data_open.store(false);
+                else self->open.store(false);
                 self->notify_closed();
             }
         });
@@ -1046,22 +1072,32 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
             if (const auto self = weak_self.lock()) self->report_error(std::move(error));
         });
         channel->onMessage(
-            [weak_self](rtc::binary data) {
+            [weak_self, video_data](rtc::binary data) {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
                     std::vector<std::uint8_t> message(data.size());
                     if (!data.empty()) std::memcpy(message.data(), data.data(), data.size());
-                    invoke_callback(self->callbacks.on_binary, std::move(message));
+                    if (video_data) {
+                        invoke_callback(self->callbacks.on_video_binary, std::move(message));
+                    } else {
+                        invoke_callback(self->callbacks.on_binary, std::move(message));
+                    }
                 }
             },
-            [weak_self](std::string data) {
+            [weak_self, video_data](std::string data) {
                 if (const auto self = weak_self.lock(); self && !self->closing.load()) {
-                    invoke_callback(self->callbacks.on_text, std::move(data));
+                    if (video_data) self->report_error("Video DataChannel received text");
+                    else invoke_callback(self->callbacks.on_text, std::move(data));
                 }
             });
 
         if (channel->isOpen() && !closing.load()) {
-            open.store(true);
-            invoke_callback(callbacks.on_open);
+            if (video_data) {
+                video_data_open.store(true);
+                invoke_callback(callbacks.on_video_data_open);
+            } else {
+                open.store(true);
+                invoke_callback(callbacks.on_open);
+            }
         }
     }
 
@@ -1217,6 +1253,11 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         return video_track;
     }
 
+    std::shared_ptr<rtc::DataChannel> current_video_data_channel() const {
+        std::lock_guard lock(channel_mutex);
+        return video_data_channel;
+    }
+
     void report_error(std::string error) const noexcept {
         invoke_callback(callbacks.on_error, std::move(error));
     }
@@ -1229,6 +1270,7 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
         if (closing.exchange(true)) return;
         open.store(false);
         video_open.store(false);
+        video_data_open.store(false);
 
         // Stop and join the pacing worker before its Track callbacks disappear.
         std::shared_ptr<AdaptivePacingHandler> pacer;
@@ -1241,6 +1283,10 @@ struct WebRtcTransport::Impl : std::enable_shared_from_this<WebRtcTransport::Imp
 
         try {
             if (const auto channel = current_channel()) {
+                channel->resetCallbacks();
+                channel->close();
+            }
+            if (const auto channel = current_video_data_channel()) {
                 channel->resetCallbacks();
                 channel->close();
             }
@@ -1304,6 +1350,19 @@ bool WebRtcTransport::send_text(std::string_view message) noexcept {
 bool WebRtcTransport::send_binary(std::span<const std::uint8_t> message) noexcept {
     try {
         const auto channel = impl_->current_channel();
+        if (!channel || !channel->isOpen()) return false;
+        (void)channel->send(
+            reinterpret_cast<const rtc::byte*>(message.data()), message.size());
+        return true;
+    } catch (const std::exception& error) {
+        impl_->report_error(error.what());
+        return false;
+    }
+}
+
+bool WebRtcTransport::send_video_binary(std::span<const std::uint8_t> message) noexcept {
+    try {
+        const auto channel = impl_->current_video_data_channel();
         if (!channel || !channel->isOpen()) return false;
         (void)channel->send(
             reinterpret_cast<const rtc::byte*>(message.data()), message.size());
@@ -1397,6 +1456,7 @@ bool WebRtcTransport::request_video_keyframe() noexcept {
         return false;
     }
 }
+
 #endif
 
 void WebRtcTransport::close() noexcept {
@@ -1429,8 +1489,22 @@ std::size_t WebRtcTransport::buffered_amount() const noexcept {
     }
 }
 
+std::size_t WebRtcTransport::video_buffered_amount() const noexcept {
+    if (!impl_) return 0;
+    try {
+        const auto channel = impl_->current_video_data_channel();
+        return channel ? channel->bufferedAmount() : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
 bool WebRtcTransport::is_video_open() const noexcept {
     return impl_ && impl_->video_open.load();
+}
+
+bool WebRtcTransport::is_video_data_open() const noexcept {
+    return impl_ && impl_->video_data_open.load();
 }
 
 WebRtcTransport::Statistics WebRtcTransport::statistics() const {

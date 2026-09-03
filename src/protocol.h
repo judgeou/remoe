@@ -12,11 +12,13 @@ constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kStreamStatusMagic = 0x54534D52; // "RMST"
+constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
 constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
 constexpr std::uint16_t kVersion = 11;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
+constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
 // Identifies Windows input synthesized by a remoe host. A client connected to
 // a host on the same machine must not send that input back to the host.
 constexpr std::uintptr_t kInjectedInputMarker =
@@ -25,6 +27,11 @@ constexpr std::uintptr_t kInjectedInputMarker =
 enum ClientFlags : std::uint32_t {
     kClientClipboardText = 1u << 0,
     kClientStreamStatus = 1u << 1,
+    kClientLowLatencyVideo = 1u << 2,
+};
+
+enum FrameFlags : std::uint32_t {
+    kFrameKey = 1u << 0,
 };
 
 enum class VideoRateControl : std::uint32_t {
@@ -42,6 +49,7 @@ enum class InputType : std::uint16_t {
     MouseWheel = 7,
     MouseHorizontalWheel = 8,
     Keyboard = 9,
+    RequestKeyFrame = 10,
 };
 
 enum InputFlags : std::uint16_t {
@@ -107,6 +115,19 @@ struct StreamStatus {
     std::uint64_t pacing_bitrate_bps = 0;
 };
 
+// One unordered, non-retransmitted WebCodecs video-channel message. Frames are
+// split into fixed-size chunks below common SCTP message-size limits.
+struct VideoChunkHeader {
+    std::uint32_t magic = kVideoChunkMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(VideoChunkHeader);
+    std::uint32_t flags = 0;
+    std::uint64_t frame_number = 0;
+    std::uint64_t timestamp_us = 0;
+    std::uint32_t frame_size = 0;
+    std::uint32_t chunk_offset = 0;
+};
+
 struct ClockSyncRequest {
     std::uint32_t magic = kClockSyncMagic;
     std::uint16_t version = kVersion;
@@ -168,6 +189,7 @@ static_assert(sizeof(ClientConfig) == 36);
 static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(StreamStatus) == 20);
+static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(ClockSyncRequest) == 24);
 static_assert(sizeof(ClockSyncResponse) == 40);
 static_assert(sizeof(InputEvent) == 24);

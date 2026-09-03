@@ -4,10 +4,14 @@ import {
   MAGIC,
   SIGNAL_TYPE,
   SignalFrameBuffer,
+  VideoDecodeGate,
+  VideoFrameAssembler,
   decodeStreamHeader,
   decodeStreamStatus,
+  decodeClockSyncResponse,
   decodeClipboardText,
   encodeClientConfig,
+  encodeClockSyncRequest,
   encodeInputEvent,
   encodeClipboardText,
   encodeSignal,
@@ -26,7 +30,7 @@ test('encodes protocol v11 CBR client settings as little-endian packed bytes', (
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
-  assert.equal(view.getUint32(24, true), 3);
+  assert.equal(view.getUint32(24, true), 7);
   assert.equal(view.getUint32(28, true), 0);
   assert.equal(view.getUint32(32, true), 0);
 });
@@ -85,6 +89,19 @@ test('decodes Host working and pacing bitrates', () => {
   });
 });
 
+test('round-trips Web clock synchronization fields', () => {
+  const request = encodeClockSyncRequest(7, 123_456);
+  assert.equal(new DataView(request.buffer).getBigUint64(16, true), 123_456n);
+  const response = new Uint8Array(40);
+  response.set(request.subarray(0, 16));
+  const view = new DataView(response.buffer);
+  view.setUint16(6, 40, true);
+  view.setBigUint64(16, 123_456n, true);
+  view.setBigUint64(24, 223_450n, true);
+  view.setBigUint64(32, 223_455n, true);
+  assert.equal(decodeClockSyncResponse(response).hostSendUs, 223_455);
+});
+
 test('decodes fixed-quality AV1 stream parameters', () => {
   const bytes = new Uint8Array(44);
   const view = new DataView(bytes.buffer);
@@ -122,6 +139,41 @@ test('decodes a valid H.264 stream header and profile', () => {
   assert.equal(header.codec, MAGIC.h264);
   assert.equal(header.codecProfile, 0x42e02a);
   assert.equal(h264CodecString(header), 'avc1.42E02A');
+});
+
+test('reassembles a low-latency frame arriving out of chunk order', () => {
+  const assembler = new VideoFrameAssembler();
+  const frame = new Uint8Array(20_000).map((_, index) => index & 0xff);
+  const makeChunk = (offset, length) => {
+    const bytes = new Uint8Array(36 + length);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, MAGIC.videoChunk, true);
+    view.setUint16(4, 11, true);
+    view.setUint16(6, 36, true);
+    view.setUint32(8, 1, true);
+    view.setBigUint64(12, 42n, true);
+    view.setBigUint64(20, 123456n, true);
+    view.setUint32(28, frame.length, true);
+    view.setUint32(32, offset, true);
+    bytes.set(frame.subarray(offset, offset + length), 36);
+    return bytes;
+  };
+  assert.equal(assembler.consume(makeChunk(16_384, frame.length - 16_384)).frame, null);
+  const result = assembler.consume(makeChunk(0, 16_384)).frame;
+  assert.equal(result.frameNumber, 42n);
+  assert.deepEqual(result.data, frame);
+});
+
+test('holds delta frames after loss until a key frame arrives', () => {
+  const gate = new VideoDecodeGate();
+  const frame = (frameNumber, key = false) => ({ frameNumber, flags: key ? 1 : 0 });
+  assert.equal(gate.evaluate(frame(40n, true)).frame.frameNumber, 40n);
+  assert.equal(gate.evaluate(frame(41n)).frame.frameNumber, 41n);
+  const gap = gate.evaluate(frame(43n));
+  assert.equal(gap.frame, null);
+  assert.equal(gap.recoveryStarted, true);
+  assert.deepEqual(gate.evaluate(frame(44n)), { frame: null, recoveryStarted: false });
+  assert.equal(gate.evaluate(frame(45n, true)).frame.frameNumber, 45n);
 });
 
 test('accepts native and browser-shaped invite URLs without exposing the fragment', () => {

@@ -33,8 +33,8 @@ Web、Android 和 Windows 原生客户端共享同一连接协议。账号以 pa
 
 ## 核心能力
 
-- **低延迟视频链路**：使用标准 WebRTC VideoTrack、RTP/SRTP、NACK、PLI 和发送节奏控制，支持
-  AV1 与 H.264。
+- **低延迟视频链路**：Web 端使用无序零重传 DataChannel + WebCodecs 即到即解码；Android 和
+  Windows 原生端使用标准 WebRTC VideoTrack。两条路径都支持 AV1 与 H.264 编码。
 - **硬件加速与功耗控制**：Windows AV1 路径使用 D3D11、oneVPL 或 NVENC；原生 Windows Client
   使用 oneVPL 和 D3D11 视频内存解码、缩放及呈现，避免逐帧回读 CPU。
 - **跨平台客户端**：提供 Chromium 浏览器客户端、原生 Android 客户端和 Windows 原生客户端。
@@ -118,7 +118,8 @@ WSS 连接会将 Windows 当前用户和本机的 `ROOT` 证书库导出给 Mbed
 域名；证书无效时连接会直接失败，不会退化为跳过验证。
 `src/webrtc_transport.*` 提供 WebRTC 传输封装。默认 Host 目标只编译发送路径；实验性 native client
 和端到端测试使用单独的接收兼容目标。可靠有序的 control DataChannel
-承载参数协商和键鼠输入；标准 VideoTrack 通过 RTP 承载 H.264 或 AV1 编码帧。SDP/ICE 经 WSS 中继，
+承载参数协商和键鼠输入；标准 VideoTrack 为原生端承载视频，可选的无序 DataChannel 为 WebCodecs
+端承载低延迟编码帧。SDP/ICE 经 WSS 中继，
 STUN 地址由信令 URL 自动派生，TURN 有意禁用。
 
 原有的 Visual Studio 生成器方式仍然支持。在 “Developer PowerShell for VS 2022” 中执行：
@@ -210,8 +211,8 @@ git push origin v0.1.0
 
 对 `remoe_host_x264.exe`，`--output` 是 GDI `EnumDisplayMonitors` 的顺序；`--check-encoder` 测试
 GDI 抓屏和 x264 H.264 软件编码。它接受同一套连接参数，但码率上限为 50 Mbps。GDI 路径会把鼠标
-指针合成到画面中。H.264 和 AV1 都通过标准 WebRTC VideoTrack 发送；浏览器使用原生 WebRTC 解码，
-Windows 原生 oneVPL Client 仍只解 AV1。
+指针合成到画面中。浏览器使用 WebCodecs 低延迟通道解码 H.264 或 AV1；Windows 原生 oneVPL
+Client 通过标准 VideoTrack 接收，并仍只解 AV1。
 
 兼容原有启动脚本，`--fps` 和 `--bitrate` 分别作为以上两个上限的别名继续接受。实际编码参数由
 每次连接的 client 请求决定；host 不带这些参数启动时不额外设置上限，显式设置后超出上限的请求会被拒绝。
@@ -291,12 +292,10 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 ## WebRTC 传输协议 v11
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
-标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remoe-control` DataChannel 发送键鼠
-`InputEvent` 与 UTF-8 文本剪贴板。连接后会在浏览器支持时把
-`RTCRtpReceiver.jitterBufferTarget` 设为 `0`，请求尽快呈现视频；浏览器仍可
-根据网络和解码器能力提高实际缓冲。性能面板使用 `requestVideoFrameCallback` 的 `captureTime`、
-`receiveTime` 和 `presentationTime` 显示端到端、捕获到接收、接收到呈现延迟，并同时显示实际抖动
-缓冲、目标和网络条件下限。不提供这些可选字段的浏览器会把对应指标显示为 `0.0 ms`。
+WebCodecs、标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remoe-control` DataChannel
+发送键鼠 `InputEvent` 与 UTF-8 文本剪贴板，无序零重传的 `remoe-video` DataChannel 直接把编码帧
+交给 `VideoDecoder`。这条 Web 专用路径绕过 Chromium 标准 VideoTrack 的播放抖动缓冲。性能面板
+通过 `ClockSyncRequest/Response` 和 Host 捕获时间戳计算端到端延迟。
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用全屏、Pointer Lock 和
 Keyboard Lock。单独按 `Esc` 会发送给 Host，按 `Ctrl+Alt+Shift` 释放本地键鼠。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
@@ -315,12 +314,12 @@ npm run build
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
 依次承载 `ClientConfig`、`StreamHeader`、`StreamReady`、`InputEvent` 和 `ClipboardHeader + text`。
-编码视频由标准 RTP/SRTP VideoTrack 承载。libdatachannel 负责 H.264/AV1 RTP 分片、Sender Report、
-NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
+原生端视频由标准 RTP/SRTP VideoTrack 承载；Web 端声明 flags bit 2 后改用 `remoe-video` DataChannel
+分片和 WebCodecs。标准 track 由 libdatachannel 负责 RTP、Sender Report、NACK 和 PLI。
 
-host 在 RTP 发送链末端使用有界漏桶 pacer。CBR 从 client 请求值开始，并把它作为上限；发送节奏
+标准 VideoTrack 在 RTP 发送链末端使用有界漏桶 pacer。CBR 从 client 请求值开始，并把它作为上限；发送节奏
 默认是工作码率的 2 倍、每 2 ms 一批，首批 RTP 立即发送，批量大小随码率和间隔计算。host 根据 RTCP
-Receiver Report、NACK、PLI、连接 RTT、发送队列延迟和本机调度迟滞做 AIMD 调节：连续 3 次干净报告
+Receiver Report、NACK、连接 RTT、发送队列延迟和本机调度迟滞做 AIMD 调节：连续 3 次干净报告
 才小幅升码率，丢包或排队则立即降码率，并在必要时请求新关键帧。调度不稳时发送间隔可放宽为
 3/5 ms；高码率始终保持 2 ms，避免较长间隔形成大 UDP 突发。队列中最老数据实际等待达到 50 ms
 时跳过尚未编码的新帧，极端溢出时整批丢弃，因此不会无限积压旧画面。
@@ -339,7 +338,7 @@ NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改�
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | 网络媒体上限；CBR 时由 host 在该上限内动态选择工作码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；bit 1 = 支持 Host 工作码率状态 |
+| 24 | u32 | flags | bit 0 = 文本剪贴板；bit 1 = Host 工作码率状态；bit 2 = WebCodecs 低延迟视频通道 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 32 | u32 | quality | 固定质量为 1–51（小=高质量）；CBR 为 0 |
 
@@ -402,6 +401,23 @@ SPS/PPS；AV1 Host 提交不带 IVF 容器的 temporal unit。视频包格式遵
 Remoe 私有的 `VideoChunkHeader`。接收端通过 RTCP PLI 请求关键帧，丢包恢复由 RTCP/NACK 和解码队列
 共同处理。
 
+Web client 额外创建无序、零重传的 `remoe-video` DataChannel，并以 flags bit 2 请求低延迟模式。
+Host 此时不把画面送入浏览器自带的 VideoTrack 播放缓冲，而是将编码帧通过下列分片直接交给
+WebCodecs；标准 VideoTrack 仍保留给 Android 和 Windows 原生 client。
+
+### VideoChunkHeader（36 bytes + encoded payload，WebCodecs 模式）
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `VCHK` |
+| 4 | u16 | version | `11` |
+| 6 | u16 | header_size | `36` |
+| 8 | u32 | flags | bit 0 = key frame |
+| 12 | u64 | frame_number | 递增帧号 |
+| 20 | u64 | timestamp_us | Host 捕获时间戳 |
+| 28 | u32 | frame_size | 完整编码帧长度 |
+| 32 | u32 | chunk_offset | 当前分片偏移；payload 最大 16 KiB |
+
 ### InputEvent（24 bytes）
 
 | 偏移 | 类型 | 字段 | 值/说明 |
@@ -409,7 +425,7 @@ Remoe 私有的 `VideoChunkHeader`。接收端通过 RTCP PLI 请求关键帧，
 | 0 | u32 | magic | `INPT` |
 | 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `24` |
-| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘 |
+| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
 | 12 | i32 | value1 | 移动 X（0–65535）、滚轮 delta 或 Windows 扫描码 |
 | 16 | i32 | value2 | 移动 Y（0–65535），其余类型为 0 |
