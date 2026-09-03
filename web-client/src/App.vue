@@ -52,7 +52,12 @@ interface PerformanceStats {
   dataRateKBps: number;
   lostPackets: number;
   droppedFrames: number;
+  endToEndMs: number;
+  captureToReceiveMs: number;
+  receiveToPresentMs: number;
   jitterBufferMs: number;
+  jitterMinimumMs: number;
+  jitterTargetMs: number;
   decodeMs: number;
   processingMs: number;
   decoderImplementation: string;
@@ -95,7 +100,12 @@ const performanceStats = reactive<PerformanceStats>({
   dataRateKBps: 0,
   lostPackets: 0,
   droppedFrames: 0,
+  endToEndMs: 0,
+  captureToReceiveMs: 0,
+  receiveToPresentMs: 0,
   jitterBufferMs: 0,
+  jitterMinimumMs: 0,
+  jitterTargetMs: 0,
   decodeMs: 0,
   processingMs: 0,
   decoderImplementation: '',
@@ -234,7 +244,12 @@ function leaveRemoteMode() {
     dataRateKBps: 0,
     lostPackets: 0,
     droppedFrames: 0,
+    endToEndMs: 0,
+    captureToReceiveMs: 0,
+    receiveToPresentMs: 0,
     jitterBufferMs: 0,
+    jitterMinimumMs: 0,
+    jitterTargetMs: 0,
     decodeMs: 0,
     processingMs: 0,
     decoderImplementation: '',
@@ -459,6 +474,9 @@ async function connect(inviteOverride?: string) {
         //   : '画面已连接 · 点击画面接管键鼠');
       },
       onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
+      onFrameTiming: (timing: Pick<PerformanceStats,
+        'endToEndMs' | 'captureToReceiveMs' | 'receiveToPresentMs'>) =>
+        Object.assign(performanceStats, timing),
       onClipboard: (text: string) => { void handleRemoteClipboard(text); },
       onError: (error: Error) => {
         leaveRemoteMode();

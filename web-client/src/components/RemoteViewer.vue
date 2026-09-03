@@ -7,7 +7,12 @@ interface PerformanceStats {
   dataRateKBps: number;
   lostPackets: number;
   droppedFrames: number;
+  endToEndMs: number;
+  captureToReceiveMs: number;
+  receiveToPresentMs: number;
   jitterBufferMs: number;
+  jitterMinimumMs: number;
+  jitterTargetMs: number;
   decodeMs: number;
   processingMs: number;
   decoderImplementation: string;
@@ -182,7 +187,12 @@ defineExpose({
         <div><dt>解码 FPS</dt><dd>{{ performanceStats.fps.toFixed(1) }}</dd></div>
         <div><dt>接收码率</dt><dd>{{ performanceStats.bitrateMbps.toFixed(1) }} Mbps</dd></div>
         <div><dt>实际网速</dt><dd>{{ performanceStats.dataRateKBps.toFixed(1) }} KB/s</dd></div>
+        <div><dt>端到端</dt><dd>{{ performanceStats.endToEndMs.toFixed(1) }} ms</dd></div>
+        <div><dt>捕获到接收</dt><dd>{{ performanceStats.captureToReceiveMs.toFixed(1) }} ms</dd></div>
+        <div><dt>接收到呈现</dt><dd>{{ performanceStats.receiveToPresentMs.toFixed(1) }} ms</dd></div>
         <div><dt>抖动缓冲</dt><dd>{{ performanceStats.jitterBufferMs.toFixed(1) }} ms</dd></div>
+        <div><dt>缓冲目标</dt><dd>{{ performanceStats.jitterTargetMs.toFixed(1) }} ms</dd></div>
+        <div><dt>缓冲下限</dt><dd>{{ performanceStats.jitterMinimumMs.toFixed(1) }} ms</dd></div>
         <div><dt>解码耗时</dt><dd>{{ performanceStats.decodeMs.toFixed(1) }} ms</dd></div>
         <div><dt>接收到解码</dt><dd>{{ performanceStats.processingMs.toFixed(1) }} ms</dd></div>
         <div><dt>本周期丢包</dt><dd>{{ performanceStats.lostPackets }}</dd></div>

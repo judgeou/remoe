@@ -71,6 +71,16 @@ export class RemoeBrowserClient {
   #remoteTrack = null;
   #streamHeader = null;
   #videoFrameCallback = 0;
+  #firstFrameNotified = false;
+  #lastFrameTimingReport = 0;
+  #frameTimingTotals = {
+    endToEndMs: 0,
+    endToEndCount: 0,
+    captureToReceiveMs: 0,
+    captureToReceiveCount: 0,
+    receiveToPresentMs: 0,
+    receiveToPresentCount: 0,
+  };
   #statsTimer = 0;
   #lastInboundStats = null;
   #signalBuffer = new SignalFrameBuffer();
@@ -199,6 +209,7 @@ export class RemoeBrowserClient {
     peer.ontrack = (event) => this.#attachRemoteTrack(event);
 
     const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+    this.#configureLowLatencyReceiver(transceiver.receiver);
     const capabilities = globalThis.RTCRtpReceiver?.getCapabilities?.('video');
     if (capabilities?.codecs && transceiver.setCodecPreferences) {
       const codecs = capabilities.codecs.filter(({ mimeType }) =>
@@ -270,6 +281,7 @@ export class RemoeBrowserClient {
       return;
     }
     this.#remoteTrack = event.track;
+    this.#configureLowLatencyReceiver(event.receiver);
     this.#remoteStream = event.streams[0] ?? new MediaStream([event.track]);
     const video = this.#remoteVideo;
     if (!video) {
@@ -321,12 +333,77 @@ export class RemoeBrowserClient {
       this.#fail(new Error('浏览器不支持 requestVideoFrameCallback'));
       return;
     }
-    const notify = () => {
+    const notify = (now, metadata) => {
       this.#videoFrameCallback = 0;
       if (this.#stopped) return;
-      this.#events.onFirstFrame?.(this.#streamHeader);
+      if (!this.#firstFrameNotified) {
+        this.#firstFrameNotified = true;
+        this.#events.onFirstFrame?.(this.#streamHeader);
+      }
+      this.#observeFrameTiming(now, metadata);
+      this.#videoFrameCallback = video.requestVideoFrameCallback(notify);
     };
     this.#videoFrameCallback = video.requestVideoFrameCallback(notify);
+  }
+
+  #configureLowLatencyReceiver(receiver) {
+    if (!receiver || !('jitterBufferTarget' in receiver)) return;
+    try {
+      // Remote desktop has no audio/video sync requirement. Ask the browser to
+      // render as soon as possible; the user agent may still clamp this target
+      // upward when the network or decoder requires more buffering.
+      receiver.jitterBufferTarget = 0;
+    } catch {
+      // Older implementations may expose a read-only experimental property.
+    }
+  }
+
+  #observeFrameTiming(now, metadata) {
+    const duration = (end, start) => {
+      if (!Number.isFinite(end) || !Number.isFinite(start)) return null;
+      const value = end - start;
+      return value >= 0 && value <= 60_000 ? value : null;
+    };
+    const endToEndMs = duration(metadata.presentationTime, metadata.captureTime);
+    const captureToReceiveMs = duration(metadata.receiveTime, metadata.captureTime);
+    const receiveToPresentMs = duration(metadata.presentationTime, metadata.receiveTime);
+    if (endToEndMs !== null) {
+      this.#frameTimingTotals.endToEndMs += endToEndMs;
+      this.#frameTimingTotals.endToEndCount += 1;
+    }
+    if (captureToReceiveMs !== null) {
+      this.#frameTimingTotals.captureToReceiveMs += captureToReceiveMs;
+      this.#frameTimingTotals.captureToReceiveCount += 1;
+    }
+    if (receiveToPresentMs !== null) {
+      this.#frameTimingTotals.receiveToPresentMs += receiveToPresentMs;
+      this.#frameTimingTotals.receiveToPresentCount += 1;
+    }
+    if (now - this.#lastFrameTimingReport < 250) return;
+    this.#lastFrameTimingReport = now;
+    const average = (total, count) => count > 0 ? total / count : 0;
+    this.#events.onFrameTiming?.({
+      endToEndMs: average(
+        this.#frameTimingTotals.endToEndMs,
+        this.#frameTimingTotals.endToEndCount,
+      ),
+      captureToReceiveMs: average(
+        this.#frameTimingTotals.captureToReceiveMs,
+        this.#frameTimingTotals.captureToReceiveCount,
+      ),
+      receiveToPresentMs: average(
+        this.#frameTimingTotals.receiveToPresentMs,
+        this.#frameTimingTotals.receiveToPresentCount,
+      ),
+    });
+    Object.assign(this.#frameTimingTotals, {
+      endToEndMs: 0,
+      endToEndCount: 0,
+      captureToReceiveMs: 0,
+      captureToReceiveCount: 0,
+      receiveToPresentMs: 0,
+      receiveToPresentCount: 0,
+    });
   }
 
   async #reportPeerStats() {
@@ -343,6 +420,8 @@ export class RemoeBrowserClient {
       dropped: inbound.framesDropped ?? 0,
       jitterBufferDelay: inbound.jitterBufferDelay ?? 0,
       jitterBufferFrames: inbound.jitterBufferEmittedCount ?? 0,
+      jitterBufferMinimumDelay: inbound.jitterBufferMinimumDelay ?? 0,
+      jitterBufferTargetDelay: inbound.jitterBufferTargetDelay ?? 0,
       decodeTime: inbound.totalDecodeTime ?? 0,
       processingDelay: inbound.totalProcessingDelay ?? 0,
       decoderImplementation: inbound.decoderImplementation ?? '',
@@ -367,6 +446,16 @@ export class RemoeBrowserClient {
           jitterBufferMs: averageMs(
             current.jitterBufferDelay,
             this.#lastInboundStats.jitterBufferDelay,
+            jitterFrames,
+          ),
+          jitterMinimumMs: averageMs(
+            current.jitterBufferMinimumDelay,
+            this.#lastInboundStats.jitterBufferMinimumDelay,
+            jitterFrames,
+          ),
+          jitterTargetMs: averageMs(
+            current.jitterBufferTargetDelay,
+            this.#lastInboundStats.jitterBufferTargetDelay,
             jitterFrames,
           ),
           decodeMs: averageMs(

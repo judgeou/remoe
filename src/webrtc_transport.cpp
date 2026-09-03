@@ -683,7 +683,7 @@ public:
             send_ = send;
             const std::size_t limit = queue_limit_bytes_locked();
             // A fixed-quality AV1 access unit can legitimately be larger than
-            // the nominal 200 ms queue budget. Always admit one complete frame
+            // the nominal 100 ms queue budget. Always admit one complete frame
             // into an empty queue; rejecting it guarantees a sequence gap and
             // often starts a PLI/IDR feedback loop.
             if (!incoming.empty() && !queue_.empty() &&
@@ -770,10 +770,10 @@ private:
     }
 
     [[nodiscard]] std::size_t queue_limit_bytes_locked() const {
-        const auto two_hundred_ms = static_cast<std::size_t>(
-            bytes_per_second_locked() * 0.2);
-        return (std::clamp)(two_hundred_ms,
-                            std::size_t{256 * 1024}, std::size_t{4 * 1024 * 1024});
+        const auto one_hundred_ms = static_cast<std::size_t>(
+            bytes_per_second_locked() * 0.1);
+        return (std::clamp)(one_hundred_ms,
+                            std::size_t{64 * 1024}, std::size_t{2 * 1024 * 1024});
     }
 
     void run() {
@@ -782,9 +782,15 @@ private:
         while (!stopping_) {
             if (queue_.empty() || !send_) {
                 changed_.wait(lock, [&] { return stopping_ || (!queue_.empty() && send_); });
-                deadline = std::chrono::steady_clock::now() + interval_;
-                last_budget_update_ = std::chrono::steady_clock::now();
                 if (stopping_) break;
+                // Do not impose a full pacer tick before every new frame. Give
+                // the frame one bounded interval of credit, send that small
+                // first batch immediately, then resume normal leaky-bucket
+                // pacing for the rest of the access unit.
+                const auto now = std::chrono::steady_clock::now();
+                deadline = now;
+                last_budget_update_ = now;
+                budget_bytes_ = (std::max)(budget_bytes_, maximum_batch_bytes_locked());
             }
 
             changed_.wait_until(lock, deadline, [&] { return stopping_; });

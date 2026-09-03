@@ -292,7 +292,11 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 
 仓库中的 `web-client/` 是 Chromium 优先的浏览器客户端。它使用 passkey 账号设备列表、STUN-only ICE、
 标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remoe-control` DataChannel 发送键鼠
-`InputEvent` 与 UTF-8 文本剪贴板。连接后
+`InputEvent` 与 UTF-8 文本剪贴板。连接后会在浏览器支持时把
+`RTCRtpReceiver.jitterBufferTarget` 设为 `0`，请求尽快呈现视频；浏览器仍可
+根据网络和解码器能力提高实际缓冲。性能面板使用 `requestVideoFrameCallback` 的 `captureTime`、
+`receiveTime` 和 `presentationTime` 显示端到端、捕获到接收、接收到呈现延迟，并同时显示实际抖动
+缓冲、目标和网络条件下限。不提供这些可选字段的浏览器会把对应指标显示为 `0.0 ms`。
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用 Pointer Lock。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
@@ -314,12 +318,12 @@ PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠�
 NACK 重传缓存和 PLI；浏览器直接消费远端 `MediaStreamTrack`，原生 Client 在 RTP 解包后送入 oneVPL。
 
 host 在 RTP 发送链末端使用有界漏桶 pacer。CBR 从 client 请求值开始，并把它作为上限；发送节奏
-默认是工作码率的 1.5 倍、每 2 ms 一批，批量大小随码率和间隔计算。host 根据 RTCP
+默认是工作码率的 2 倍、每 2 ms 一批，首批 RTP 立即发送，批量大小随码率和间隔计算。host 根据 RTCP
 Receiver Report、NACK、PLI、连接 RTT、发送队列延迟和本机调度迟滞做 AIMD 调节：连续 3 次干净报告
 才小幅升码率，丢包或排队则立即降码率，并在必要时请求新关键帧。调度不稳时发送间隔可放宽为
-3/5 ms；高码率始终保持 2 ms，避免较长间隔形成大 UDP 突发。队列中最老数据实际等待达到 100 ms
+3/5 ms；高码率始终保持 2 ms，避免较长间隔形成大 UDP 突发。队列中最老数据实际等待达到 50 ms
 时跳过尚未编码的新帧，极端溢出时整批丢弃，因此不会无限积压旧画面。
-NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改变编码质量，仍使用 1.5 倍、2 ms
+NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改变编码质量，仍使用 2 倍、2 ms
 的平滑 pacer，但不参与 CBR 自适应；单个大帧即使超过名义队列容量也会完整接纳，发送完成前跳过
 后续采集，避免丢帧触发 PLI/IDR 循环。
 

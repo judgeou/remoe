@@ -8,7 +8,10 @@ namespace remoe {
 namespace {
 
 constexpr std::uint32_t kAbsoluteMinimumBitrate = 2'000'000;
-constexpr double kPacingMultiplier = 1.5;
+// A complete video frame cannot be decoded until its last RTP packet arrives.
+// A 2x wire rate halves the packet-drain part of a frame interval while still
+// smoothing the encoder's frame-sized bursts on ordinary WAN links.
+constexpr double kPacingMultiplier = 2.0;
 
 std::uint32_t scaled_bitrate(std::uint32_t bitrate, double factor) {
     return static_cast<std::uint32_t>(std::llround(static_cast<double>(bitrate) * factor));

@@ -958,7 +958,7 @@ int run(const Options& options) {
 
         std::uint32_t working_bitrate_bps = settings.bitrate_bps;
         std::uint64_t pacing_bitrate_bps =
-            static_cast<std::uint64_t>(settings.bitrate_bps) * 3u / 2u;
+            static_cast<std::uint64_t>(settings.bitrate_bps) * 2u;
         std::chrono::milliseconds pacing_interval{2};
         if (settings.rate_control == remoe::protocol::VideoRateControl::Cbr) {
             auto controller = std::make_shared<remoe::AdaptiveStreamController>(
@@ -1037,7 +1037,7 @@ int run(const Options& options) {
         const auto frame_interval =
             std::chrono::microseconds(1'000'000 / settings.fps);
         auto next_frame = Clock::now();
-        auto next_adaptive_update = Clock::now() + std::chrono::seconds(1);
+        auto next_adaptive_update = Clock::now() + std::chrono::milliseconds(250);
         while (g_running && session_running && control_channel->is_open()) {
             // Desktop Duplication may block until the screen changes.  Do not
             // retain a deadline that became stale while acquire() was waiting:
@@ -1045,7 +1045,7 @@ int run(const Options& options) {
             // pacing while the loop tries to catch up with the old schedule.
             const auto now = Clock::now();
             if (now >= next_adaptive_update) {
-                next_adaptive_update = now + std::chrono::seconds(1);
+                next_adaptive_update = now + std::chrono::milliseconds(250);
                 if (auto controller = current_adaptive_controller()) {
                     const auto pacing = control_channel->video_pacing_statistics();
                     const auto transport_stats = control_channel->statistics();
@@ -1108,7 +1108,7 @@ int run(const Options& options) {
             // frames skipped before encoding create no RTP or decoder gap.
             if ((settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
                  pacing_state.queued_packets != 0) ||
-                pacing_state.queue_delay_ms >= 100.0) {
+                pacing_state.queue_delay_ms >= 50.0) {
                 continue;
             }
 #if defined(REMOE_X264_HOST)
@@ -1121,6 +1121,11 @@ int run(const Options& options) {
                 continue;
             }
 #endif
+            // Timestamp the completed capture, before encoding and RTP pacing,
+            // so WebRTC's captureTime-based telemetry covers the entire media
+            // pipeline instead of starting after the encoder has finished.
+            const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now() - epoch).count();
 
             const bool force_key_frame =
                 first_input || key_frame_requested.exchange(false);
@@ -1134,7 +1139,6 @@ int run(const Options& options) {
 #else
             auto packets = encoder->encode(force_key_frame);
 #endif
-            const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - epoch).count();
             bool failed = false;
             for (const auto& packet : packets) {
                 const auto result = send_packet(*control_channel, packet,

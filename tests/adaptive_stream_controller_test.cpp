@@ -8,7 +8,7 @@ int main() {
         remoe::AdaptiveStreamController controller(20'000'000);
         const auto initial = controller.initial_decision();
         if (initial.media_bitrate_bps != 20'000'000 ||
-            initial.pacing_bitrate_bps != 30'000'000 ||
+            initial.pacing_bitrate_bps != 40'000'000 ||
             initial.pacing_interval.count() != 2) {
             throw std::runtime_error("controller did not honor the requested initial rate");
         }
