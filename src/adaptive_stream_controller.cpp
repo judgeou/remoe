@@ -12,6 +12,7 @@ constexpr std::uint32_t kAbsoluteMinimumBitrate = 2'000'000;
 // A 2x wire rate halves the packet-drain part of a frame interval while still
 // smoothing the encoder's frame-sized bursts on ordinary WAN links.
 constexpr double kPacingMultiplier = 2.0;
+constexpr auto kDecreaseCooldown = std::chrono::seconds(1);
 
 std::uint32_t scaled_bitrate(std::uint32_t bitrate, double factor) {
     return static_cast<std::uint32_t>(std::llround(static_cast<double>(bitrate) * factor));
@@ -42,15 +43,25 @@ void AdaptiveStreamController::observe_network(const NetworkFeedback& feedback) 
 
 void AdaptiveStreamController::observe_local(const LocalFeedback& feedback) {
     std::lock_guard lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
     const auto previous_interval = pacing_interval_locked();
     queue_delay_ms_ = (std::max)(0.0, feedback.queue_delay_ms);
     scheduler_lateness_ms_ = (std::max)(0.0, feedback.scheduler_lateness_ms);
     if (feedback.dropped_batches > previous_dropped_batches_) {
         previous_dropped_batches_ = feedback.dropped_batches;
         clean_reports_ = 0;
+        if (decrease_allowed_locked(now)) {
+            last_decrease_ = now;
+            publish_locked((std::max)(minimum_bitrate_bps_,
+                                      scaled_bitrate(current_bitrate_bps_, 0.85)),
+                           true, "bounded pacer queue dropped a video frame");
+        }
+    } else if (queue_delay_ms_ >= 100.0 && decrease_allowed_locked(now)) {
+        clean_reports_ = 0;
+        last_decrease_ = now;
         publish_locked((std::max)(minimum_bitrate_bps_,
-                                  scaled_bitrate(current_bitrate_bps_, 0.75)),
-                       true, "bounded pacer queue dropped a video frame");
+                                  scaled_bitrate(current_bitrate_bps_, 0.90)),
+                       false, "sustained host pacing delay");
     } else if (pacing_interval_locked() != previous_interval) {
         publish_locked(current_bitrate_bps_, false,
                        "host scheduler selected a safer pacing interval");
@@ -76,24 +87,23 @@ void AdaptiveStreamController::evaluate_locked(const NetworkFeedback& feedback) 
     }
     if (feedback.round_trip_time) previous_rtt_ = feedback.round_trip_time;
 
-    const bool severe = feedback.loss_fraction >= 0.05 || feedback.pli ||
-                        queue_delay_ms_ >= 50.0;
+    const bool severe = feedback.loss_fraction >= 0.05;
     const bool moderate = feedback.loss_fraction >= 0.02 ||
                           feedback.nack_packets >= 8 ||
-                          queue_delay_ms_ >= 25.0 || rtt_growth;
+                          rtt_growth;
 
     if (severe) {
         clean_reports_ = 0;
+        if (!decrease_allowed_locked(now)) return;
         last_decrease_ = now;
         const auto reduced = (std::max)(minimum_bitrate_bps_,
-                                        scaled_bitrate(current_bitrate_bps_, 0.75));
-        publish_locked(reduced, feedback.pli,
-                       feedback.pli ? "receiver requested key-frame recovery"
-                                    : "severe loss or pacing delay");
+                                        scaled_bitrate(current_bitrate_bps_, 0.85));
+        publish_locked(reduced, false, "severe receiver loss");
         return;
     }
     if (moderate) {
         clean_reports_ = 0;
+        if (!decrease_allowed_locked(now)) return;
         last_decrease_ = now;
         publish_locked((std::max)(minimum_bitrate_bps_,
                                   scaled_bitrate(current_bitrate_bps_, 0.90)),
@@ -114,6 +124,12 @@ void AdaptiveStreamController::evaluate_locked(const NetworkFeedback& feedback) 
         scaled_bitrate(current_bitrate_bps_, 0.05));
     publish_locked((std::min)(maximum_bitrate_bps_, current_bitrate_bps_ + additive),
                    false, "three clean receiver reports");
+}
+
+bool AdaptiveStreamController::decrease_allowed_locked(
+    std::chrono::steady_clock::time_point now) const {
+    return last_decrease_ == std::chrono::steady_clock::time_point{} ||
+           now - last_decrease_ >= kDecreaseCooldown;
 }
 
 void AdaptiveStreamController::publish_locked(std::uint32_t bitrate_bps,

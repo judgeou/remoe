@@ -55,6 +55,16 @@ bool send_clipboard_text(remoe::WebRtcTransport& transport, std::string_view tex
     return transport.send_binary(message);
 }
 
+bool send_stream_status(remoe::WebRtcTransport& transport,
+                        std::uint32_t media_bitrate_bps,
+                        std::uint64_t pacing_bitrate_bps) {
+    remoe::protocol::StreamStatus status;
+    status.media_bitrate_bps = media_bitrate_bps;
+    status.pacing_bitrate_bps = pacing_bitrate_bps;
+    return transport.send_binary(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(&status), sizeof(status)));
+}
+
 BOOL WINAPI console_handler(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
         g_running = false;
@@ -461,7 +471,8 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
     if (request.magic != remoe::protocol::kClientConfigMagic ||
         request.version != remoe::protocol::kVersion ||
         request.header_size != sizeof(request) || request.fps_den != 1 ||
-        (request.flags & ~remoe::protocol::kClientClipboardText) != 0 ||
+        (request.flags & ~(remoe::protocol::kClientClipboardText |
+                           remoe::protocol::kClientStreamStatus)) != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -753,11 +764,6 @@ int run(const Options& options) {
         };
         control_callbacks.on_video_keyframe_requested = [&] {
             key_frame_requested = true;
-            if (auto controller = current_adaptive_controller()) {
-                remoe::AdaptiveStreamController::NetworkFeedback feedback;
-                feedback.pli = true;
-                controller->observe_network(feedback);
-            }
         };
         control_callbacks.on_video_feedback = [&](auto feedback) {
             if (auto controller = current_adaptive_controller()) {
@@ -955,6 +961,12 @@ int run(const Options& options) {
             continue;
         }
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
+        const bool stream_status_enabled =
+            (request.flags & remoe::protocol::kClientStreamStatus) != 0;
+        {
+            std::lock_guard lock(adaptive_controller_mutex);
+            adaptive_controller.reset();
+        }
 
         std::uint32_t working_bitrate_bps = settings.bitrate_bps;
         std::uint64_t pacing_bitrate_bps =
@@ -1020,6 +1032,13 @@ int run(const Options& options) {
                 reinterpret_cast<const std::uint8_t*>(&stream_header), sizeof(stream_header)))) {
             continue;
         }
+        if (stream_status_enabled &&
+            !send_stream_status(*control_channel,
+                settings.rate_control == remoe::protocol::VideoRateControl::Cbr
+                    ? working_bitrate_bps : 0,
+                pacing_bitrate_bps)) {
+            continue;
+        }
 
         {
             std::unique_lock lock(handshake.mutex);
@@ -1073,12 +1092,19 @@ int run(const Options& options) {
                             break;
                         } else {
                             working_bitrate_bps = decision->media_bitrate_bps;
+                            pacing_bitrate_bps = decision->pacing_bitrate_bps;
                             if (decision->force_key_frame) key_frame_requested = true;
                             std::cout << "Adaptive media rate: "
                                       << working_bitrate_bps / 1'000'000.0 << " Mbps; pacer "
                                       << decision->pacing_bitrate_bps / 1'000'000.0 << " Mbps / "
                                       << decision->pacing_interval.count() << " ms ("
                                       << decision->reason << ")\n";
+                            if (stream_status_enabled &&
+                                !send_stream_status(*control_channel, working_bitrate_bps,
+                                                    pacing_bitrate_bps)) {
+                                session_running = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1108,7 +1134,7 @@ int run(const Options& options) {
             // frames skipped before encoding create no RTP or decoder gap.
             if ((settings.rate_control == remoe::protocol::VideoRateControl::FixedQuality &&
                  pacing_state.queued_packets != 0) ||
-                pacing_state.queue_delay_ms >= 50.0) {
+                pacing_state.queue_delay_ms >= 100.0) {
                 continue;
             }
 #if defined(REMOE_X264_HOST)
@@ -1155,6 +1181,10 @@ int run(const Options& options) {
         }
         session_running = false;
         control_channel->close();
+        {
+            std::lock_guard lock(adaptive_controller_mutex);
+            adaptive_controller.reset();
+        }
         {
             std::lock_guard lock(input_mutex);
             release_remote_inputs(pressed_keys, pressed_buttons);

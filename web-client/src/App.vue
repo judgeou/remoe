@@ -48,6 +48,9 @@ type ViewportGesture =
 
 interface PerformanceStats {
   fps: number;
+  requestedBitrateMbps: number;
+  hostBitrateMbps: number | null;
+  pacingBitrateMbps: number | null;
   bitrateMbps: number;
   dataRateKBps: number;
   lostPackets: number;
@@ -107,6 +110,9 @@ const videoStyle = reactive<CSSProperties>({});
 const cursorStyle = reactive<CSSProperties>({});
 const performanceStats = reactive<PerformanceStats>({
   fps: 0,
+  requestedBitrateMbps: 0,
+  hostBitrateMbps: null,
+  pacingBitrateMbps: null,
   bitrateMbps: 0,
   dataRateKBps: 0,
   lostPackets: 0,
@@ -330,6 +336,9 @@ function leaveRemoteMode() {
   delete videoStyle.transformOrigin;
   Object.assign(performanceStats, {
     fps: 0,
+    requestedBitrateMbps: 0,
+    hostBitrateMbps: null,
+    pacingBitrateMbps: null,
     bitrateMbps: 0,
     dataRateKBps: 0,
     lostPackets: 0,
@@ -540,11 +549,18 @@ async function connect(inviteOverride?: string) {
       onIceState: (state: string) => { details.value = `ICE: ${state}`; },
       onStream: (stream: StreamDescription) => {
         streamSize = { width: stream.width, height: stream.height };
+        performanceStats.requestedBitrateMbps = stream.bitrateBps / 1_000_000;
         const rate = stream.rateControl === 1
           ? `固定质量 ${stream.quality}`
           : `${(stream.bitrateBps / 1_000_000).toFixed(1)} Mbps CBR`;
         details.value = `${stream.width}×${stream.height} · ${stream.fpsNum} fps · ` +
           `${rate} · ${stream.codec}`;
+      },
+      onStreamStatus: (streamStatus: {
+        mediaBitrateBps: number; pacingBitrateBps: number;
+      }) => {
+        performanceStats.hostBitrateMbps = streamStatus.mediaBitrateBps / 1_000_000;
+        performanceStats.pacingBitrateMbps = streamStatus.pacingBitrateBps / 1_000_000;
       },
       onFirstFrame: () => {
         const target = video();

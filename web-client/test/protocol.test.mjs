@@ -5,6 +5,7 @@ import {
   SIGNAL_TYPE,
   SignalFrameBuffer,
   decodeStreamHeader,
+  decodeStreamStatus,
   decodeClipboardText,
   encodeClientConfig,
   encodeInputEvent,
@@ -25,7 +26,7 @@ test('encodes protocol v11 CBR client settings as little-endian packed bytes', (
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
-  assert.equal(view.getUint32(24, true), 1);
+  assert.equal(view.getUint32(24, true), 3);
   assert.equal(view.getUint32(28, true), 0);
   assert.equal(view.getUint32(32, true), 0);
 });
@@ -65,6 +66,23 @@ test('decodes a valid stream header', () => {
   view.setUint32(24, 1, true);
   view.setUint32(28, 20_000_000, true);
   assert.equal(decodeStreamHeader(bytes).width, 1920);
+});
+
+test('decodes Host working and pacing bitrates', () => {
+  const bytes = new Uint8Array(20);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC.streamStatus, true);
+  view.setUint16(4, 11, true);
+  view.setUint16(6, 20, true);
+  view.setUint32(8, 17_000_000, true);
+  view.setBigUint64(12, 34_000_000n, true);
+  assert.deepEqual(decodeStreamStatus(bytes), {
+    magic: MAGIC.streamStatus,
+    version: 11,
+    headerSize: 20,
+    mediaBitrateBps: 17_000_000,
+    pacingBitrateBps: 34_000_000,
+  });
 });
 
 test('decodes fixed-quality AV1 stream parameters', () => {

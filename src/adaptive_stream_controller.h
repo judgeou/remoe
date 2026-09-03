@@ -27,7 +27,6 @@ public:
         bool receiver_report = false;
         double loss_fraction = 0.0;
         std::uint32_t nack_packets = 0;
-        bool pli = false;
         std::optional<std::chrono::milliseconds> round_trip_time;
     };
 
@@ -48,6 +47,8 @@ private:
     void evaluate_locked(const NetworkFeedback& feedback);
     void publish_locked(std::uint32_t bitrate_bps, bool force_key_frame,
                         std::string reason);
+    [[nodiscard]] bool decrease_allowed_locked(
+        std::chrono::steady_clock::time_point now) const;
     [[nodiscard]] std::chrono::milliseconds pacing_interval_locked() const;
 
     mutable std::mutex mutex_;

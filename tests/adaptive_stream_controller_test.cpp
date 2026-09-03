@@ -17,7 +17,7 @@ int main() {
         severe.loss_fraction = 0.08;
         controller.observe_network(severe);
         auto decrease = controller.take_decision();
-        if (!decrease || decrease->media_bitrate_bps != 15'000'000 ||
+        if (!decrease || decrease->media_bitrate_bps != 17'000'000 ||
             decrease->force_key_frame) {
             throw std::runtime_error("severe loss did not reduce bitrate without an IDR burst");
         }
@@ -30,19 +30,17 @@ int main() {
             throw std::runtime_error("high bitrate incorrectly selected a 5 ms burst interval");
         }
 
+        remoe::AdaptiveStreamController overflow_controller(20'000'000);
         local.dropped_batches = 1;
-        controller.observe_local(local);
-        auto overflow = controller.take_decision();
+        overflow_controller.observe_local(local);
+        auto overflow = overflow_controller.take_decision();
         if (!overflow || overflow->pacing_interval.count() > 3 || !overflow->force_key_frame) {
             throw std::runtime_error("local pacing pressure was not applied");
         }
 
-        remoe::AdaptiveStreamController::NetworkFeedback pli;
-        pli.pli = true;
-        controller.observe_network(pli);
-        auto recovery = controller.take_decision();
-        if (!recovery || !recovery->force_key_frame) {
-            throw std::runtime_error("PLI did not request key-frame recovery");
+        controller.observe_network(severe);
+        if (controller.take_decision()) {
+            throw std::runtime_error("repeated feedback bypassed the bitrate cooldown");
         }
 
         remoe::AdaptiveStreamController low_rate_controller(6'000'000);

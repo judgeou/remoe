@@ -3,6 +3,9 @@ import { nextTick, ref, type CSSProperties } from 'vue';
 
 interface PerformanceStats {
   fps: number;
+  requestedBitrateMbps: number;
+  hostBitrateMbps: number | null;
+  pacingBitrateMbps: number | null;
   bitrateMbps: number;
   dataRateKBps: number;
   lostPackets: number;
@@ -180,6 +183,12 @@ defineExpose({
       </div>
       <dl v-if="showPerformance && !mobileToolbarHidden" class="performance-stats">
         <div><dt>解码 FPS</dt><dd>{{ performanceStats.fps.toFixed(1) }}</dd></div>
+        <div><dt>请求上限</dt><dd>{{ performanceStats.requestedBitrateMbps.toFixed(1) }} Mbps</dd></div>
+        <div><dt>Host 目标</dt><dd>{{ performanceStats.hostBitrateMbps === null
+          ? '—' : (performanceStats.hostBitrateMbps === 0
+            ? '固定质量' : `${performanceStats.hostBitrateMbps.toFixed(1)} Mbps`) }}</dd></div>
+        <div><dt>发送节奏</dt><dd>{{ performanceStats.pacingBitrateMbps === null
+          ? '—' : `${performanceStats.pacingBitrateMbps.toFixed(1)} Mbps` }}</dd></div>
         <div><dt>接收码率</dt><dd>{{ performanceStats.bitrateMbps.toFixed(1) }} Mbps</dd></div>
         <div><dt>实际网速</dt><dd>{{ performanceStats.dataRateKBps.toFixed(1) }} KB/s</dd></div>
         <div><dt>端到端</dt><dd>{{ performanceStats.endToEndMs.toFixed(1) }} ms</dd></div>

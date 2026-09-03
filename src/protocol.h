@@ -11,6 +11,7 @@ constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
 constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
+constexpr std::uint32_t kStreamStatusMagic = 0x54534D52; // "RMST"
 constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
 constexpr std::uint16_t kVersion = 11;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
@@ -23,6 +24,7 @@ constexpr std::uintptr_t kInjectedInputMarker =
 
 enum ClientFlags : std::uint32_t {
     kClientClipboardText = 1u << 0,
+    kClientStreamStatus = 1u << 1,
 };
 
 enum class VideoRateControl : std::uint32_t {
@@ -95,6 +97,16 @@ struct StreamReady {
     std::uint16_t header_size = sizeof(StreamReady);
 };
 
+// Optional host-to-client telemetry, advertised with kClientStreamStatus.
+// media_bitrate_bps is the encoder's current target (zero for fixed-quality).
+struct StreamStatus {
+    std::uint32_t magic = kStreamStatusMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(StreamStatus);
+    std::uint32_t media_bitrate_bps = 0;
+    std::uint64_t pacing_bitrate_bps = 0;
+};
+
 struct ClockSyncRequest {
     std::uint32_t magic = kClockSyncMagic;
     std::uint16_t version = kVersion;
@@ -155,6 +167,7 @@ struct WebRtcSignalHeader {
 static_assert(sizeof(ClientConfig) == 36);
 static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
+static_assert(sizeof(StreamStatus) == 20);
 static_assert(sizeof(ClockSyncRequest) == 24);
 static_assert(sizeof(ClockSyncResponse) == 40);
 static_assert(sizeof(InputEvent) == 24);

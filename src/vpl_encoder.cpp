@@ -327,8 +327,14 @@ private:
         parameters.mfx.TargetKbps = static_cast<mfxU16>(
             (target_kbps + multiplier - 1u) / multiplier);
         parameters.mfx.MaxKbps = parameters.mfx.TargetKbps;
+        // oneVPL expresses this field in kilobytes (not kilobits). Keep one
+        // frame of VBV while also accounting for BRCParamMultiplier.
+        const auto buffer_denominator = static_cast<std::uint64_t>(fps) * 8u * multiplier;
+        const auto buffer_size = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(target_kbps) + buffer_denominator - 1u) /
+            buffer_denominator);
         parameters.mfx.BufferSizeInKB = static_cast<mfxU16>((std::min)(
-            65535u, (std::max)(1u, target_kbps / fps / multiplier)));
+            65535u, (std::max)(1u, buffer_size)));
         parameters.mfx.InitialDelayInKB = parameters.mfx.BufferSizeInKB;
     }
 

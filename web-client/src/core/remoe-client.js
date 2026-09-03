@@ -6,6 +6,7 @@ import {
   MAGIC,
   decodeClipboardText,
   decodeStreamHeader,
+  decodeStreamStatus,
   encodeClientConfig,
   encodeInputEvent,
   encodeClipboardText,
@@ -303,11 +304,16 @@ export class RemoeBrowserClient {
 
   async #handleControl(value) {
     const bytes = toBytes(value);
-    if (bytes.byteLength >= 4 &&
-        new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true) ===
-          MAGIC.clipboard) {
+    const magic = bytes.byteLength >= 4
+      ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
+      : 0;
+    if (magic === MAGIC.clipboard) {
       const clipboard = decodeClipboardText(bytes);
       this.#events.onClipboard?.(clipboard.text);
+      return;
+    }
+    if (magic === MAGIC.streamStatus) {
+      this.#events.onStreamStatus?.(decodeStreamStatus(bytes));
       return;
     }
     const header = decodeStreamHeader(bytes);

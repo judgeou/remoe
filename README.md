@@ -339,7 +339,7 @@ NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改�
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | 网络媒体上限；CBR 时由 host 在该上限内动态选择工作码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；其他位必须为 0 |
+| 24 | u32 | flags | bit 0 = 支持双向 UTF-8 文本剪贴板；bit 1 = 支持 Host 工作码率状态 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 32 | u32 | quality | 固定质量为 1–51（小=高质量）；CBR 为 0 |
 
@@ -369,6 +369,19 @@ NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改�
 | 6 | u16 | header_size | `8` |
 
 client 完成解码队列和窗口初始化后发送此消息；host 收到后才开始发送视频。
+
+### StreamStatus（20 bytes，可选）
+
+Web client 通过 `ClientConfig.flags` bit 1 声明支持后，Host 在 `StreamHeader` 后发送初始状态，
+并在自适应码率变化时更新。这样性能面板可区分请求上限、Host 当前编码目标和浏览器实际接收码率。
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `RMST` |
+| 4 | u16 | version | `11` |
+| 6 | u16 | header_size | `20` |
+| 8 | u32 | media_bitrate_bps | Host 当前编码目标；固定质量为 0 |
+| 12 | u64 | pacing_bitrate_bps | Host 当前 RTP pacing 速率 |
 
 ### ClockSyncRequest / ClockSyncResponse
 

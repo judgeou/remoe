@@ -4,6 +4,7 @@ export const MAGIC = Object.freeze({
   clientConfig: 0x46434d52,
   stream: 0x454f4d52,
   streamReady: 0x59445253,
+  streamStatus: 0x54534d52,
   input: 0x54504e49,
   clipboard: 0x50494c43,
   signal: 0x534d5257,
@@ -122,7 +123,8 @@ export function encodeClientConfig({
   view.setUint32(12, 1, true);
   view.setUint32(16, bitrate, true);
   view.setUint32(20, scalePercent, true);
-  view.setUint32(24, 1, true); // Supports bidirectional UTF-8 clipboard text.
+  // Supports bidirectional UTF-8 clipboard text and Host stream telemetry.
+  view.setUint32(24, 3, true);
   view.setUint32(28, fixedQuality ? RATE_CONTROL.fixedQuality : RATE_CONTROL.cbr, true);
   view.setUint32(32, fixedQuality ? quality : 0, true);
   return bytes;
@@ -159,6 +161,26 @@ export function decodeStreamHeader(value) {
       result.width < 2 || result.height < 2 || result.fpsNum < 1 ||
       result.fpsDen !== 1) {
     throw new Error('Host 返回了无效或不受支持的 StreamHeader');
+  }
+  return result;
+}
+
+export function decodeStreamStatus(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (bytes.byteLength !== 20) throw new Error('Host 返回的 StreamStatus 长度错误');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const pacingBitrate = view.getBigUint64(12, true);
+  const result = {
+    magic: view.getUint32(0, true),
+    version: view.getUint16(4, true),
+    headerSize: view.getUint16(6, true),
+    mediaBitrateBps: view.getUint32(8, true),
+    pacingBitrateBps: Number(pacingBitrate),
+  };
+  if (result.magic !== MAGIC.streamStatus || result.version !== PROTOCOL_VERSION ||
+      result.headerSize !== 20 || result.mediaBitrateBps > 1_000_000_000 ||
+      pacingBitrate > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error('Host 返回了无效或不受支持的 StreamStatus');
   }
   return result;
 }
