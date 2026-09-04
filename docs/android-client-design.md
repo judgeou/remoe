@@ -510,7 +510,8 @@ remoe-android-device-login-v1
 
 ## 12. 输入设计
 
-当前 protocol v11 `InputEvent` 使用 Windows 绝对鼠标坐标和 Windows scan code。
+当前 protocol v11 `InputEvent` 支持 Windows 绝对鼠标坐标、FPS 接管模式使用的相对鼠标位移，
+以及 Windows scan code。Android 触控手势仍维护绝对指针位置。
 
 第一版手势：
 

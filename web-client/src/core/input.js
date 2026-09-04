@@ -166,7 +166,7 @@ export class RemoteInputController {
       // Pointer Lock must be requested before Fullscreen consumes this click's
       // transient activation. Keyboard Lock can capture Escape once fullscreen
       // has become active.
-      const pointerLock = this.#target.requestPointerLock();
+      const pointerLock = this.#requestPointerLock();
       const fullscreen = enterFullscreen
         ? fullscreenTarget.requestFullscreen({ navigationUI: 'hide' })
         : Promise.resolve();
@@ -281,14 +281,16 @@ export class RemoteInputController {
       this.releaseAll();
       this.#unlockKeyboard();
     }
-    else {
-      if (pointerLocked) {
-        this.#x = 32768;
-        this.#y = 32768;
-        this.#emitPointer();
-      }
-    }
     this.#setActive(active);
+  }
+
+  async #requestPointerLock() {
+    try {
+      await this.#target.requestPointerLock({ unadjustedMovement: true });
+    } catch (error) {
+      if (error?.name !== 'NotSupportedError') throw error;
+      await this.#target.requestPointerLock();
+    }
   }
 
   #setActive(active) {
@@ -310,11 +312,11 @@ export class RemoteInputController {
 
   #mouseMove(event) {
     if (document.pointerLockElement !== this.#target) return;
-    const rect = this.#target.getBoundingClientRect();
-    if (rect.width < 2 || rect.height < 2) return;
-    this.#x = Math.max(0, Math.min(65535, this.#x + event.movementX * 65535 / rect.width));
-    this.#y = Math.max(0, Math.min(65535, this.#y + event.movementY * 65535 / rect.height));
-    this.#emitPointer();
+    const deltaX = Math.max(-32768, Math.min(32767, Math.round(event.movementX)));
+    const deltaY = Math.max(-32768, Math.min(32767, Math.round(event.movementY)));
+    if (deltaX || deltaY) {
+      this.#send({ type: INPUT_TYPE.mouseMoveRelative, value1: deltaX, value2: deltaY });
+    }
   }
 
   #directMouseMove(event) {

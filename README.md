@@ -333,8 +333,9 @@ WebCodecs、标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remo
 交给 `VideoDecoder`。这条 Web 专用路径绕过 Chromium 标准 VideoTrack 的播放抖动缓冲。性能面板
 通过 `ClockSyncRequest/Response` 和 Host 捕获时间戳计算端到端延迟。解码完成的画面采用
 latest-frame-wins 呈现：同一浏览器刷新周期只绘制最新帧，并立即释放被替换的 `VideoFrame`。
-画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用全屏、Pointer Lock 和
-Keyboard Lock。单独按 `Esc` 会发送给 Host，按 `Ctrl+Alt+Shift` 释放本地键鼠。生产部署与
+画面自动占满网页；自由模式使用绝对坐标直接控制桌面，工具栏“接管键鼠”通过 Pointer Lock、
+Keyboard Lock 和相对鼠标位移控制 FPS 游戏。单独按 `Esc` 会发送给 Host，按 `Ctrl+Alt+Shift`
+释放本地键鼠。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。
 
 网页使用 Vite、Vue 3 和 TypeScript 构建。开发与生产构建命令：
@@ -462,10 +463,10 @@ WebCodecs；标准 VideoTrack 仍保留给 Android 和 Windows 原生 client。
 | 0 | u32 | magic | `INPT` |
 | 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `24` |
-| 8 | u16 | type | 1=移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧 |
+| 8 | u16 | type | 1=绝对移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧；11=相对移动 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
-| 12 | i32 | value1 | 移动 X（0–65535）、滚轮 delta 或 Windows 扫描码 |
-| 16 | i32 | value2 | 移动 Y（0–65535），其余类型为 0 |
+| 12 | i32 | value1 | 绝对 X（0–65535）、相对 X（-32768–32767）、滚轮 delta 或 Windows 扫描码 |
+| 16 | i32 | value2 | 绝对 Y（0–65535）或相对 Y（-32768–32767），其余类型为 0 |
 | 20 | u32 | sequence | client 递增事件编号 |
 
 ### ClipboardHeader（16 bytes + UTF-8 text）
@@ -498,8 +499,9 @@ Windows 原生 client 会自动同步双方剪贴板。网页收到远程文本�
 type 1 的 value/metadata 分别是 SDP 和 `offer`/`answer`；type 2 分别是 candidate 和 `mid`；
 type 3/4 不带 payload。双方完成确认后，WSS 不再参与业务数据传输。
 
-鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频边缘时坐标
-会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。
+自由模式鼠标坐标相对实际视频区域归一化，窗口宽高比不同产生的黑边不参与映射；拖动越过视频
+边缘时坐标会夹到边缘。host 将坐标映射回被捕获的 DXGI output，因此也支持位于负坐标的副显示器。
+接管模式直接发送有符号相对位移，不受桌面边缘约束，适用于 FPS 游戏视角。
 
 client 连接后的第一张图像强制为 IDR/key frame，并携带所需 codec headers，因而 client 无需
 连接建立前的码流状态。断线后 host 返回监听状态，支持后续 client 重连；同一时刻只服务一个 client。

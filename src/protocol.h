@@ -50,6 +50,7 @@ enum class InputType : std::uint16_t {
     MouseHorizontalWheel = 8,
     Keyboard = 9,
     RequestKeyFrame = 10,
+    MouseMoveRelative = 11,
 };
 
 enum InputFlags : std::uint16_t {
@@ -148,8 +149,9 @@ struct ClockSyncResponse {
     std::uint64_t host_send_us = 0;
 };
 
-// Client-to-host input message. MouseMove values are normalized to 0..65535.
-// Keyboard value1 is a Windows scan code; value2 is unused.
+// Client-to-host input message. MouseMove values are normalized to 0..65535;
+// MouseMoveRelative values are signed mouse deltas. Keyboard value1 is a
+// Windows scan code; value2 is unused.
 struct InputEvent {
     std::uint32_t magic = kInputMagic;
     std::uint16_t version = kVersion;

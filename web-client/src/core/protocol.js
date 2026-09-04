@@ -38,6 +38,7 @@ export const INPUT_TYPE = Object.freeze({
   mouseHorizontalWheel: 8,
   keyboard: 9,
   requestKeyFrame: 10,
+  mouseMoveRelative: 11,
 });
 
 const encoder = new TextEncoder();
@@ -238,7 +239,7 @@ export function decodeClockSyncResponse(value) {
 
 export function encodeInputEvent({ type, flags = 0, value1 = 0, value2 = 0, sequence = 0 }) {
   if (!Number.isInteger(type) || type < INPUT_TYPE.mouseMove ||
-      type > INPUT_TYPE.requestKeyFrame || !Number.isInteger(flags) || flags < 0 || flags > 3 ||
+      type > INPUT_TYPE.mouseMoveRelative || !Number.isInteger(flags) || flags < 0 || flags > 3 ||
       !Number.isInteger(value1) || !Number.isInteger(value2)) {
     throw new RangeError('无效的键鼠输入事件');
   }

@@ -251,6 +251,12 @@ test('encodes keyboard input and maps extended Windows scan codes', () => {
   assert.equal(view.getUint16(10, true), 3);
   assert.equal(view.getInt32(12, true), 0x4b);
   assert.equal(view.getUint32(20, true), 17);
+  const relative = encodeInputEvent({ type: 11, value1: -37, value2: 19 });
+  const relativeView = new DataView(relative.buffer);
+  assert.equal(relativeView.getUint16(8, true), 11);
+  assert.equal(relativeView.getInt32(12, true), -37);
+  assert.equal(relativeView.getInt32(16, true), 19);
+  assert.throws(() => encodeInputEvent({ type: 12 }), /无效/);
 });
 
 test('round-trips UTF-8 clipboard text with a bounded variable-length frame', () => {
@@ -487,6 +493,7 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
   const fullscreenTarget = new EventTarget();
   const target = new EventTarget();
   const keyboardLocks = [];
+  const pointerLockOptions = [];
   let keyboardUnlocks = 0;
 
   fakeDocument.pointerLockElement = null;
@@ -501,7 +508,8 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
     fakeDocument.fullscreenElement = fullscreenTarget;
   };
   target.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 50 });
-  target.requestPointerLock = async () => {
+  target.requestPointerLock = async (options) => {
+    pointerLockOptions.push(options);
     fakeDocument.pointerLockElement = target;
     fakeDocument.dispatchEvent(new Event('pointerlockchange'));
   };
@@ -541,8 +549,17 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
   try {
     await controller.capture(fullscreenTarget);
     assert.equal(controller.active, true);
+    assert.deepEqual(pointerLockOptions, [{ unadjustedMovement: true }]);
     assert.deepEqual(keyboardLocks, [['Escape']]);
     assert.equal(fakeDocument.fullscreenElement, fullscreenTarget);
+
+    const movement = new Event('mousemove');
+    Object.defineProperties(movement, {
+      movementX: { value: 17 },
+      movementY: { value: -9 },
+    });
+    fakeDocument.dispatchEvent(movement);
+    assert.deepEqual(inputs.at(-1), { type: 11, value1: 17, value2: -9 });
 
     key('keydown', 'Escape');
     key('keyup', 'Escape');

@@ -651,6 +651,13 @@ bool inject_input_event(const remoe::protocol::InputEvent& event,
         input.mi.dx = static_cast<LONG>((desktop_x - virtual_left) * 65535 / (virtual_width - 1));
         input.mi.dy = static_cast<LONG>((desktop_y - virtual_top) * 65535 / (virtual_height - 1));
         input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    } else if (event.type == InputType::MouseMoveRelative) {
+        if (event.flags != 0 || event.value1 < -32768 || event.value1 > 32767 ||
+            event.value2 < -32768 || event.value2 > 32767) return false;
+        input.type = INPUT_MOUSE;
+        input.mi.dx = event.value1;
+        input.mi.dy = event.value2;
+        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE;
     } else if (event.type >= InputType::MouseLeft && event.type <= InputType::MouseX2) {
         if ((event.flags & ~remoe::protocol::kInputRelease) != 0) return false;
         input.type = INPUT_MOUSE;

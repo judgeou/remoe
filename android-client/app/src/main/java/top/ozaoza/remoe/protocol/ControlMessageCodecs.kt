@@ -222,6 +222,8 @@ object InputEventCodec {
         val valid = when (value.type) {
             InputType.MOUSE_MOVE -> value.flags == 0 &&
                 value.value1 in 0..65_535 && value.value2 in 0..65_535
+            InputType.MOUSE_MOVE_RELATIVE -> value.flags == 0 &&
+                value.value1 in -32_768..32_767 && value.value2 in -32_768..32_767
             InputType.MOUSE_LEFT, InputType.MOUSE_RIGHT, InputType.MOUSE_MIDDLE,
             InputType.MOUSE_X1, InputType.MOUSE_X2 ->
                 value.flags and Protocol.INPUT_FLAG_RELEASE.inv() == 0 && value.value2 == 0

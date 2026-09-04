@@ -67,6 +67,7 @@ enum class InputType(val wireValue: Int) {
     MOUSE_WHEEL(7),
     MOUSE_HORIZONTAL_WHEEL(8),
     KEYBOARD(9),
+    MOUSE_MOVE_RELATIVE(11),
     ;
 
     companion object {
