@@ -68,8 +68,8 @@ public:
     struct Configuration {
         Role role = Role::Answerer;
         std::string data_channel_label = "remoe-control";
-        // Optional unordered, non-retransmitted channel used by the browser's
-        // WebCodecs low-latency path alongside the standard video track.
+        // Optional unordered, non-retransmitted channel used by browser and
+        // native low-latency paths alongside the standard video track.
         bool enable_video_data_channel = false;
         std::string video_data_channel_label = "remoe-video";
         VideoDirection video_direction = VideoDirection::Disabled;

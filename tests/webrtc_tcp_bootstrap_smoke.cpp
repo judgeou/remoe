@@ -60,6 +60,8 @@ int main() {
         std::condition_variable received_changed;
         remoe::protocol::InputEvent received_event;
         bool received = false;
+        bool video_open = false;
+        std::vector<std::uint8_t> received_video;
 
         remoe::WebRtcTransport::Callbacks host_callbacks;
         host_callbacks.on_binary = [&](std::vector<std::uint8_t> message) {
@@ -68,6 +70,22 @@ int main() {
                 std::lock_guard lock(received_mutex);
                 std::memcpy(&received_event, message.data(), sizeof(received_event));
                 received = true;
+            }
+            received_changed.notify_all();
+        };
+        host_callbacks.on_video_binary = [&](std::vector<std::uint8_t> message) {
+            {
+                std::lock_guard lock(received_mutex);
+                received_video = std::move(message);
+            }
+            received_changed.notify_all();
+        };
+
+        remoe::WebRtcTransport::Callbacks client_callbacks;
+        client_callbacks.on_video_data_open = [&] {
+            {
+                std::lock_guard lock(received_mutex);
+                video_open = true;
             }
             received_changed.notify_all();
         };
@@ -80,7 +98,7 @@ int main() {
         auto client_future = std::async(std::launch::async, [&] {
             return remoe::establish_webrtc_over_tcp(
                 remoe::WebRtcTransport::Role::Offerer,
-                make_io(host_to_client, client_to_host), {}, 10s);
+                make_io(host_to_client, client_to_host), std::move(client_callbacks), 10s);
         });
 
         auto host = host_future.get();
@@ -115,6 +133,24 @@ int main() {
             received_event.type != event.type || received_event.value1 != event.value1 ||
             received_event.sequence != event.sequence) {
             throw std::runtime_error("control event changed in transit");
+        }
+
+        {
+            std::unique_lock lock(received_mutex);
+            if (!received_changed.wait_for(lock, 5s, [&] { return video_open; })) {
+                throw std::runtime_error("low-latency video DataChannel did not open");
+            }
+        }
+        const std::vector<std::uint8_t> video_message{9, 8, 7, 6};
+        if (!client->send_video_binary(std::span<const std::uint8_t>(video_message))) {
+            throw std::runtime_error("video DataChannel rejected a binary message");
+        }
+        {
+            std::unique_lock lock(received_mutex);
+            if (!received_changed.wait_for(lock, 5s,
+                    [&] { return received_video == video_message; })) {
+                throw std::runtime_error("host did not receive the low-latency video message");
+            }
         }
 
         std::cout << "WebRTC TCP bootstrap smoke test passed\n";

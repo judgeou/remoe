@@ -102,6 +102,10 @@ VideoWindow::VideoWindow(std::uint32_t width, std::uint32_t height) {
 
 VideoWindow::~VideoWindow() {
     running_ = false;
+    if (frame_latency_waitable_) {
+        CloseHandle(frame_latency_waitable_);
+        frame_latency_waitable_ = nullptr;
+    }
     if (window_ && IsWindow(window_)) DestroyWindow(window_);
 }
 
@@ -135,6 +139,7 @@ void VideoWindow::create_device_and_swapchain(std::uint32_t width, std::uint32_t
     description.BufferCount = 2;
     description.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     description.Scaling = DXGI_SCALING_STRETCH;
+    description.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     check_hr(factory->CreateSwapChainForHwnd(device_.Get(), window_, &description, nullptr,
                                               nullptr, &swapchain_),
              "CreateSwapChainForHwnd");
@@ -142,8 +147,14 @@ void VideoWindow::create_device_and_swapchain(std::uint32_t width, std::uint32_t
     swapchain_width_ = description.Width;
     swapchain_height_ = description.Height;
 
-    Microsoft::WRL::ComPtr<IDXGIDevice1> dxgi_device;
-    if (SUCCEEDED(device_.As(&dxgi_device))) dxgi_device->SetMaximumFrameLatency(1);
+    Microsoft::WRL::ComPtr<IDXGISwapChain2> swapchain2;
+    check_hr(swapchain_.As(&swapchain2), "Query IDXGISwapChain2");
+    check_hr(swapchain2->SetMaximumFrameLatency(1),
+             "IDXGISwapChain2::SetMaximumFrameLatency");
+    frame_latency_waitable_ = swapchain2->GetFrameLatencyWaitableObject();
+    if (!frame_latency_waitable_) {
+        throw std::runtime_error("GetFrameLatencyWaitableObject returned a null handle");
+    }
 }
 
 void VideoWindow::resize_swapchain(std::uint32_t width, std::uint32_t height) {
@@ -153,7 +164,9 @@ void VideoWindow::resize_swapchain(std::uint32_t width, std::uint32_t height) {
     video_processor_.Reset();
     video_enumerator_.Reset();
     context_->Flush();
-    check_hr(swapchain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0),
+    check_hr(swapchain_->ResizeBuffers(
+                 0, width, height, DXGI_FORMAT_UNKNOWN,
+                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT),
              "IDXGISwapChain::ResizeBuffers");
     swapchain_width_ = width;
     swapchain_height_ = height;
@@ -196,13 +209,24 @@ void VideoWindow::ensure_video_processor(std::uint32_t input_width, std::uint32_
     processor_output_height_ = output_height;
 }
 
-void VideoWindow::present(ID3D11Texture2D* texture, std::uint32_t width, std::uint32_t height) {
-    if (!running_ || !texture) return;
+bool VideoWindow::present(ID3D11Texture2D* texture, std::uint32_t width, std::uint32_t height) {
+    if (!running_ || !texture) return false;
+    // Wait briefly for an imminent VSync, but never let presentation throttle
+    // the decoder. While the single queued frame is pending, decoded outputs
+    // are superseded until DXGI has room for the newest candidate.
+    const DWORD wait_result = WaitForSingleObject(frame_latency_waitable_, 1);
+    if (wait_result == WAIT_TIMEOUT) return false;
+    if (wait_result == WAIT_FAILED) {
+        throw std::runtime_error("frame-latency wait failed, error=" +
+                                 std::to_string(GetLastError()));
+    }
+    if (wait_result != WAIT_OBJECT_0) return false;
+
     RECT client{};
-    if (!GetClientRect(window_, &client)) return;
+    if (!GetClientRect(window_, &client)) return false;
     const auto output_width = static_cast<std::uint32_t>((std::max)(client.right - client.left, 0L));
     const auto output_height = static_cast<std::uint32_t>((std::max)(client.bottom - client.top, 0L));
-    if (output_width == 0 || output_height == 0) return;
+    if (output_width == 0 || output_height == 0) return false;
 
     resize_swapchain(output_width, output_height);
     ensure_video_processor(width, height, output_width, output_height);
@@ -236,8 +260,12 @@ void VideoWindow::present(ID3D11Texture2D* texture, std::uint32_t width, std::ui
     check_hr(video_context_->VideoProcessorBlt(video_processor_.Get(), output_view_.Get(), 0, 1,
                                                 &stream),
              "VideoProcessorBlt");
-    // VSync avoids needless presentation work and is intentionally favored for low power.
-    check_hr(swapchain_->Present(1, 0), "IDXGISwapChain::Present");
+    // The waitable object keeps one VSync-paced frame in flight. DO_NOT_WAIT is
+    // a final guard against DXGI turning a transiently busy queue into latency.
+    const HRESULT result = swapchain_->Present(1, DXGI_PRESENT_DO_NOT_WAIT);
+    if (result == DXGI_ERROR_WAS_STILL_DRAWING) return false;
+    check_hr(result, "IDXGISwapChain::Present");
+    return true;
 }
 
 int VideoWindow::message_loop() {

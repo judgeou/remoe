@@ -274,7 +274,10 @@ WebRTC 会为 ICE 使用本机随机 UDP 端口；Windows Defender Firewall 首�
 现有 passkey 账号批准原生 Client；程序通过 HTTPS 轮询一次性设备授权结果，不读取浏览器 Cookie，
 也不会接触 passkey 私钥。登录完成后可直接从“我的电脑”列表选择在线 Host，并设置 FPS、码率和缩放。
 点击连接会保留启动器，在它前方新建一个最大化播放窗口；关闭播放窗口只断开当前会话，随后可以
-回到启动器重新选择 Host。
+回到启动器重新选择 Host。播放窗口使用单帧 DXGI waitable swap chain；显示队列忙时继续完整解码
+依赖帧，但跳过已被后续画面取代的合成与 Present，避免垂直同步反向阻塞解码队列。视频传输与
+浏览器低延迟路径一致，使用无序、零重传的 `remoe-video` DataChannel；分片缺失或帧号跳变后会
+立即丢弃受影响的帧并通过控制通道请求新关键帧，不进入旧 RTP 接收器的重排等待。
 
 原生 Client 获得的长期 refresh token 使用当前 Windows 用户的 DPAPI 加密，保存在
 `%LOCALAPPDATA%\remoe\client-identity.bin`。短期 access token 只保存在内存；点击“退出登录”会撤销
@@ -328,7 +331,8 @@ MB/s 显示，不包含 UDP/IP 和链路层包头。
 WebCodecs、标准 H.264/AV1 VideoTrack 和 protocol v11；可靠有序的 `remoe-control` DataChannel
 发送键鼠 `InputEvent` 与 UTF-8 文本剪贴板，无序零重传的 `remoe-video` DataChannel 直接把编码帧
 交给 `VideoDecoder`。这条 Web 专用路径绕过 Chromium 标准 VideoTrack 的播放抖动缓冲。性能面板
-通过 `ClockSyncRequest/Response` 和 Host 捕获时间戳计算端到端延迟。
+通过 `ClockSyncRequest/Response` 和 Host 捕获时间戳计算端到端延迟。解码完成的画面采用
+latest-frame-wins 呈现：同一浏览器刷新周期只绘制最新帧，并立即释放被替换的 `VideoFrame`。
 画面自动占满网页；根据浏览器安全规则，用户需点击画面一次才能启用全屏、Pointer Lock 和
 Keyboard Lock。单独按 `Esc` 会发送给 Host，按 `Ctrl+Alt+Shift` 释放本地键鼠。生产部署与
 使用方法见 `docs/signaling-server-deployment.md`。

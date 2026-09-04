@@ -90,7 +90,9 @@ export class RemoeBrowserClient {
   #statsReceiveToPresentMs = 0;
   #statsCaptureToReceiveMs = 0;
   #statsEndToEndMs = 0;
-  #statsTimingFrames = 0;
+  #statsPresentedFrames = 0;
+  #statsCaptureTimingFrames = 0;
+  #statsEndToEndFrames = 0;
   #clockTimer = 0;
   #clockSequence = 0;
   #clockPending = new Map();
@@ -347,28 +349,36 @@ export class RemoeBrowserClient {
     if (!support.supported) throw new Error(`浏览器不支持此视频配置：${codec}`);
     this.#decoder = new VideoDecoder({
       output: (frame) => {
+        let frameTransferred = false;
         try {
           const now = performance.now();
           const timing = this.#decodeReceiveTimes.get(frame.timestamp);
           this.#decodeReceiveTimes.delete(frame.timestamp);
           if (timing) {
             this.#statsDecodeMs += now - timing.receivedAt;
-            this.#events.onFrame?.(frame, header);
-            const presentedAt = performance.now();
-            this.#statsReceiveToPresentMs += presentedAt - timing.receivedAt;
             if (this.#hostMinusClientUs !== null) {
               const captureToReceive = (timing.receivedAt * 1_000 +
                 this.#hostMinusClientUs - timing.hostTimestampUs) / 1_000;
-              const endToEnd = (presentedAt * 1_000 +
-                this.#hostMinusClientUs - timing.hostTimestampUs) / 1_000;
               if (captureToReceive >= 0 && captureToReceive <= 60_000) {
                 this.#statsCaptureToReceiveMs += captureToReceive;
-                this.#statsTimingFrames += 1;
+                this.#statsCaptureTimingFrames += 1;
               }
-              if (endToEnd >= 0 && endToEnd <= 60_000) this.#statsEndToEndMs += endToEnd;
             }
-          } else {
-            this.#events.onFrame?.(frame, header);
+          }
+          const onPresented = timing ? (presentedAt) => {
+            this.#statsReceiveToPresentMs += presentedAt - timing.receivedAt;
+            this.#statsPresentedFrames += 1;
+            if (this.#hostMinusClientUs === null) return;
+            const endToEnd = (presentedAt * 1_000 +
+              this.#hostMinusClientUs - timing.hostTimestampUs) / 1_000;
+            if (endToEnd >= 0 && endToEnd <= 60_000) {
+              this.#statsEndToEndMs += endToEnd;
+              this.#statsEndToEndFrames += 1;
+            }
+          } : undefined;
+          if (this.#events.onFrame) {
+            frameTransferred = true;
+            this.#events.onFrame(frame, header, onPresented);
           }
           this.#statsFrames += 1;
           if (!this.#firstFrameNotified) {
@@ -377,7 +387,7 @@ export class RemoeBrowserClient {
           }
           this.#maybeReportStats();
         } finally {
-          frame.close();
+          if (!frameTransferred) frame.close();
         }
       },
       error: (error) => this.#fail(new Error(`WebCodecs 解码失败：${error.message}`)),
@@ -441,8 +451,12 @@ export class RemoeBrowserClient {
     const elapsed = now - this.#statsStartedAt;
     if (elapsed < 1_000) return;
     const average = (total) => this.#statsFrames > 0 ? total / this.#statsFrames : 0;
-    const timingAverage = (total) => this.#statsTimingFrames > 0
-      ? total / this.#statsTimingFrames : 0;
+    const presentedAverage = (total) => this.#statsPresentedFrames > 0
+      ? total / this.#statsPresentedFrames : 0;
+    const captureAverage = (total) => this.#statsCaptureTimingFrames > 0
+      ? total / this.#statsCaptureTimingFrames : 0;
+    const endToEndAverage = (total) => this.#statsEndToEndFrames > 0
+      ? total / this.#statsEndToEndFrames : 0;
     this.#events.onStats?.({
       fps: this.#statsFrames * 1_000 / elapsed,
       bitrateMbps: this.#statsBytes * 8 / elapsed / 1_000,
@@ -452,11 +466,11 @@ export class RemoeBrowserClient {
       jitterBufferMs: 0,
       jitterMinimumMs: 0,
       jitterTargetMs: 0,
-      endToEndMs: timingAverage(this.#statsEndToEndMs),
-      captureToReceiveMs: timingAverage(this.#statsCaptureToReceiveMs),
-      receiveToPresentMs: average(this.#statsReceiveToPresentMs),
+      endToEndMs: endToEndAverage(this.#statsEndToEndMs),
+      captureToReceiveMs: captureAverage(this.#statsCaptureToReceiveMs),
+      receiveToPresentMs: presentedAverage(this.#statsReceiveToPresentMs),
       decodeMs: average(this.#statsDecodeMs),
-      processingMs: average(this.#statsReceiveToPresentMs),
+      processingMs: presentedAverage(this.#statsReceiveToPresentMs),
       decoderImplementation: 'WebCodecs low-latency',
       powerEfficientDecoder: null,
     });
@@ -468,7 +482,9 @@ export class RemoeBrowserClient {
     this.#statsReceiveToPresentMs = 0;
     this.#statsCaptureToReceiveMs = 0;
     this.#statsEndToEndMs = 0;
-    this.#statsTimingFrames = 0;
+    this.#statsPresentedFrames = 0;
+    this.#statsCaptureTimingFrames = 0;
+    this.#statsEndToEndFrames = 0;
   }
 
   #sendClockSync() {

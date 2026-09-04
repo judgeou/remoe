@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <wrl/client.h>
 
 #include <atomic>
@@ -32,8 +33,9 @@ public:
     void update_frame_age(double age_ms) noexcept;
     void set_input_callback(std::function<bool(const protocol::InputEvent&)> callback);
 
-    // Called by the decoder thread. The input texture remains GPU-resident.
-    void present(ID3D11Texture2D* texture, std::uint32_t width, std::uint32_t height);
+    // Called by the decoder thread. Returns false when the one-frame DXGI
+    // presentation queue is busy and this decoded frame should be superseded.
+    bool present(ID3D11Texture2D* texture, std::uint32_t width, std::uint32_t height);
 
 private:
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
@@ -56,6 +58,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_;
+    HANDLE frame_latency_waitable_ = nullptr;
     Microsoft::WRL::ComPtr<ID3D11VideoDevice> video_device_;
     Microsoft::WRL::ComPtr<ID3D11VideoContext> video_context_;
     Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> video_enumerator_;
