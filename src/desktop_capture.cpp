@@ -98,19 +98,37 @@ void DesktopCapture::use_device(ID3D11Device* device) {
 }
 
 void DesktopCapture::create_duplication() {
+    check_hr(try_create_duplication(), "IDXGIOutput1::DuplicateOutput");
+}
+
+HRESULT DesktopCapture::try_create_duplication() {
     duplication_.Reset();
-    check_hr(output_->DuplicateOutput(device_.Get(), &duplication_), "IDXGIOutput1::DuplicateOutput");
+    return output_->DuplicateOutput(device_.Get(), &duplication_);
 }
 
 bool DesktopCapture::acquire(ID3D11Texture2D* destination, std::uint32_t content_width,
                              std::uint32_t content_height,
                              std::chrono::milliseconds timeout) {
+    if (!duplication_) {
+        const HRESULT recreate = try_create_duplication();
+        if (recreate == E_ACCESSDENIED || recreate == DXGI_ERROR_UNSUPPORTED ||
+            recreate == DXGI_ERROR_SESSION_DISCONNECTED) {
+            return false;
+        }
+        check_hr(recreate, "IDXGIOutput1::DuplicateOutput after desktop switch");
+    }
+
     DXGI_OUTDUPL_FRAME_INFO frame_info{};
     Microsoft::WRL::ComPtr<IDXGIResource> resource;
     HRESULT hr = duplication_->AcquireNextFrame(static_cast<UINT>(timeout.count()), &frame_info, &resource);
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
-    if (hr == DXGI_ERROR_ACCESS_LOST) {
-        create_duplication();
+    if (hr == DXGI_ERROR_ACCESS_LOST || hr == E_ACCESSDENIED ||
+        hr == DXGI_ERROR_UNSUPPORTED || hr == DXGI_ERROR_SESSION_DISCONNECTED) {
+        // A UAC prompt switches the visible input desktop to Winsta0\Winlogon.
+        // Keep the Host alive and recreate duplication on a later frame. A
+        // LocalSystem service worker can recreate against the secure desktop;
+        // an ordinary user process resumes after Windows returns to Default.
+        duplication_.Reset();
         return false;
     }
     check_hr(hr, "AcquireNextFrame");

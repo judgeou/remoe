@@ -189,6 +189,8 @@ add_executable(remoe_host
     src/protocol.h
     src/video_encoder.cpp
     src/video_encoder.h
+    src/windows_service.cpp
+    src/windows_service.h
     src/nvenc_api_loader.cpp
     src/nvenc_encoder.cpp
     "${NVENC_SAMPLE_DIR}/NvEncoder/NvEncoder.cpp"
@@ -224,11 +226,14 @@ target_link_options(remoe_host PRIVATE
 
 target_link_libraries(remoe_host PRIVATE
     remoe_webrtc_transport
+    advapi32
     d3d11
     dxgi
     ole32
     oleaut32
     shell32
+    userenv
+    wtsapi32
     ws2_32)
 install(TARGETS remoe_host RUNTIME DESTINATION bin)
 
@@ -279,6 +284,8 @@ if(REMOE_BUILD_X264_HOST)
         src/adaptive_stream_controller.cpp
         src/adaptive_stream_controller.h
         src/protocol.h
+        src/windows_service.cpp
+        src/windows_service.h
         src/x264_encoder.cpp
         src/x264_encoder.h)
     target_include_directories(remoe_host_x264 PRIVATE
@@ -298,11 +305,14 @@ if(REMOE_BUILD_X264_HOST)
         remoe_webrtc_transport
         yuv
         remoe_x264
+        advapi32
         gdi32
         ole32
         oleaut32
         shell32
         user32
+        userenv
+        wtsapi32
         ws2_32)
     install(TARGETS remoe_host_x264 RUNTIME DESTINATION bin)
     install(FILES "${X264_ROOT}/COPYING" DESTINATION licenses/x264)

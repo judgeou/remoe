@@ -33,6 +33,7 @@ public:
 
 private:
     void create_duplication();
+    [[nodiscard]] HRESULT try_create_duplication();
     void scale_texture(ID3D11Texture2D* source, ID3D11Texture2D* destination,
                        std::uint32_t source_width, std::uint32_t source_height,
                        std::uint32_t destination_width, std::uint32_t destination_height,

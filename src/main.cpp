@@ -11,6 +11,7 @@
 #include "host_identity.h"
 #include "protocol.h"
 #include "webrtc_websocket_signaling.h"
+#include "windows_service.h"
 
 #include <Windows.h>
 #include <netfw.h>
@@ -148,6 +149,62 @@ std::wstring quote_windows_argument(std::wstring_view argument) {
     return quoted;
 }
 
+std::vector<std::wstring> wide_command_line_arguments() {
+    int argument_count = 0;
+    wchar_t** arguments = CommandLineToArgvW(GetCommandLineW(), &argument_count);
+    if (!arguments) {
+        throw std::runtime_error("CommandLineToArgvW failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+    std::vector<std::wstring> result;
+    result.reserve(static_cast<std::size_t>(argument_count));
+    for (int index = 0; index < argument_count; ++index) {
+        result.emplace_back(arguments[index]);
+    }
+    LocalFree(arguments);
+    return result;
+}
+
+bool has_argument(int argc, char** argv, std::string_view requested) {
+    for (int index = 1; index < argc; ++index) {
+        if (std::string_view(argv[index]) == requested) return true;
+    }
+    return false;
+}
+
+std::vector<std::wstring> service_worker_arguments() {
+    const auto arguments = wide_command_line_arguments();
+    std::vector<std::wstring> result;
+    for (std::size_t index = 1; index < arguments.size(); ++index) {
+        const std::wstring_view argument(arguments[index]);
+        if (argument == L"--admin" || argument == L"--install-service" ||
+            argument == L"--uninstall-service" || argument == L"--service" ||
+            argument == L"--system-worker") {
+            continue;
+        }
+        if (argument == L"--service-stop-event") {
+            if (++index >= arguments.size()) {
+                throw std::runtime_error("missing value after --service-stop-event");
+            }
+            continue;
+        }
+        result.push_back(arguments[index]);
+    }
+    return result;
+}
+
+std::optional<std::wstring> service_stop_event_argument() {
+    const auto arguments = wide_command_line_arguments();
+    for (std::size_t index = 1; index < arguments.size(); ++index) {
+        if (arguments[index] != L"--service-stop-event") continue;
+        if (++index >= arguments.size()) {
+            throw std::runtime_error("missing value after --service-stop-event");
+        }
+        return arguments[index];
+    }
+    return std::nullopt;
+}
+
 // Returns true in the original process after it successfully launches an elevated child.
 bool relaunch_as_admin_if_requested() {
     int argument_count = 0;
@@ -160,9 +217,13 @@ bool relaunch_as_admin_if_requested() {
     bool requested = false;
     std::wstring parameters;
     for (int i = 1; i < argument_count; ++i) {
-        if (std::wstring_view(arguments[i]) == L"--admin") {
+        const std::wstring_view argument(arguments[i]);
+        if (argument == L"--admin") {
             requested = true;
             continue;
+        }
+        if (argument == L"--install-service" || argument == L"--uninstall-service") {
+            requested = true;
         }
         if (!parameters.empty()) parameters.push_back(L' ');
         parameters += quote_windows_argument(arguments[i]);
@@ -407,6 +468,8 @@ void print_help() {
         "  --check-encoder    Encode one test frame and exit (no signaling required)\n"
         "  --fps/--bitrate    Compatibility aliases for the two limits above\n"
         "  --admin            Relaunch with administrator privileges\n"
+        "  --install-service  Install/start an automatic LocalSystem Host service\n"
+        "  --uninstall-service Stop and remove the LocalSystem Host service\n"
         "  --help             Show this help\n";
 }
 
@@ -418,7 +481,15 @@ Options parse_options(int argc, char** argv) {
             print_help();
             std::exit(0);
         }
-        if (arg == "--admin") continue; // Consumed by relaunch_as_admin_if_requested().
+        if (arg == "--admin" || arg == "--install-service" ||
+            arg == "--uninstall-service" || arg == "--service" ||
+            arg == "--system-worker") {
+            continue; // Consumed by the process/service bootstrap.
+        }
+        if (arg == "--service-stop-event") {
+            if (++i >= argc) throw std::runtime_error("missing value after " + std::string(arg));
+            continue;
+        }
         if (arg == "--repair") {
             options.repair = true;
             continue;
@@ -1284,6 +1355,48 @@ int run(const Options& options) {
     return 0;
 }
 
+int run_service_worker(const Options& options, const std::wstring& stop_event_name) {
+    HANDLE stop_event = OpenEventW(SYNCHRONIZE, FALSE, stop_event_name.c_str());
+    if (!stop_event) {
+        throw std::runtime_error("OpenEventW(service stop) failed, Win32 error " +
+                                 std::to_string(GetLastError()));
+    }
+    HANDLE finished_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!finished_event) {
+        const DWORD error = GetLastError();
+        CloseHandle(stop_event);
+        throw std::runtime_error("CreateEventW(worker finished) failed, Win32 error " +
+                                 std::to_string(error));
+    }
+
+    DWORD session_id = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session_id);
+    std::cout << "Service worker running as LocalSystem in interactive session "
+              << session_id << '\n';
+
+    std::thread stop_watcher([stop_event, finished_event] {
+        HANDLE events[] = {stop_event, finished_event};
+        if (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0) {
+            g_running = false;
+        }
+    });
+
+    try {
+        const int result = run(options);
+        SetEvent(finished_event);
+        stop_watcher.join();
+        CloseHandle(finished_event);
+        CloseHandle(stop_event);
+        return result;
+    } catch (...) {
+        SetEvent(finished_event);
+        stop_watcher.join();
+        CloseHandle(finished_event);
+        CloseHandle(stop_event);
+        throw;
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1294,7 +1407,47 @@ int main(int argc, char** argv) {
             }
         }
         if (relaunch_as_admin_if_requested()) return 0;
-        return run(parse_options(argc, argv));
+
+        const bool install_service = has_argument(argc, argv, "--install-service");
+        const bool uninstall_service = has_argument(argc, argv, "--uninstall-service");
+        const bool service_process = has_argument(argc, argv, "--service");
+        const bool system_worker = has_argument(argc, argv, "--system-worker");
+        const int internal_modes = static_cast<int>(install_service) +
+            static_cast<int>(uninstall_service) + static_cast<int>(service_process) +
+            static_cast<int>(system_worker);
+        if (internal_modes > 1) {
+            throw std::runtime_error("service management modes cannot be combined");
+        }
+
+        if (uninstall_service) return remoe::uninstall_host_service();
+        if (install_service) {
+            const Options options = parse_options(argc, argv);
+            if (options.check_encoder || options.repair || options.legacy_invite) {
+                throw std::runtime_error(
+                    "--install-service cannot be combined with --check-encoder, --repair, "
+                    "or --legacy-invite");
+            }
+            return remoe::install_host_service(service_worker_arguments());
+        }
+        if (service_process) {
+            if (!remoe::is_running_as_local_system()) {
+                throw std::runtime_error("the internal --service mode must be started by Windows SCM");
+            }
+            return remoe::run_host_service(service_worker_arguments());
+        }
+
+        const Options options = parse_options(argc, argv);
+        if (system_worker) {
+            if (!remoe::is_running_as_local_system()) {
+                throw std::runtime_error("the service worker is not running as LocalSystem");
+            }
+            const auto stop_event = service_stop_event_argument();
+            if (!stop_event) {
+                throw std::runtime_error("the service worker stop event is missing");
+            }
+            return run_service_worker(options, *stop_event);
+        }
+        return run(options);
     } catch (const std::exception& error) {
         std::cerr << "Error: " << error.what() << '\n';
     }

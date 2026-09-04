@@ -208,6 +208,39 @@ git push origin v0.1.0
 | `--check-encoder` | 关闭 | 无需信令，采集并硬件编码一个 AV1 测试帧后退出 |
 | `--repair` | 关闭 | 在 Host 本机重新生成配对码、转移账号并轮换设备凭证 |
 | `--legacy-invite` | 关闭 | 兼容模式：自动生成并打印匿名邀请 URL |
+| `--install-service` | 关闭 | 注册并启动自动启动的 LocalSystem Host 服务；其余参数保存到服务配置 |
+| `--uninstall-service` | 关闭 | 停止并删除 LocalSystem Host 服务 |
+
+### LocalSystem 服务与 UAC 安全桌面
+
+若需要远程查看并点击 UAC 提示，可把 Host 安装为 Windows 服务。服务本体在 Session 0 中以
+LocalSystem 常驻，并在当前活动的交互会话中启动同样为 LocalSystem 的 Host worker；不能直接在
+Session 0 中运行桌面捕获。
+
+首次安装（命令会自动请求一次管理员权限）：
+
+```powershell
+.\build-local\Release\remoe_host.exe --install-service `
+  --signal-url "wss://remoe.oza-oza.top/signal"
+```
+
+安装器会先把 `remoe_host.exe` 和 `datachannel.dll` 复制到继承管理员写权限的
+`%ProgramFiles%\remoe`；不要让 LocalSystem 服务直接运行普通用户可写的 `build-local` 文件。服务名为
+`remoe-host`，启动类型为“自动（延迟启动）”。首次 worker 启动时可能出现新的配对码：
+LocalSystem 使用 `%SystemRoot%\System32\config\systemprofile` 下独立的 DPAPI 身份，不会读取当前
+登录用户保存的 `%LOCALAPPDATA%\remoe\host-identity.bin`。重新执行安装命令会停止服务、更新路径和
+参数、复制最新构建后再启动；因此重新编译或更换信令地址后也应重新执行一次。
+
+卸载：
+
+```powershell
+.\build-local\Release\remoe_host.exe --uninstall-service
+```
+
+服务 worker 会在 DXGI 报告桌面访问丢失后持续重建 Desktop Duplication，因此 UAC 从
+`Winsta0\Default` 切换到 `Winsta0\Winlogon` 时不会让 Host 直接退出。普通启动和 `--admin` 启动
+仍不能访问安全桌面；只有 LocalSystem 服务模式具备该权限。`Ctrl+Alt+Del` 属于安全注意序列，仍
+不能通过普通 `SendInput` 合成。
 
 对 `remoe_host_x264.exe`，`--output` 是 GDI `EnumDisplayMonitors` 的顺序；`--check-encoder` 测试
 GDI 抓屏和 x264 H.264 软件编码。它接受同一套连接参数，但码率上限为 50 Mbps。GDI 路径会把鼠标
@@ -478,9 +511,10 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 - Desktop Duplication API 不会自动把硬件鼠标指针合成到桌面纹理，当前画面可能不显示鼠标指针。
 - GDI/x264 路径是 CPU 抓屏、缩放、色彩转换和编码，兼容性优先，性能与帧率取决于服务器 CPU；
   某些 RDP 会话、锁屏状态、受保护内容或显示驱动仍可能返回黑屏或静止画面。
-- 锁屏、UAC 安全桌面、显示模式切换和部分受保护内容不能正常捕获。
+- 普通用户和 `--admin` 模式不能捕获 UAC 安全桌面；LocalSystem 服务模式会在桌面切换后重建捕获。
+  锁屏、显示模式切换和部分受保护内容仍可能返回黑屏或静止画面。
 - `SendInput` 受 Windows UIPI 限制。控制高完整性应用时 host 通常也需要 `--admin`；即使提升权限，
-  `Ctrl+Alt+Del` 和 UAC 安全桌面仍不能通过普通 `SendInput` 控制。
+  UAC 安全桌面也只有 LocalSystem 服务模式可以访问；`Ctrl+Alt+Del` 仍不能通过普通 `SendInput` 合成。
 - 剪贴板同步当前仅支持最多 1 MiB 的纯文本，不传输图片、文件列表或富文本。网页读写剪贴板还受
   HTTPS、安全上下文、页面焦点和浏览器用户手势策略约束。
 - client 可按百分比请求编码缩放，但当前不支持独立指定宽高；显示模式变化后仍需要重启 host。
@@ -490,6 +524,7 @@ client 连接后的第一张图像强制为 IDR/key frame，并携带所需 code
 ## 源码结构
 
 - `src/desktop_capture.*`：DXGI adapter/output 选择与 Desktop Duplication
+- `src/windows_service.*`：LocalSystem 服务安装、活动会话 worker 与会话切换管理
 - `src/gdi_capture.*`：GDI BitBlt 显示器抓取与鼠标指针合成
 - `src/clipboard.*`：Windows UTF-16 剪贴板与 wire UTF-8 文本之间的转换和消息校验
 - `src/main.cpp`：采集/编码循环、键鼠注入与重连逻辑
