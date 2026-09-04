@@ -351,7 +351,8 @@ npm run build
 
 所有整数都是 **little-endian**，结构紧密排列（无 padding）。WSS 只交换 SDP/ICE bootstrap 帧；
 PeerConnection 建立后不再依赖信令服务器传输业务数据。可靠有序的 `remoe-control` DataChannel
-依次承载 `ClientConfig`、`StreamHeader`、`StreamReady`、`InputEvent` 和 `ClipboardHeader + text`。
+依次承载 `ClientConfig`、`StreamHeader`、`StreamReady`、`InputEvent`、`CursorState` 和
+`ClipboardHeader + text`。
 原生端视频由标准 RTP/SRTP VideoTrack 承载；Web 端声明 flags bit 2 后改用 `remoe-video` DataChannel
 分片和 WebCodecs。标准 track 由 libdatachannel 负责 RTP、Sender Report、NACK 和 PLI。
 
@@ -376,7 +377,7 @@ NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改�
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | 网络媒体上限；CBR 时由 host 在该上限内动态选择工作码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | flags | bit 0 = 文本剪贴板；bit 1 = Host 工作码率状态；bit 2 = WebCodecs 低延迟视频通道 |
+| 24 | u32 | flags | bit 0 = 文本剪贴板；bit 1 = Host 工作码率状态；bit 2 = WebCodecs 低延迟视频通道；bit 3 = Host 系统光标状态 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 32 | u32 | quality | 固定质量为 1–51（小=高质量）；CBR 为 0 |
 
@@ -419,6 +420,21 @@ Web client 通过 `ClientConfig.flags` bit 1 声明支持后，Host 在 `StreamH
 | 6 | u16 | header_size | `20` |
 | 8 | u32 | media_bitrate_bps | Host 当前编码目标；固定质量为 0 |
 | 12 | u64 | pacing_bitrate_bps | Host 当前 RTP pacing 速率 |
+
+### CursorState（24 bytes，可选）
+
+Web client 通过 `ClientConfig.flags` bit 3 声明支持后，Host 在系统光标位置或可见状态变化时发送。
+坐标以当前捕获输出归一化到 0–65535；网页在接管键鼠时据此绘制硬件光标，不再累计浏览器相对位移。
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `CURS` |
+| 4 | u16 | version | `11` |
+| 6 | u16 | header_size | `24` |
+| 8 | u32 | flags | bit 0 = 光标当前可见且位于捕获输出内；bit 1 = 光标已合成进视频 |
+| 12 | u32 | x | 横向归一化坐标，0–65535 |
+| 16 | u32 | y | 纵向归一化坐标，0–65535 |
+| 20 | u32 | sequence | Host 发送序号 |
 
 ### ClockSyncRequest / ClockSyncResponse
 

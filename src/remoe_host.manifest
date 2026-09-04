@@ -19,4 +19,9 @@
       <supportedOS Id="{4f476546-937a-4c9b-b5bd-2f9e2f4c8ec0}" />
     </application>
   </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
 </assembly>

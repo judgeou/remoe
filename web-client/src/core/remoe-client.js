@@ -9,6 +9,7 @@ import {
   MAGIC,
   decodeClipboardText,
   decodeClockSyncResponse,
+  decodeCursorState,
   decodeStreamHeader,
   decodeStreamStatus,
   encodeClientConfig,
@@ -328,6 +329,10 @@ export class RemoeBrowserClient {
     }
     if (magic === MAGIC.streamStatus) {
       this.#events.onStreamStatus?.(decodeStreamStatus(bytes));
+      return;
+    }
+    if (magic === MAGIC.cursorState) {
+      this.#events.onCursorState?.(decodeCursorState(bytes));
       return;
     }
     if (magic === MAGIC.clockSync) {

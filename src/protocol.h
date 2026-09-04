@@ -14,6 +14,7 @@ constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kStreamStatusMagic = 0x54534D52; // "RMST"
 constexpr std::uint32_t kVideoChunkMagic = 0x4B484356; // "VCHK"
 constexpr std::uint32_t kClockSyncMagic = 0x4B4C4343; // "CCLK"
+constexpr std::uint32_t kCursorStateMagic = 0x53525543; // "CURS"
 constexpr std::uint16_t kVersion = 11;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
@@ -28,6 +29,12 @@ enum ClientFlags : std::uint32_t {
     kClientClipboardText = 1u << 0,
     kClientStreamStatus = 1u << 1,
     kClientLowLatencyVideo = 1u << 2,
+    kClientCursorState = 1u << 3,
+};
+
+enum CursorFlags : std::uint32_t {
+    kCursorVisible = 1u << 0,
+    kCursorEmbeddedInVideo = 1u << 1,
 };
 
 enum FrameFlags : std::uint32_t {
@@ -116,6 +123,18 @@ struct StreamStatus {
     std::uint64_t pacing_bitrate_bps = 0;
 };
 
+// Optional host-to-client system cursor state, advertised with
+// kClientCursorState. Coordinates are normalized to the captured output.
+struct CursorState {
+    std::uint32_t magic = kCursorStateMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(CursorState);
+    std::uint32_t flags = 0;
+    std::uint32_t x = 0;
+    std::uint32_t y = 0;
+    std::uint32_t sequence = 0;
+};
+
 // One unordered, non-retransmitted low-latency video-channel message. Frames
 // are split into fixed-size chunks below common SCTP message-size limits.
 struct VideoChunkHeader {
@@ -191,6 +210,7 @@ static_assert(sizeof(ClientConfig) == 36);
 static_assert(sizeof(StreamHeader) == 44);
 static_assert(sizeof(StreamReady) == 8);
 static_assert(sizeof(StreamStatus) == 20);
+static_assert(sizeof(CursorState) == 24);
 static_assert(sizeof(VideoChunkHeader) == 36);
 static_assert(sizeof(ClockSyncRequest) == 24);
 static_assert(sizeof(ClockSyncResponse) == 40);

@@ -43,6 +43,11 @@ interface CursorPosition {
   y: number;
 }
 
+interface HostCursorState extends CursorPosition {
+  visible: boolean;
+  embeddedInVideo: boolean;
+}
+
 type ViewportGesture =
   | { type: 'pan'; deltaX: number; deltaY: number }
   | { type: 'pinch'; scale: number; clientX: number; clientY: number;
@@ -144,6 +149,9 @@ let streamSize: { width: number; height: number } | null = null;
 let fittedVideoSize: { width: number; height: number } | null = null;
 let viewportPan = { x: 0, y: 0 };
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
+let hostCursorState: HostCursorState = {
+  x: 32768, y: 32768, visible: false, embeddedInVideo: false,
+};
 let accountRefreshTimer: number | null = null;
 
 function video(): HTMLCanvasElement {
@@ -249,6 +257,20 @@ function positionRemoteCursor(position: CursorPosition = cursorPosition) {
   cursorStyle.top = `${point.top}px`;
 }
 
+function setRemoteCursorVisible(visible: boolean) {
+  if (visible) delete cursorStyle.display;
+  else cursorStyle.display = 'none';
+}
+
+function handleHostCursor(state: HostCursorState) {
+  hostCursorState = state;
+  const target = viewer.value?.getVideo();
+  if (target && document.pointerLockElement === target && inputController?.touchMode === null) {
+    positionRemoteCursor(state);
+    setRemoteCursorVisible(state.visible && !state.embeddedInVideo);
+  }
+}
+
 function clampViewportPan() {
   if (!fittedVideoSize || !viewer.value || viewportZoom.value <= 1) {
     viewportPan = { x: 0, y: 0 };
@@ -336,6 +358,8 @@ function leaveRemoteMode() {
   fittedVideoSize = null;
   viewportZoom.value = 1;
   viewportPan = { x: 0, y: 0 };
+  hostCursorState = { x: 32768, y: 32768, visible: false, embeddedInVideo: false };
+  delete cursorStyle.display;
   delete videoStyle.width;
   delete videoStyle.height;
   delete videoStyle.transform;
@@ -370,6 +394,14 @@ function setInputActive(active: boolean) {
   document.body.classList.toggle('control-active', active);
   const touchActive = active && inputController?.touchMode !== null;
   document.body.classList.toggle('touch-control-active', touchActive);
+  const target = viewer.value?.getVideo();
+  const pointerLocked = active && target && document.pointerLockElement === target;
+  if (pointerLocked) {
+    positionRemoteCursor(hostCursorState);
+    setRemoteCursorVisible(hostCursorState.visible && !hostCursorState.embeddedInVideo);
+  } else {
+    setRemoteCursorVisible(touchActive);
+  }
   // setStatus(active
   //   ? (touchActive ? '正在触控远程桌面' : '正在控制远程桌面 · 按 Esc 释放键鼠')
   //   : '画面已连接 · 可直接点击，或从工具栏接管键鼠');
@@ -563,7 +595,10 @@ async function connect(inviteOverride?: string) {
             (active: boolean) => {
               setInputActive(active);
             },
-            (position: CursorPosition) => positionRemoteCursor(position),
+            (position: CursorPosition) => {
+              positionRemoteCursor(position);
+              setRemoteCursorVisible(true);
+            },
             (gesture: ViewportGesture) => handleViewportGesture(gesture),
           );
           target.focus({ preventScroll: true });
@@ -575,6 +610,7 @@ async function connect(inviteOverride?: string) {
         'endToEndMs' | 'captureToReceiveMs' | 'receiveToPresentMs'>) =>
         Object.assign(performanceStats, timing),
       onClipboard: (text: string) => { void clipboardSynchronizer?.receiveRemote(text); },
+      onCursorState: (cursor: HostCursorState) => handleHostCursor(cursor),
       onError: (error: Error) => {
         leaveRemoteMode();
         setStatus(error.message, true);

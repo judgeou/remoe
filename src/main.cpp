@@ -66,6 +66,44 @@ bool send_stream_status(remoe::WebRtcTransport& transport,
         reinterpret_cast<const std::uint8_t*>(&status), sizeof(status)));
 }
 
+std::optional<remoe::protocol::CursorState> query_cursor_state(
+    std::int32_t output_left, std::int32_t output_top,
+    std::uint32_t output_width, std::uint32_t output_height) {
+    CURSORINFO cursor_info{sizeof(cursor_info)};
+    if (!GetCursorInfo(&cursor_info) || output_width < 2 || output_height < 2) {
+        return std::nullopt;
+    }
+
+    const std::int64_t relative_x = static_cast<std::int64_t>(cursor_info.ptScreenPos.x) -
+        output_left;
+    const std::int64_t relative_y = static_cast<std::int64_t>(cursor_info.ptScreenPos.y) -
+        output_top;
+    const bool inside_output = relative_x >= 0 && relative_y >= 0 &&
+        relative_x < output_width && relative_y < output_height;
+
+    remoe::protocol::CursorState state;
+#if defined(REMOE_X264_HOST)
+    // GDI capture already composites the cursor into every captured frame.
+    state.flags |= remoe::protocol::kCursorEmbeddedInVideo;
+#endif
+    if (inside_output && (cursor_info.flags & CURSOR_SHOWING) != 0) {
+        state.flags |= remoe::protocol::kCursorVisible;
+    }
+    const auto clamped_x = (std::clamp)(relative_x, std::int64_t{0},
+                                         static_cast<std::int64_t>(output_width - 1));
+    const auto clamped_y = (std::clamp)(relative_y, std::int64_t{0},
+                                         static_cast<std::int64_t>(output_height - 1));
+    state.x = static_cast<std::uint32_t>(clamped_x * 65535 / (output_width - 1));
+    state.y = static_cast<std::uint32_t>(clamped_y * 65535 / (output_height - 1));
+    return state;
+}
+
+bool send_cursor_state(remoe::WebRtcTransport& transport,
+                       const remoe::protocol::CursorState& state) {
+    return transport.send_binary(std::span<const std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(&state), sizeof(state)));
+}
+
 BOOL WINAPI console_handler(DWORD event) {
     if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
         g_running = false;
@@ -581,7 +619,8 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         request.header_size != sizeof(request) || request.fps_den != 1 ||
         (request.flags & ~(remoe::protocol::kClientClipboardText |
                            remoe::protocol::kClientStreamStatus |
-                           remoe::protocol::kClientLowLatencyVideo)) != 0 ||
+                           remoe::protocol::kClientLowLatencyVideo |
+                           remoe::protocol::kClientCursorState)) != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -1111,6 +1150,8 @@ int run(const Options& options) {
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
         const bool stream_status_enabled =
             (request.flags & remoe::protocol::kClientStreamStatus) != 0;
+        const bool cursor_state_enabled =
+            (request.flags & remoe::protocol::kClientCursorState) != 0;
         {
             std::lock_guard lock(adaptive_controller_mutex);
             adaptive_controller.reset();
@@ -1208,6 +1249,8 @@ int run(const Options& options) {
 
         bool first_input = true;
         bool first_clipboard_poll = true;
+        std::optional<remoe::protocol::CursorState> last_cursor_state;
+        std::uint32_t outbound_cursor_sequence = 0;
         std::uint64_t frame_number = 0;
         const std::size_t low_latency_buffer_limit = (std::clamp)(
             static_cast<std::size_t>(settings.bitrate_bps / 8u / 40u),
@@ -1283,6 +1326,24 @@ int run(const Options& options) {
                                          outbound_clipboard_sequence++)) {
                     session_running = false;
                     break;
+                }
+            }
+
+            if (cursor_state_enabled) {
+                auto cursor_state = query_cursor_state(
+                    capture.left(), capture.top(), capture.width(), capture.height());
+                const bool changed = cursor_state &&
+                    (!last_cursor_state ||
+                     cursor_state->flags != last_cursor_state->flags ||
+                     cursor_state->x != last_cursor_state->x ||
+                     cursor_state->y != last_cursor_state->y);
+                if (changed) {
+                    cursor_state->sequence = outbound_cursor_sequence++;
+                    if (!send_cursor_state(*control_channel, *cursor_state)) {
+                        session_running = false;
+                        break;
+                    }
+                    last_cursor_state = *cursor_state;
                 }
             }
 

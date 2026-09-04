@@ -10,6 +10,7 @@ import {
   decodeStreamStatus,
   decodeClockSyncResponse,
   decodeClipboardText,
+  decodeCursorState,
   encodeClientConfig,
   encodeClockSyncRequest,
   encodeInputEvent,
@@ -81,7 +82,7 @@ test('encodes protocol v11 CBR client settings as little-endian packed bytes', (
   assert.equal(view.getUint32(8, true), 90);
   assert.equal(view.getUint32(16, true), 25_000_000);
   assert.equal(view.getUint32(20, true), 75);
-  assert.equal(view.getUint32(24, true), 7);
+  assert.equal(view.getUint32(24, true), 15);
   assert.equal(view.getUint32(28, true), 0);
   assert.equal(view.getUint32(32, true), 0);
 });
@@ -137,6 +138,28 @@ test('decodes Host working and pacing bitrates', () => {
     headerSize: 20,
     mediaBitrateBps: 17_000_000,
     pacingBitrateBps: 34_000_000,
+  });
+});
+
+test('decodes Host system cursor feedback', () => {
+  const bytes = new Uint8Array(24);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC.cursorState, true);
+  view.setUint16(4, 11, true);
+  view.setUint16(6, 24, true);
+  view.setUint32(8, 3, true);
+  view.setUint32(12, 49151, true);
+  view.setUint32(16, 16384, true);
+  view.setUint32(20, 9, true);
+  assert.deepEqual(decodeCursorState(bytes), {
+    magic: MAGIC.cursorState,
+    version: 11,
+    headerSize: 24,
+    visible: true,
+    embeddedInVideo: true,
+    x: 49151,
+    y: 16384,
+    sequence: 9,
   });
 });
 
@@ -552,6 +575,7 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
     assert.deepEqual(pointerLockOptions, [{ unadjustedMovement: true }]);
     assert.deepEqual(keyboardLocks, [['Escape']]);
     assert.equal(fakeDocument.fullscreenElement, fullscreenTarget);
+    assert.equal(inputs.length, 0);
 
     const movement = new Event('mousemove');
     Object.defineProperties(movement, {

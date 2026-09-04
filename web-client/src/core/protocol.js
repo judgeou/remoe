@@ -9,6 +9,7 @@ export const MAGIC = Object.freeze({
   clockSync: 0x4b4c4343,
   input: 0x54504e49,
   clipboard: 0x50494c43,
+  cursorState: 0x53525543,
   signal: 0x534d5257,
   av1: 0x31305641,
   h264: 0x34363248,
@@ -129,8 +130,8 @@ export function encodeClientConfig({
   view.setUint32(12, 1, true);
   view.setUint32(16, bitrate, true);
   view.setUint32(20, scalePercent, true);
-  // Supports clipboard, Host telemetry, and the low-latency WebCodecs channel.
-  view.setUint32(24, 7, true);
+  // Supports clipboard, Host telemetry, low-latency video, and cursor feedback.
+  view.setUint32(24, 15, true);
   view.setUint32(28, fixedQuality ? RATE_CONTROL.fixedQuality : RATE_CONTROL.cbr, true);
   view.setUint32(32, fixedQuality ? quality : 0, true);
   return bytes;
@@ -187,6 +188,29 @@ export function decodeStreamStatus(value) {
       result.headerSize !== 20 || result.mediaBitrateBps > 1_000_000_000 ||
       pacingBitrate > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error('Host 返回了无效或不受支持的 StreamStatus');
+  }
+  return result;
+}
+
+export function decodeCursorState(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  if (bytes.byteLength !== 24) throw new Error('Host 返回的 CursorState 长度错误');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const result = {
+    magic: view.getUint32(0, true),
+    version: view.getUint16(4, true),
+    headerSize: view.getUint16(6, true),
+    visible: (view.getUint32(8, true) & 1) !== 0,
+    embeddedInVideo: (view.getUint32(8, true) & 2) !== 0,
+    x: view.getUint32(12, true),
+    y: view.getUint32(16, true),
+    sequence: view.getUint32(20, true),
+  };
+  const flags = view.getUint32(8, true);
+  if (result.magic !== MAGIC.cursorState || result.version !== PROTOCOL_VERSION ||
+      result.headerSize !== 24 || (flags & ~3) !== 0 ||
+      result.x > 65535 || result.y > 65535) {
+    throw new Error('Host 返回了无效的 CursorState');
   }
   return result;
 }
