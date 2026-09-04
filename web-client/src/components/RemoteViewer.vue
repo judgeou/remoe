@@ -22,7 +22,7 @@ interface PerformanceStats {
   powerEfficientDecoder: boolean | null;
 }
 
-defineProps<{
+const props = defineProps<{
   frameVisible: boolean;
   controlActive: boolean;
   status: string;
@@ -30,13 +30,11 @@ defineProps<{
   videoStyle: CSSProperties;
   cursorStyle: CSSProperties;
   performanceStats: PerformanceStats;
-  touchPreferred: boolean;
   touchMode: 'trackpad' | 'direct';
   activeModifiers: string[];
   fullscreenActive: boolean;
   orientationLocked: boolean;
   wakeLockEnabled: boolean;
-  remoteClipboardPending: boolean;
   viewportZoom: number;
 }>();
 
@@ -48,8 +46,6 @@ const emit = defineEmits<{
   virtualModifier: [code: string];
   virtualMouse: [button: 'left' | 'right'];
   textInput: [text: string];
-  sendClipboard: [];
-  receiveClipboard: [];
   fullscreen: [];
   orientation: [];
   wakeLock: [];
@@ -126,6 +122,12 @@ function clearMobileInput(event: Event) {
   (event.target as HTMLInputElement).value = '';
 }
 
+function handleViewerPointerDown(event: PointerEvent) {
+  if (!props.controlActive && (event.pointerType === 'touch' || event.pointerType === 'pen')) {
+    emit('touchMode', props.touchMode);
+  }
+}
+
 defineExpose({
   getVideo: () => {
     if (!video.value) throw new Error('视频元素尚未挂载');
@@ -145,7 +147,7 @@ defineExpose({
       ref="video"
       class="viewer-video"
       :style="videoStyle"
-      @click="!controlActive && emit('capture')"
+      @pointerdown="handleViewerPointerDown"
     ></canvas>
     <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
     <div
@@ -161,16 +163,11 @@ defineExpose({
       >控制</button>
       <div v-show="!mobileToolbarHidden" class="remote-toolbar-main">
         <span id="remote-status" :class="{ error: statusError }">{{ status }}</span>
-        <button type="button" title="把浏览器剪贴板发送到远程电脑" @click="emit('sendClipboard')">
-          发送剪贴板
-        </button>
         <button
           type="button"
-          title="把远程电脑剪贴板写入浏览器"
-          :class="{ active: remoteClipboardPending }"
-          :disabled="!remoteClipboardPending"
-          @click="emit('receiveClipboard')"
-        >接收剪贴板</button>
+          title="锁定鼠标并把键盘输入发送到远程电脑"
+          @click="emit('capture')"
+        >接管键鼠</button>
         <label class="performance-toggle">
           <input v-model="showPerformance" type="checkbox">
           <span>性能</span>
@@ -239,13 +236,6 @@ defineExpose({
             <button type="button" :disabled="viewportZoom <= 1" @click="emit('resetViewport')">
               画面 {{ Math.round(viewportZoom * 100) }}%
             </button>
-            <!-- <button type="button" @click="emit('sendClipboard')">发送剪贴板</button>
-            <button
-              type="button"
-              :class="{ active: remoteClipboardPending }"
-              :disabled="!remoteClipboardPending"
-              @click="emit('receiveClipboard')"
-            >接收剪贴板</button> -->
           </div>
         </div>
         <div v-show="showMobileKeyboard" class="mobile-keyboard">

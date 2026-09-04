@@ -102,6 +102,7 @@ export class RemoteInputController {
   #touchDrag = false;
   #directPressed = false;
   #lastTap = null;
+  #suppressMouseUntil = 0;
 
   /**
    * @param {HTMLElement} target
@@ -124,6 +125,9 @@ export class RemoteInputController {
     this.#listen(document, 'mousedown', (event) => this.#mouseButton(event, false));
     this.#listen(document, 'mouseup', (event) => this.#mouseButton(event, true));
     this.#listen(document, 'wheel', (event) => this.#wheel(event), { passive: false });
+    this.#listen(this.#target, 'mousemove', (event) => this.#directMouseMove(event));
+    this.#listen(this.#target, 'mousedown', (event) => this.#directMouseButton(event));
+    this.#listen(this.#target, 'wheel', (event) => this.#directWheel(event), { passive: false });
     this.#listen(document, 'keydown', (event) => this.#keyboard(event, false));
     this.#listen(document, 'keyup', (event) => this.#keyboard(event, true));
     this.#listen(this.#target, 'pointerdown', (event) => this.#touchPointerDown(event));
@@ -301,6 +305,23 @@ export class RemoteInputController {
     this.#emitPointer();
   }
 
+  #directMouseMove(event) {
+    if (document.pointerLockElement || this.#touchMode !== null ||
+        performance.now() < this.#suppressMouseUntil) return;
+    this.#moveAbsolute(event.clientX, event.clientY);
+  }
+
+  #directMouseButton(event) {
+    if (document.pointerLockElement || this.#touchMode !== null ||
+        performance.now() < this.#suppressMouseUntil) return;
+    const type = mouseTypes.get(event.button);
+    if (!type) return;
+    event.preventDefault();
+    this.#moveAbsolute(event.clientX, event.clientY);
+    this.#pressedButtons.add(type);
+    this.#send({ type, flags: 0 });
+  }
+
   #emitPointer() {
     const x = Math.round(this.#x);
     const y = Math.round(this.#y);
@@ -329,7 +350,9 @@ export class RemoteInputController {
   }
 
   #touchPointerDown(event) {
-    if (!this.#touchMode || (event.pointerType !== 'touch' && event.pointerType !== 'pen')) return;
+    if (event.pointerType !== 'touch' && event.pointerType !== 'pen') return;
+    this.#suppressMouseUntil = performance.now() + 800;
+    if (!this.#touchMode) return;
     event.preventDefault();
     this.#target.setPointerCapture?.(event.pointerId);
     const point = { x: event.clientX, y: event.clientY };
@@ -498,9 +521,10 @@ export class RemoteInputController {
   }
 
   #mouseButton(event, release) {
-    if (document.pointerLockElement !== this.#target) return;
     const type = mouseTypes.get(event.button);
     if (!type) return;
+    const pointerLocked = document.pointerLockElement === this.#target;
+    if (!pointerLocked && (!release || !this.#pressedButtons.has(type))) return;
     event.preventDefault();
     if (release) this.#pressedButtons.delete(type);
     else this.#pressedButtons.add(type);
@@ -510,6 +534,17 @@ export class RemoteInputController {
   #wheel(event) {
     if (document.pointerLockElement !== this.#target) return;
     event.preventDefault();
+    const vertical = wheelDelta(event.deltaY);
+    const horizontal = wheelDelta(event.deltaX);
+    if (vertical) this.#send({ type: INPUT_TYPE.mouseWheel, value1: vertical });
+    if (horizontal) this.#send({ type: INPUT_TYPE.mouseHorizontalWheel, value1: horizontal });
+  }
+
+  #directWheel(event) {
+    if (document.pointerLockElement || this.#touchMode !== null ||
+        performance.now() < this.#suppressMouseUntil) return;
+    event.preventDefault();
+    this.#moveAbsolute(event.clientX, event.clientY);
     const vertical = wheelDelta(event.deltaY);
     const horizontal = wheelDelta(event.deltaX);
     if (vertical) this.#send({ type: INPUT_TYPE.mouseWheel, value1: vertical });

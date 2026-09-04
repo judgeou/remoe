@@ -22,7 +22,9 @@ import {
   rotateRecoveryCode,
   type AccountState,
 } from './api';
+import { ClipboardSynchronizer } from './core/clipboard-sync.js';
 import { RemoteInputController } from './core/input.js';
+import { LatestFrameRenderer } from './core/latest-frame-renderer.js';
 import { cursorViewportPosition, fitVideoSize } from './core/layout.js';
 import { RemoeBrowserClient, parseInvite } from './core/remoe-client.js';
 
@@ -128,22 +130,21 @@ const performanceStats = reactive<PerformanceStats>({
   decoderImplementation: '',
   powerEfficientDecoder: null,
 });
-const touchPreferred = ref(false);
 const touchMode = ref<'trackpad' | 'direct'>('trackpad');
 const activeModifiers = ref<string[]>([]);
 const fullscreenActive = ref(false);
 const orientationLocked = ref(false);
 const wakeLockEnabled = ref(false);
-const remoteClipboardPending = ref(false);
 const client = shallowRef<RemoeBrowserClient | null>(null);
 let inputController: RemoteInputController | null = null;
+let clipboardSynchronizer: ClipboardSynchronizer | null = null;
+let frameRenderer: LatestFrameRenderer | null = null;
 let wakeLockSentinel: WakeLockSentinel | null = null;
 let streamSize: { width: number; height: number } | null = null;
 let fittedVideoSize: { width: number; height: number } | null = null;
 let viewportPan = { x: 0, y: 0 };
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let accountRefreshTimer: number | null = null;
-let remoteClipboardText = '';
 
 function video(): HTMLCanvasElement {
   if (!viewer.value) throw new Error('远程画面尚未挂载');
@@ -200,6 +201,7 @@ function launchRemoteWindow(popup: Window, inviteUrl: string) {
   const target = new URL(location.href);
   target.search = '';
   target.searchParams.set('remote', '1');
+  target.searchParams.set('_t', new Date().getTime().toString());
   target.hash = '';
   popup.name = `${remoteWindowPayloadPrefix}${JSON.stringify(remoteWindowPayload(inviteUrl))}`;
   popup.location.replace(target.href);
@@ -321,6 +323,10 @@ function fitRemoteVideo() {
 }
 
 function leaveRemoteMode() {
+  clipboardSynchronizer?.stop();
+  clipboardSynchronizer = null;
+  frameRenderer?.dispose();
+  frameRenderer = null;
   inputController?.dispose();
   inputController = null;
   controlActive.value = false;
@@ -354,8 +360,6 @@ function leaveRemoteMode() {
     decoderImplementation: '',
     powerEfficientDecoder: null,
   });
-  remoteClipboardPending.value = false;
-  remoteClipboardText = '';
   document.body.classList.remove('touch-control-active');
   releaseMobileDisplayFeatures();
   setRemoteActive(false);
@@ -368,9 +372,7 @@ function setInputActive(active: boolean) {
   document.body.classList.toggle('touch-control-active', touchActive);
   // setStatus(active
   //   ? (touchActive ? '正在触控远程桌面' : '正在控制远程桌面 · 按 Esc 释放键鼠')
-  //   : (touchPreferred.value
-  //     ? '画面已连接 · 点击画面开始触控'
-  //     : '画面已连接 · 点击画面接管键鼠'));
+  //   : '画面已连接 · 可直接点击，或从工具栏接管键鼠');
 }
 
 function selectTouchMode(mode: 'trackpad' | 'direct') {
@@ -399,40 +401,6 @@ function sendTextInput(text: string) {
   const unsupported = inputController?.sendText(text) ?? [];
   if (unsupported.length > 0) {
     setStatus('移动软键盘目前仅支持英文、数字和常用符号', true);
-  }
-}
-
-async function sendLocalClipboard() {
-  try {
-    if (!navigator.clipboard?.readText) throw new Error('当前浏览器不允许读取剪贴板');
-    const text = await navigator.clipboard.readText();
-    if (!client.value?.sendClipboardText(text)) throw new Error('控制连接尚未就绪');
-    setStatus('本地剪贴板已发送到远程电脑');
-  } catch (error) {
-    setStatus(`无法发送剪贴板：${error instanceof Error ? error.message : String(error)}`, true);
-  }
-}
-
-async function acceptRemoteClipboard() {
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不允许写入剪贴板');
-    await navigator.clipboard.writeText(remoteClipboardText);
-    remoteClipboardPending.value = false;
-    setStatus('远程剪贴板已同步到本机');
-  } catch (error) {
-    setStatus(`无法接收剪贴板：${error instanceof Error ? error.message : String(error)}`, true);
-  }
-}
-
-async function handleRemoteClipboard(text: string) {
-  remoteClipboardText = text;
-  remoteClipboardPending.value = true;
-  if (!document.hasFocus() || !navigator.clipboard?.writeText) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    remoteClipboardPending.value = false;
-  } catch {
-    // Browsers commonly require a user gesture. Keep the toolbar action available.
   }
 }
 
@@ -552,6 +520,17 @@ async function connect(inviteOverride?: string) {
         const target = video();
         target.width = stream.width;
         target.height = stream.height;
+        const context = target.getContext('2d', { alpha: false });
+        if (!context) throw new Error('浏览器无法创建 Canvas 2D context');
+        frameRenderer?.dispose();
+        frameRenderer = new LatestFrameRenderer((frame: VideoFrame) => {
+          context.drawImage(frame, 0, 0, target.width, target.height);
+        });
+        clipboardSynchronizer?.stop();
+        clipboardSynchronizer = new ClipboardSynchronizer(
+          (text: string) => nextClient.sendClipboardText(text),
+        );
+        clipboardSynchronizer.start();
         performanceStats.requestedBitrateMbps = stream.bitrateBps / 1_000_000;
         const rate = stream.rateControl === 1
           ? `固定质量 ${stream.quality}`
@@ -565,11 +544,10 @@ async function connect(inviteOverride?: string) {
         performanceStats.hostBitrateMbps = streamStatus.mediaBitrateBps / 1_000_000;
         performanceStats.pacingBitrateMbps = streamStatus.pacingBitrateBps / 1_000_000;
       },
-      onFrame: (frame: VideoFrame) => {
-        const target = video();
-        const context = target.getContext('2d', { alpha: false });
-        if (!context) throw new Error('浏览器无法创建 Canvas 2D context');
-        context.drawImage(frame, 0, 0, target.width, target.height);
+      onFrame: (frame: VideoFrame, _stream: StreamDescription,
+        onPresented?: (presentedAt: number) => void) => {
+        if (frameRenderer) frameRenderer.submit(frame, onPresented);
+        else frame.close();
       },
       onFirstFrame: () => {
         const target = video();
@@ -589,15 +567,13 @@ async function connect(inviteOverride?: string) {
             (gesture: ViewportGesture) => handleViewportGesture(gesture),
           );
         });
-        // setStatus(touchPreferred.value
-        //   ? '画面已连接 · 点击画面开始触控'
-        //   : '画面已连接 · 点击画面接管键鼠');
+        // setStatus('画面已连接 · 可直接点击，或从工具栏接管键鼠');
       },
       onStats: (stats: PerformanceStats) => Object.assign(performanceStats, stats),
       onFrameTiming: (timing: Pick<PerformanceStats,
         'endToEndMs' | 'captureToReceiveMs' | 'receiveToPresentMs'>) =>
         Object.assign(performanceStats, timing),
-      onClipboard: (text: string) => { void handleRemoteClipboard(text); },
+      onClipboard: (text: string) => { void clipboardSynchronizer?.receiveRemote(text); },
       onError: (error: Error) => {
         leaveRemoteMode();
         setStatus(error.message, true);
@@ -607,8 +583,8 @@ async function connect(inviteOverride?: string) {
     client.value = nextClient;
     await nextClient.connect();
   } catch (error) {
+    stopSession();
     setStatus(error instanceof Error ? error.message : String(error), true);
-    running.value = false;
   }
 }
 
@@ -755,8 +731,7 @@ async function copyRecoveryCode() {
 
 async function captureInput() {
   try {
-    if (touchPreferred.value) selectTouchMode(touchMode.value);
-    else await inputController?.capture(viewer.value?.getElement());
+    await inputController?.capture(viewer.value?.getElement());
   } catch (error) {
     setStatus(`无法锁定鼠标：${error instanceof Error ? error.message : String(error)}`, true);
   }
@@ -773,7 +748,6 @@ onMounted(() => {
   document.addEventListener('fullscreenchange', handleFullscreenChange);
   document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener('blur', handleWindowBlur);
-  touchPreferred.value = navigator.maxTouchPoints > 0 || matchMedia('(any-pointer: coarse)').matches;
   if (remoteWindowMode) {
     document.body.classList.add('remote-window');
     accountLoading.value = false;
@@ -891,13 +865,11 @@ onBeforeUnmount(() => {
       :video-style="videoStyle"
       :cursor-style="cursorStyle"
       :performance-stats="performanceStats"
-      :touch-preferred="touchPreferred"
       :touch-mode="touchMode"
       :active-modifiers="activeModifiers"
       :fullscreen-active="fullscreenActive"
       :orientation-locked="orientationLocked"
       :wake-lock-enabled="wakeLockEnabled"
-      :remote-clipboard-pending="remoteClipboardPending"
       :viewport-zoom="viewportZoom"
       @capture="captureInput"
       @stop="stopRemoteWindowSession"
@@ -906,8 +878,6 @@ onBeforeUnmount(() => {
       @virtual-modifier="toggleVirtualModifier"
       @virtual-mouse="sendVirtualMouse"
       @text-input="sendTextInput"
-      @send-clipboard="sendLocalClipboard"
-      @receive-clipboard="acceptRemoteClipboard"
       @fullscreen="toggleFullscreen"
       @orientation="toggleOrientation"
       @wake-lock="toggleWakeLock"

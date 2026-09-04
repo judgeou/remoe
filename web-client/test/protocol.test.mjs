@@ -18,8 +18,59 @@ import {
   h264CodecString,
 } from '../src/core/protocol.js';
 import { parseInvite } from '../src/core/remoe-client.js';
+import { ClipboardSynchronizer } from '../src/core/clipboard-sync.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
+import { LatestFrameRenderer } from '../src/core/latest-frame-renderer.js';
 import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
+
+function testVideoFrame(name) {
+  return {
+    name,
+    closed: 0,
+    close() { this.closed += 1; },
+  };
+}
+
+test('latest-frame renderer draws only the newest frame in one refresh cycle', () => {
+  const scheduled = [];
+  const rendered = [];
+  const presented = [];
+  const renderer = new LatestFrameRenderer(
+    (frame) => rendered.push(frame.name),
+    { schedule: (callback) => { scheduled.push(callback); return scheduled.length; } },
+  );
+  const first = testVideoFrame('first');
+  const second = testVideoFrame('second');
+
+  renderer.submit(first, () => presented.push('first'));
+  renderer.submit(second, () => presented.push('second'));
+
+  assert.equal(scheduled.length, 1);
+  assert.equal(first.closed, 1);
+  assert.equal(second.closed, 0);
+  scheduled[0]();
+  assert.deepEqual(rendered, ['second']);
+  assert.deepEqual(presented, ['second']);
+  assert.equal(second.closed, 1);
+});
+
+test('latest-frame renderer cancels and releases a pending frame on dispose', () => {
+  const canceled = [];
+  const renderer = new LatestFrameRenderer(
+    () => assert.fail('disposed renderer must not draw'),
+    {
+      schedule: () => 42,
+      cancel: (requestId) => canceled.push(requestId),
+    },
+  );
+  const frame = testVideoFrame('pending');
+
+  renderer.submit(frame);
+  renderer.dispose();
+
+  assert.deepEqual(canceled, [42]);
+  assert.equal(frame.closed, 1);
+});
 
 test('encodes protocol v11 CBR client settings as little-endian packed bytes', () => {
   const bytes = encodeClientConfig({ fps: 90, bitrateMbps: 25, scalePercent: 75 });
@@ -317,6 +368,101 @@ test('maps touch gestures and virtual text to the existing input protocol', () =
     globalThis.document = originalDocument;
     globalThis.window = originalWindow;
   }
+});
+
+test('maps unlocked desktop mouse input to absolute remote coordinates', () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const fakeDocument = new EventTarget();
+  fakeDocument.pointerLockElement = null;
+  fakeDocument.hidden = false;
+  fakeDocument.exitPointerLock = () => {};
+  const fakeWindow = new EventTarget();
+  const target = new EventTarget();
+  target.getBoundingClientRect = () => ({ left: 10, top: 20, width: 200, height: 100 });
+  target.requestPointerLock = async () => {};
+  globalThis.document = fakeDocument;
+  globalThis.window = fakeWindow;
+
+  const inputs = [];
+  const controller = new RemoteInputController(target, (event) => {
+    inputs.push(event);
+    return true;
+  });
+  const mouse = (eventTarget, type, properties) => {
+    const event = new Event(type, { cancelable: true });
+    for (const [name, value] of Object.entries(properties)) {
+      Object.defineProperty(event, name, { value });
+    }
+    eventTarget.dispatchEvent(event);
+    return event;
+  };
+
+  try {
+    mouse(target, 'mousemove', { clientX: 110, clientY: 70 });
+    assert.deepEqual(inputs.at(-1), { type: 1, value1: 32768, value2: 32768 });
+
+    const down = mouse(target, 'mousedown', { button: 2, clientX: 210, clientY: 120 });
+    assert.equal(down.defaultPrevented, true);
+    assert.deepEqual(inputs.slice(-2), [
+      { type: 1, value1: 65535, value2: 65535 },
+      { type: 3, flags: 0 },
+    ]);
+
+    mouse(fakeDocument, 'mouseup', { button: 2 });
+    assert.deepEqual(inputs.at(-1), { type: 3, flags: 1 });
+
+    const wheel = mouse(target, 'wheel', {
+      clientX: 110, clientY: 70, deltaX: 0, deltaY: 40,
+    });
+    assert.equal(wheel.defaultPrevented, true);
+    assert.deepEqual(inputs.slice(-2), [
+      { type: 1, value1: 32768, value2: 32768 },
+      { type: 7, value1: -40 },
+    ]);
+    assert.equal(controller.active, false);
+  } finally {
+    controller.dispose();
+    globalThis.document = originalDocument;
+    globalThis.window = originalWindow;
+  }
+});
+
+test('automatically synchronizes clipboard text in both directions', async () => {
+  class FakeClipboard extends EventTarget {
+    onclipboardchange = null;
+    text = 'local';
+    writes = [];
+    async readText() { return this.text; }
+    async writeText(text) {
+      this.text = text;
+      this.writes.push(text);
+    }
+  }
+  const clipboard = new FakeClipboard();
+  const fakeDocument = new EventTarget();
+  fakeDocument.hasFocus = () => true;
+  const fakeWindow = new EventTarget();
+  const sent = [];
+  const synchronizer = new ClipboardSynchronizer(
+    (text) => { sent.push(text); return true; },
+    { clipboard, document: fakeDocument, window: fakeWindow },
+  );
+
+  synchronizer.start();
+  await synchronizer.syncLocal();
+  await Promise.resolve();
+  assert.deepEqual(sent, ['local']);
+
+  assert.equal(await synchronizer.receiveRemote('remote'), true);
+  assert.deepEqual(clipboard.writes, ['remote']);
+
+  clipboard.text = 'next local';
+  clipboard.dispatchEvent(new Event('clipboardchange'));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(sent, ['local', 'next local']);
+  synchronizer.stop();
 });
 
 test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async () => {
