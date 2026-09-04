@@ -146,6 +146,7 @@ defineExpose({
       id="video"
       ref="video"
       class="viewer-video"
+      tabindex="0"
       :style="videoStyle"
       @pointerdown="handleViewerPointerDown"
     ></canvas>

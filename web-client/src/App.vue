@@ -566,6 +566,7 @@ async function connect(inviteOverride?: string) {
             (position: CursorPosition) => positionRemoteCursor(position),
             (gesture: ViewportGesture) => handleViewportGesture(gesture),
           );
+          target.focus({ preventScroll: true });
         });
         // setStatus('画面已连接 · 可直接点击，或从工具栏接管键鼠');
       },

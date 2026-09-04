@@ -91,6 +91,7 @@ export class RemoteInputController {
   #onPointerMoved;
   #onViewportGesture;
   #active = false;
+  #directKeyboardActive = false;
   #pressedKeys = new Map();
   #pressedButtons = new Set();
   #x = 32768;
@@ -128,6 +129,14 @@ export class RemoteInputController {
     this.#listen(this.#target, 'mousemove', (event) => this.#directMouseMove(event));
     this.#listen(this.#target, 'mousedown', (event) => this.#directMouseButton(event));
     this.#listen(this.#target, 'wheel', (event) => this.#directWheel(event), { passive: false });
+    this.#listen(this.#target, 'focus', () => {
+      if (!document.pointerLockElement && this.#touchMode === null) this.#directKeyboardActive = true;
+    });
+    this.#listen(this.#target, 'blur', () => {
+      if (!this.#directKeyboardActive) return;
+      this.#directKeyboardActive = false;
+      this.releaseAll();
+    });
     this.#listen(document, 'keydown', (event) => this.#keyboard(event, false));
     this.#listen(document, 'keyup', (event) => this.#keyboard(event, true));
     this.#listen(this.#target, 'pointerdown', (event) => this.#touchPointerDown(event));
@@ -146,6 +155,7 @@ export class RemoteInputController {
 
   async capture(fullscreenTarget = this.#target) {
     this.#touchMode = null;
+    this.#directKeyboardActive = false;
     const keyboard = navigator.keyboard;
     if (!keyboard?.lock || !keyboard?.unlock) {
       throw new Error('当前浏览器不支持 Keyboard Lock，无法保留远端 Esc 键');
@@ -175,6 +185,7 @@ export class RemoteInputController {
       throw new TypeError('触控模式必须是 trackpad 或 direct');
     }
     this.releaseAll();
+    this.#directKeyboardActive = false;
     this.#touchMode = mode;
     this.#touches.clear();
     this.#touchGesture = null;
@@ -253,6 +264,7 @@ export class RemoteInputController {
     }
     this.#listeners = [];
     this.#touchMode = null;
+    this.#directKeyboardActive = false;
     this.#touches.clear();
     this.#setActive(false);
   }
@@ -317,6 +329,7 @@ export class RemoteInputController {
     const type = mouseTypes.get(event.button);
     if (!type) return;
     event.preventDefault();
+    this.#target.focus?.({ preventScroll: true });
     this.#moveAbsolute(event.clientX, event.clientY);
     this.#pressedButtons.add(type);
     this.#send({ type, flags: 0 });
@@ -552,7 +565,7 @@ export class RemoteInputController {
   }
 
   #keyboard(event, release) {
-    if (!this.#active || event.repeat) return;
+    if ((!this.#active && !this.#directKeyboardActive) || event.repeat) return;
     if (!release && document.pointerLockElement === this.#target &&
         event.ctrlKey && event.altKey && event.shiftKey &&
         releaseModifiers.has(event.code)) {

@@ -381,6 +381,7 @@ test('maps unlocked desktop mouse input to absolute remote coordinates', () => {
   const target = new EventTarget();
   target.getBoundingClientRect = () => ({ left: 10, top: 20, width: 200, height: 100 });
   target.requestPointerLock = async () => {};
+  target.focus = () => target.dispatchEvent(new Event('focus'));
   globalThis.document = fakeDocument;
   globalThis.window = fakeWindow;
 
@@ -419,6 +420,18 @@ test('maps unlocked desktop mouse input to absolute remote coordinates', () => {
     assert.deepEqual(inputs.slice(-2), [
       { type: 1, value1: 32768, value2: 32768 },
       { type: 7, value1: -40 },
+    ]);
+
+    const keyDown = mouse(fakeDocument, 'keydown', {
+      code: 'KeyA', repeat: false, ctrlKey: false, altKey: false, shiftKey: false,
+    });
+    mouse(fakeDocument, 'keyup', {
+      code: 'KeyA', repeat: false, ctrlKey: false, altKey: false, shiftKey: false,
+    });
+    assert.equal(keyDown.defaultPrevented, true);
+    assert.deepEqual(inputs.slice(-2), [
+      { type: 9, flags: 0, value1: 0x1e },
+      { type: 9, flags: 1, value1: 0x1e },
     ]);
     assert.equal(controller.active, false);
   } finally {
