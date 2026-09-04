@@ -431,7 +431,7 @@ Web client 通过 `ClientConfig.flags` bit 3 声明支持后，Host 在系统光
 | 0 | u32 | magic | `CURS` |
 | 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `24` |
-| 8 | u32 | flags | bit 0 = 光标当前可见且位于捕获输出内；bit 1 = 光标已合成进视频 |
+| 8 | u32 | flags | bit 0 = Windows 当前显示光标；bit 1 = 捕获器会把可见光标合成进视频；bit 2 = 光标位于捕获输出内 |
 | 12 | u32 | x | 横向归一化坐标，0–65535 |
 | 16 | u32 | y | 纵向归一化坐标，0–65535 |
 | 20 | u32 | sequence | Host 发送序号 |

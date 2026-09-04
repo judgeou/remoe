@@ -35,6 +35,7 @@ enum ClientFlags : std::uint32_t {
 enum CursorFlags : std::uint32_t {
     kCursorVisible = 1u << 0,
     kCursorEmbeddedInVideo = 1u << 1,
+    kCursorInsideOutput = 1u << 2,
 };
 
 enum FrameFlags : std::uint32_t {

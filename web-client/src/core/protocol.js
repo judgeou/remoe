@@ -202,13 +202,14 @@ export function decodeCursorState(value) {
     headerSize: view.getUint16(6, true),
     visible: (view.getUint32(8, true) & 1) !== 0,
     embeddedInVideo: (view.getUint32(8, true) & 2) !== 0,
+    insideOutput: (view.getUint32(8, true) & 4) !== 0,
     x: view.getUint32(12, true),
     y: view.getUint32(16, true),
     sequence: view.getUint32(20, true),
   };
   const flags = view.getUint32(8, true);
   if (result.magic !== MAGIC.cursorState || result.version !== PROTOCOL_VERSION ||
-      result.headerSize !== 24 || (flags & ~3) !== 0 ||
+      result.headerSize !== 24 || (flags & ~7) !== 0 ||
       result.x > 65535 || result.y > 65535) {
     throw new Error('Host 返回了无效的 CursorState');
   }

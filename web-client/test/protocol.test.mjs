@@ -147,7 +147,7 @@ test('decodes Host system cursor feedback', () => {
   view.setUint32(0, MAGIC.cursorState, true);
   view.setUint16(4, 11, true);
   view.setUint16(6, 24, true);
-  view.setUint32(8, 3, true);
+  view.setUint32(8, 7, true);
   view.setUint32(12, 49151, true);
   view.setUint32(16, 16384, true);
   view.setUint32(20, 9, true);
@@ -157,6 +157,7 @@ test('decodes Host system cursor feedback', () => {
     headerSize: 24,
     visible: true,
     embeddedInVideo: true,
+    insideOutput: true,
     x: 49151,
     y: 16384,
     sequence: 9,

@@ -86,7 +86,10 @@ std::optional<remoe::protocol::CursorState> query_cursor_state(
     // GDI capture already composites the cursor into every captured frame.
     state.flags |= remoe::protocol::kCursorEmbeddedInVideo;
 #endif
-    if (inside_output && (cursor_info.flags & CURSOR_SHOWING) != 0) {
+    if (inside_output) {
+        state.flags |= remoe::protocol::kCursorInsideOutput;
+    }
+    if ((cursor_info.flags & CURSOR_SHOWING) != 0) {
         state.flags |= remoe::protocol::kCursorVisible;
     }
     const auto clamped_x = (std::clamp)(relative_x, std::int64_t{0},

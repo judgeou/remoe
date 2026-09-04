@@ -46,6 +46,7 @@ interface CursorPosition {
 interface HostCursorState extends CursorPosition {
   visible: boolean;
   embeddedInVideo: boolean;
+  insideOutput: boolean;
 }
 
 type ViewportGesture =
@@ -150,7 +151,7 @@ let fittedVideoSize: { width: number; height: number } | null = null;
 let viewportPan = { x: 0, y: 0 };
 let cursorPosition: CursorPosition = { x: 32768, y: 32768 };
 let hostCursorState: HostCursorState = {
-  x: 32768, y: 32768, visible: false, embeddedInVideo: false,
+  x: 32768, y: 32768, visible: false, embeddedInVideo: false, insideOutput: false,
 };
 let accountRefreshTimer: number | null = null;
 
@@ -262,12 +263,16 @@ function setRemoteCursorVisible(visible: boolean) {
   else cursorStyle.display = 'none';
 }
 
+function shouldOverlayHostCursor(state: HostCursorState) {
+  return state.insideOutput && (!state.embeddedInVideo || !state.visible);
+}
+
 function handleHostCursor(state: HostCursorState) {
   hostCursorState = state;
   const target = viewer.value?.getVideo();
   if (target && document.pointerLockElement === target && inputController?.touchMode === null) {
     positionRemoteCursor(state);
-    setRemoteCursorVisible(state.visible && !state.embeddedInVideo);
+    setRemoteCursorVisible(shouldOverlayHostCursor(state));
   }
 }
 
@@ -358,7 +363,9 @@ function leaveRemoteMode() {
   fittedVideoSize = null;
   viewportZoom.value = 1;
   viewportPan = { x: 0, y: 0 };
-  hostCursorState = { x: 32768, y: 32768, visible: false, embeddedInVideo: false };
+  hostCursorState = {
+    x: 32768, y: 32768, visible: false, embeddedInVideo: false, insideOutput: false,
+  };
   delete cursorStyle.display;
   delete videoStyle.width;
   delete videoStyle.height;
@@ -398,7 +405,7 @@ function setInputActive(active: boolean) {
   const pointerLocked = active && target && document.pointerLockElement === target;
   if (pointerLocked) {
     positionRemoteCursor(hostCursorState);
-    setRemoteCursorVisible(hostCursorState.visible && !hostCursorState.embeddedInVideo);
+    setRemoteCursorVisible(shouldOverlayHostCursor(hostCursorState));
   } else {
     setRemoteCursorVisible(touchActive);
   }
