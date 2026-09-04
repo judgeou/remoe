@@ -326,6 +326,7 @@ if(REMOE_BUILD_CLIENT AND TARGET remoe_vpl_dispatcher)
         src/launcher_window.h
         src/protocol.h
         src/remoe_client.manifest
+        src/video_chunk_assembler.h
         src/video_window.cpp
         src/video_window.h
         src/vpl_decoder.cpp
@@ -360,6 +361,13 @@ if(BUILD_TESTING)
     target_compile_options(remoe_frame_age_test PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
     add_test(NAME frame_age COMMAND remoe_frame_age_test)
+
+    add_executable(remoe_video_chunk_assembler_test
+        tests/video_chunk_assembler_test.cpp)
+    target_include_directories(remoe_video_chunk_assembler_test PRIVATE src)
+    target_compile_options(remoe_video_chunk_assembler_test PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    add_test(NAME video_chunk_assembler COMMAND remoe_video_chunk_assembler_test)
 
     add_executable(remoe_adaptive_stream_controller_test
         tests/adaptive_stream_controller_test.cpp

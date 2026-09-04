@@ -2,6 +2,7 @@
 #include "frame_age.h"
 #include "launcher_window.h"
 #include "protocol.h"
+#include "video_chunk_assembler.h"
 #include "video_window.h"
 #include "vpl_decoder.h"
 #include "webrtc_websocket_signaling.h"
@@ -413,8 +414,9 @@ void decode_frames(remoe::VideoWindow& window, EncodedFrameQueue& queue,
             return std::make_unique<remoe::VplAv1Decoder>(window.device(),
                 [&window, &frame_age](ID3D11Texture2D* texture, std::uint32_t width,
                           std::uint32_t height, std::uint64_t timestamp_us) {
-                    window.update_frame_age(frame_age.relative_age_ms(timestamp_us));
-                    window.present(texture, width, height);
+                    if (window.present(texture, width, height)) {
+                        window.update_frame_age(frame_age.relative_age_ms(timestamp_us));
+                    }
                 }, [](std::string message) {
                     diagnostic_log().write(message);
                 });
@@ -474,7 +476,8 @@ int run(const Options& options) {
         : remoe::protocol::VideoRateControl::Cbr;
     request.quality = options.fixed_quality ? options.quality : 0;
     request.scale_percent = options.scale_percent;
-    request.flags = remoe::protocol::kClientClipboardText;
+    request.flags = remoe::protocol::kClientClipboardText |
+                    remoe::protocol::kClientLowLatencyVideo;
 
     struct ClientSessionState {
         std::mutex mutex;
@@ -494,6 +497,8 @@ int run(const Options& options) {
         std::atomic_uint32_t outbound_clipboard_sequence{0};
         FrameAgeTracker frame_age;
         std::atomic_uint32_t clock_sequence{0};
+        remoe::VideoChunkAssembler video_assembler;
+        remoe::LowLatencyVideoGate video_gate;
     };
     auto state = std::make_shared<ClientSessionState>();
 
@@ -504,6 +509,20 @@ int run(const Options& options) {
         if (state->window) state->window->request_close();
         if (state->queue) state->queue->stop();
         state->changed.notify_all();
+    };
+
+    const auto request_key_frame = [state, fail] {
+        remoe::WebRtcTransport* transport = nullptr;
+        {
+            std::lock_guard lock(state->mutex);
+            transport = state->transport;
+        }
+        if (!transport) return;
+        remoe::protocol::InputEvent event;
+        event.type = remoe::protocol::InputType::RequestKeyFrame;
+        if (!send_control_event(*transport, event)) {
+            fail("failed to request a low-latency AV1 key frame");
+        }
     };
 
     remoe::WebRtcTransport::Callbacks control_callbacks;
@@ -525,6 +544,10 @@ int run(const Options& options) {
     control_callbacks.on_video_open = [] {
         diagnostic_log().write("Standard video track opened");
         std::cout << "WebRTC standard video track connected\n";
+    };
+    control_callbacks.on_video_data_open = [] {
+        diagnostic_log().write("Low-latency video DataChannel opened");
+        std::cout << "WebRTC low-latency video DataChannel connected\n";
     };
     control_callbacks.on_binary = [state, fail](std::vector<std::uint8_t> message) {
         const auto client_receive_us = FrameAgeTracker::now_us();
@@ -578,9 +601,64 @@ int run(const Options& options) {
         }
         state->changed.notify_all();
     };
-    control_callbacks.on_video_frame = [state, fail](std::vector<std::uint8_t> payload,
-                                                      std::uint64_t timestamp_us,
-                                                      bool key_frame) {
+    control_callbacks.on_video_binary = [state, fail, request_key_frame](
+                                            std::vector<std::uint8_t> message) {
+        try {
+            bool request_recovery = false;
+            std::unique_lock lock(state->mutex);
+            if (!state->queue || !state->window || !state->transport) return;
+            state->network_bytes += message.size();
+            auto assembled = state->video_assembler.consume(
+                std::span<const std::uint8_t>(message));
+            auto decision = state->video_gate.evaluate(
+                std::move(assembled.frame), assembled.loss_detected);
+            request_recovery = decision.request_key_frame;
+            if (request_recovery) state->video_assembler.clear();
+
+            if (decision.frame) {
+                EncodedFrame frame;
+                frame.frame_number = decision.frame->frame_number;
+                frame.timestamp_us = decision.frame->timestamp_us;
+                frame.key_frame = decision.frame->key_frame;
+                frame.reset_decoder = decision.reset_decoder;
+                frame.payload = std::move(decision.frame->payload);
+                if (frame.key_frame || frame.payload.size() >= 256 * 1024) {
+                    diagnostic_log().write("Low-latency AV1 frame received: frame=" +
+                        std::to_string(frame.frame_number) + ", bytes=" +
+                        std::to_string(frame.payload.size()) + ", key=" +
+                        (frame.key_frame ? "true" : "false") + ", timestamp_us=" +
+                        std::to_string(frame.timestamp_us));
+                }
+                state->video_bytes += frame.payload.size();
+                const bool queue_recovery = state->queue->push(std::move(frame)) ==
+                    EncodedFrameQueue::PushResult::RequestKeyFrame;
+                request_recovery |= queue_recovery;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            const double elapsed =
+                std::chrono::duration<double>(now - state->statistics_epoch).count();
+            if (elapsed >= 1.0) {
+                state->window->update_transfer_statistics(
+                    static_cast<double>(state->video_bytes) * 8.0 / elapsed / 1'000'000.0,
+                    static_cast<double>(state->network_bytes) / elapsed / 1'000'000.0);
+                state->statistics_epoch = now;
+                state->video_bytes = 0;
+                state->network_bytes = 0;
+            }
+            lock.unlock();
+            if (request_recovery) {
+                diagnostic_log().write("Low-latency video requested a new key frame");
+                request_key_frame();
+            }
+        } catch (const std::exception& error) {
+            fail(error.what());
+        }
+    };
+    control_callbacks.on_video_frame = [state, fail, request_key_frame](
+                                           std::vector<std::uint8_t> payload,
+                                           std::uint64_t timestamp_us,
+                                           bool key_frame) {
         try {
             std::unique_lock lock(state->mutex);
             if (!state->queue || !state->window || !state->transport) return;
@@ -609,16 +687,12 @@ int run(const Options& options) {
                 state->video_bytes = 0;
                 state->network_bytes = 0;
             }
-            const bool request_key_frame = state->queue->push(std::move(frame)) ==
+            const bool queue_requested_key_frame = state->queue->push(std::move(frame)) ==
                 EncodedFrameQueue::PushResult::RequestKeyFrame;
-            remoe::WebRtcTransport* transport = state->transport;
             lock.unlock();
-            if (request_key_frame) {
-                diagnostic_log().write("Decoder queue requested RTCP PLI");
-                if (!transport->request_video_keyframe()) {
-                    throw std::runtime_error("failed to request an AV1 key frame");
-                }
-                std::cerr << "Requested an immediate key frame with RTCP PLI\n";
+            if (queue_requested_key_frame) {
+                diagnostic_log().write("Decoder queue requested a new key frame");
+                request_key_frame();
             }
         } catch (const std::exception& error) {
             fail(error.what());

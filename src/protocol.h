@@ -115,8 +115,8 @@ struct StreamStatus {
     std::uint64_t pacing_bitrate_bps = 0;
 };
 
-// One unordered, non-retransmitted WebCodecs video-channel message. Frames are
-// split into fixed-size chunks below common SCTP message-size limits.
+// One unordered, non-retransmitted low-latency video-channel message. Frames
+// are split into fixed-size chunks below common SCTP message-size limits.
 struct VideoChunkHeader {
     std::uint32_t magic = kVideoChunkMagic;
     std::uint16_t version = kVersion;

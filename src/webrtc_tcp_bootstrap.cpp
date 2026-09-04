@@ -225,8 +225,12 @@ std::unique_ptr<WebRtcTransport> establish_webrtc_over_tcp(
     WebRtcTransport::Configuration configuration;
     configuration.role = role;
     configuration.ice_servers = std::move(ice_servers);
-    // Browser offerers may add the optional remoe-video WebCodecs channel.
-    configuration.enable_video_data_channel = role == WebRtcTransport::Role::Answerer;
+    // Browser and native low-latency offerers opt in by installing the video
+    // binary callback. Answerers accept the optional channel from either peer.
+    configuration.enable_video_data_channel =
+        role == WebRtcTransport::Role::Answerer ||
+        static_cast<bool>(state->application_callbacks.on_video_binary) ||
+        static_cast<bool>(state->application_callbacks.on_video_data_open);
     if (video_codec) {
         configuration.video_codec = *video_codec;
         configuration.video_direction = role == WebRtcTransport::Role::Offerer
