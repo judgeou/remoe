@@ -59,6 +59,7 @@ enum class InputType : std::uint16_t {
     Keyboard = 9,
     RequestKeyFrame = 10,
     MouseMoveRelative = 11,
+    RequestCursorState = 12,
 };
 
 enum InputFlags : std::uint16_t {

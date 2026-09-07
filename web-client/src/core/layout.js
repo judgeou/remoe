@@ -10,6 +10,12 @@ export function fitVideoSize(videoWidth, videoHeight, viewportWidth, viewportHei
   };
 }
 
+export function shouldOverlayHostCursor(state) {
+  // An embedded cursor is only present in the video while it is visible
+  // inside the captured output. Pointer Lock may move it outside that output.
+  return !(state.insideOutput && state.embeddedInVideo && state.visible);
+}
+
 export function cursorViewportPosition(normalizedX, normalizedY, rectangle) {
   const x = Math.max(0, Math.min(65535, normalizedX));
   const y = Math.max(0, Math.min(65535, normalizedY));

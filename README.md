@@ -425,6 +425,8 @@ Web client 通过 `ClientConfig.flags` bit 1 声明支持后，Host 在 `StreamH
 
 Web client 通过 `ClientConfig.flags` bit 3 声明支持后，Host 在系统光标位置或可见状态变化时发送。
 坐标以当前捕获输出归一化到 0–65535；网页在接管键鼠时据此绘制硬件光标，不再累计浏览器相对位移。
+GDI Host 对支持该消息的 client 停止把光标合成进视频，避免 Pointer Lock 的透明光标与网页叠加层冲突；
+未声明支持的原生 client 仍由 GDI 直接合成光标。
 
 | 偏移 | 类型 | 字段 | 值/说明 |
 |---:|---|---|---|
@@ -479,7 +481,7 @@ WebCodecs；标准 VideoTrack 仍保留给 Android 和 Windows 原生 client。
 | 0 | u32 | magic | `INPT` |
 | 4 | u16 | version | `11` |
 | 6 | u16 | header_size | `24` |
-| 8 | u16 | type | 1=绝对移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧；11=相对移动 |
+| 8 | u16 | type | 1=绝对移动；2–6=左/右/中/X1/X2；7/8=垂直/水平滚轮；9=键盘；10=请求关键帧；11=相对移动；12=请求刷新 Host 光标状态 |
 | 10 | u16 | flags | bit 0=释放；bit 1=扩展扫描码 |
 | 12 | i32 | value1 | 绝对 X（0–65535）、相对 X（-32768–32767）、滚轮 delta 或 Windows 扫描码 |
 | 16 | i32 | value2 | 绝对 Y（0–65535）或相对 Y（-32768–32767），其余类型为 0 |

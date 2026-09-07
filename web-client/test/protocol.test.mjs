@@ -22,7 +22,7 @@ import { parseInvite } from '../src/core/remoe-client.js';
 import { ClipboardSynchronizer } from '../src/core/clipboard-sync.js';
 import { RemoteInputController, windowsScanCode } from '../src/core/input.js';
 import { LatestFrameRenderer } from '../src/core/latest-frame-renderer.js';
-import { cursorViewportPosition, fitVideoSize } from '../src/core/layout.js';
+import { cursorViewportPosition, fitVideoSize, shouldOverlayHostCursor } from '../src/core/layout.js';
 
 function testVideoFrame(name) {
   return {
@@ -280,7 +280,9 @@ test('encodes keyboard input and maps extended Windows scan codes', () => {
   assert.equal(relativeView.getUint16(8, true), 11);
   assert.equal(relativeView.getInt32(12, true), -37);
   assert.equal(relativeView.getInt32(16, true), 19);
-  assert.throws(() => encodeInputEvent({ type: 12 }), /无效/);
+  const cursorRefresh = encodeInputEvent({ type: 12 });
+  assert.equal(new DataView(cursorRefresh.buffer).getUint16(8, true), 12);
+  assert.throws(() => encodeInputEvent({ type: 13 }), /无效/);
 });
 
 test('round-trips UTF-8 clipboard text with a bounded variable-length frame', () => {
@@ -508,7 +510,7 @@ test('automatically synchronizes clipboard text in both directions', async () =>
   synchronizer.stop();
 });
 
-test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async () => {
+test('captures repeatedly with an older Host and releases with Ctrl+Alt+Shift', async () => {
   const originalDocument = globalThis.document;
   const originalWindow = globalThis.window;
   const originalNavigator = globalThis.navigator;
@@ -576,7 +578,9 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
     assert.deepEqual(pointerLockOptions, [{ unadjustedMovement: true }]);
     assert.deepEqual(keyboardLocks, [['Escape']]);
     assert.equal(fakeDocument.fullscreenElement, fullscreenTarget);
-    assert.equal(inputs.length, 0);
+    // Older Hosts terminate the session for the optional type-12 refresh.
+    // Acquiring Pointer Lock must not send any remote input.
+    assert.deepEqual(inputs, []);
 
     const movement = new Event('mousemove');
     Object.defineProperties(movement, {
@@ -610,6 +614,14 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
       { type: 9, flags: 1, value1: 0x38 },
     ]);
     assert.deepEqual(activeChanges, [true, false]);
+
+    const inputsBeforeRecapture = inputs.slice();
+    await fakeDocument.exitFullscreen();
+    await controller.capture(fullscreenTarget);
+    assert.equal(controller.active, true);
+    assert.equal(fakeDocument.fullscreenElement, fullscreenTarget);
+    assert.deepEqual(inputs, inputsBeforeRecapture);
+    assert.deepEqual(activeChanges, [true, false, true]);
   } finally {
     controller.dispose();
     globalThis.document = originalDocument;
@@ -619,6 +631,15 @@ test('forwards Escape and releases desktop capture with Ctrl+Alt+Shift', async (
       value: originalNavigator,
     });
   }
+});
+
+test('keeps a fallback cursor when the Host cursor leaves the captured output on recapture', () => {
+  const embeddedCursor = { insideOutput: true, embeddedInVideo: true, visible: true };
+  assert.equal(shouldOverlayHostCursor(embeddedCursor), false);
+  assert.equal(shouldOverlayHostCursor({ ...embeddedCursor, insideOutput: false }), true);
+  assert.equal(shouldOverlayHostCursor({ ...embeddedCursor, visible: false }), true);
+  assert.equal(shouldOverlayHostCursor({ ...embeddedCursor, embeddedInVideo: false }), true);
+  assert.equal(shouldOverlayHostCursor(embeddedCursor), false);
 });
 
 test('fits the whole remote frame inside differently shaped browser viewports', () => {
