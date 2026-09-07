@@ -150,7 +150,9 @@ defineExpose({
       :style="videoStyle"
       @pointerdown="handleViewerPointerDown"
     ></canvas>
-    <div id="remote-cursor" class="remote-cursor" :style="cursorStyle" aria-hidden="true"></div>
+    <!-- Snapshot mutable styles so removed properties (display on recapture)
+         remain in the previous VNode and are cleared from the DOM. -->
+    <div id="remote-cursor" class="remote-cursor" :style="{ ...cursorStyle }" aria-hidden="true"></div>
     <div
       class="remote-toolbar"
       :class="{ 'show-performance': showPerformance, 'mobile-toolbar-hidden': mobileToolbarHidden }"
