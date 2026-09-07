@@ -101,6 +101,18 @@ void DesktopCapture::create_duplication() {
     check_hr(try_create_duplication(), "IDXGIOutput1::DuplicateOutput");
 }
 
+void DesktopCapture::copy_frame(ID3D11Texture2D* source, ID3D11Texture2D* destination) {
+    D3D11_TEXTURE2D_DESC from{}, to{};
+    source->GetDesc(&from);
+    destination->GetDesc(&to);
+    if (from.Width == to.Width && from.Height == to.Height && from.Format == to.Format) {
+        context_->CopyResource(destination, source);
+    } else {
+        scale_texture(source, destination, from.Width, from.Height, to.Width, to.Height,
+                      from.Format, to.Format);
+    }
+}
+
 HRESULT DesktopCapture::try_create_duplication() {
     duplication_.Reset();
     return output_->DuplicateOutput(device_.Get(), &duplication_);
