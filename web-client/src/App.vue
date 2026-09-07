@@ -25,7 +25,7 @@ import {
 import { ClipboardSynchronizer } from './core/clipboard-sync.js';
 import { RemoteInputController } from './core/input.js';
 import { LatestFrameRenderer } from './core/latest-frame-renderer.js';
-import { cursorViewportPosition, fitVideoSize } from './core/layout.js';
+import { cursorViewportPosition, fitVideoSize, shouldOverlayHostCursor } from './core/layout.js';
 import { RemoeBrowserClient, parseInvite } from './core/remoe-client.js';
 
 interface StreamDescription {
@@ -161,8 +161,8 @@ function video(): HTMLCanvasElement {
 }
 
 function setStatus(message: string, isError = false) {
-  // status.value = message;
-  // statusError.value = isError;
+  status.value = isError ? message : '';
+  statusError.value = isError;
 }
 
 function createRemoteWindow(): Window | null {
@@ -263,16 +263,14 @@ function setRemoteCursorVisible(visible: boolean) {
   else cursorStyle.display = 'none';
 }
 
-function shouldOverlayHostCursor(state: HostCursorState) {
-  return state.insideOutput && (!state.embeddedInVideo || !state.visible);
-}
-
 function handleHostCursor(state: HostCursorState) {
-  hostCursorState = state;
+  hostCursorState = state.insideOutput
+    ? state
+    : { ...state, x: hostCursorState.x, y: hostCursorState.y };
   const target = viewer.value?.getVideo();
   if (target && document.pointerLockElement === target && inputController?.touchMode === null) {
-    positionRemoteCursor(state);
-    setRemoteCursorVisible(shouldOverlayHostCursor(state));
+    positionRemoteCursor(hostCursorState);
+    setRemoteCursorVisible(shouldOverlayHostCursor(hostCursorState));
   }
 }
 
@@ -405,7 +403,10 @@ function setInputActive(active: boolean) {
   const pointerLocked = active && target && document.pointerLockElement === target;
   if (pointerLocked) {
     positionRemoteCursor(hostCursorState);
-    setRemoteCursorVisible(shouldOverlayHostCursor(hostCursorState));
+    // Pointer Lock itself can hide or temporarily relocate the OS cursor.
+    // Show a fallback immediately; subsequent Host feedback will decide
+    // whether the video already contains a visible cursor.
+    setRemoteCursorVisible(true);
   } else {
     setRemoteCursorVisible(touchActive);
   }

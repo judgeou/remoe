@@ -100,7 +100,7 @@ bool GdiCapture::acquire(std::chrono::milliseconds) {
                 screen_dc_, left_, top_, SRCCOPY | CAPTUREBLT)) {
         throw win32_error("BitBlt(desktop capture)");
     }
-    draw_cursor();
+    if (cursor_compositing_enabled_) draw_cursor();
     GdiFlush();
     return true;
 }

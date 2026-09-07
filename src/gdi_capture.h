@@ -17,6 +17,9 @@ public:
     GdiCapture& operator=(const GdiCapture&) = delete;
 
     bool acquire(std::chrono::milliseconds timeout);
+    void set_cursor_compositing_enabled(bool enabled) noexcept {
+        cursor_compositing_enabled_ = enabled;
+    }
 
     [[nodiscard]] const std::uint8_t* pixels() const noexcept {
         return static_cast<const std::uint8_t*>(pixels_);
@@ -42,6 +45,7 @@ private:
     HBITMAP bitmap_ = nullptr;
     HGDIOBJ previous_bitmap_ = nullptr;
     void* pixels_ = nullptr;
+    bool cursor_compositing_enabled_ = true;
 };
 
 } // namespace remoe

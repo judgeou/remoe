@@ -282,6 +282,9 @@ export class RemoteInputController {
       this.#unlockKeyboard();
     }
     this.#setActive(active);
+    // Capture must not send optional protocol extensions: older version-11
+    // Hosts disconnect on unknown input types. Use cached cursor feedback
+    // until the Host next reports a change.
   }
 
   async #requestPointerLock() {

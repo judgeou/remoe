@@ -82,10 +82,6 @@ std::optional<remoe::protocol::CursorState> query_cursor_state(
         relative_x < output_width && relative_y < output_height;
 
     remoe::protocol::CursorState state;
-#if defined(REMOE_X264_HOST)
-    // GDI capture already composites the cursor into every captured frame.
-    state.flags |= remoe::protocol::kCursorEmbeddedInVideo;
-#endif
     if (inside_output) {
         state.flags |= remoe::protocol::kCursorInsideOutput;
     }
@@ -879,6 +875,7 @@ int run(const Options& options) {
     while (g_running) {
         std::atomic_bool session_running{true};
         std::atomic_bool key_frame_requested{false};
+        std::atomic_bool cursor_state_refresh_requested{false};
         std::atomic_bool clipboard_enabled{false};
         std::atomic<DWORD> clipboard_sequence{GetClipboardSequenceNumber()};
         std::atomic_uint32_t outbound_clipboard_sequence{0};
@@ -1051,6 +1048,17 @@ int run(const Options& options) {
                 }
                 return;
             }
+            if (valid_header &&
+                event.type == remoe::protocol::InputType::RequestCursorState) {
+                if (event.flags != 0 || event.value1 != 0 || event.value2 != 0) {
+                    std::cerr << "Invalid cursor-state request over WebRTC\n";
+                    session_running = false;
+                    handshake.changed.notify_all();
+                } else {
+                    cursor_state_refresh_requested = true;
+                }
+                return;
+            }
             if (!valid_header ||
                 !inject_input_event(event, capture.left(), capture.top(), capture.width(),
                                     capture.height(), pressed_keys, pressed_buttons,
@@ -1155,6 +1163,11 @@ int run(const Options& options) {
             (request.flags & remoe::protocol::kClientStreamStatus) != 0;
         const bool cursor_state_enabled =
             (request.flags & remoe::protocol::kClientCursorState) != 0;
+#if defined(REMOE_X264_HOST)
+        // Cursor-aware clients draw the pointer from Host feedback. Keep GDI
+        // compositing only for older/native clients that do not request it.
+        capture.set_cursor_compositing_enabled(!cursor_state_enabled);
+#endif
         {
             std::lock_guard lock(adaptive_controller_mutex);
             adaptive_controller.reset();
@@ -1333,10 +1346,12 @@ int run(const Options& options) {
             }
 
             if (cursor_state_enabled) {
+                const bool refresh_requested =
+                    cursor_state_refresh_requested.exchange(false);
                 auto cursor_state = query_cursor_state(
                     capture.left(), capture.top(), capture.width(), capture.height());
                 const bool changed = cursor_state &&
-                    (!last_cursor_state ||
+                    (refresh_requested || !last_cursor_state ||
                      cursor_state->flags != last_cursor_state->flags ||
                      cursor_state->x != last_cursor_state->x ||
                      cursor_state->y != last_cursor_state->y);
