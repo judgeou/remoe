@@ -28,6 +28,15 @@ const secureCookies = expectedOrigin.startsWith('https://');
 const maxPendingBytes = 2 * 1024 * 1024;
 const maxTotalPendingBytes = 32 * 1024 * 1024;
 const maxSessions = 1024;
+/**
+ * "上一场会话看着还在、其实客户端已经走了"要等多久才允许收回。
+ *
+ * ★ 存在的唯一理由是保护**刚拿到邀请、正在连**的那一次：客户端拿到 invite 到 WS 连上来之间
+ *   有一小段窗口，那时候 `session.client` 还是 null。宽限期要大于那一段（正常 <1 秒），
+ *   所以 20 秒非常宽松。
+ */
+const staleConnectGraceMs =
+  Number.parseInt(process.env.REMOE_STALE_CONNECT_GRACE_MS ?? '20000', 10);
 const sessionIdleTimeoutMs = 2 * 60 * 1000;
 const webSessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
 const ceremonyLifetimeMs = 5 * 60 * 1000;
@@ -561,9 +570,10 @@ async function handleApi(request, response, url) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw Object.assign(new Error('Host is offline'), { status: 409 });
     }
-    if (socket.managedSession) {
+    if (socket.managedSession && managedSessionInUse(socket.managedSession)) {
       throw Object.assign(new Error('Host is already in use'), { status: 409 });
     }
+    if (socket.managedSession) reclaimManagedSession(socket.managedSession);
     const sessionId = randomToken(16);
     const signalingSession = createSession(sessionId, socket);
     if (!signalingSession) throw Object.assign(new Error('Service is busy'), { status: 503 });
@@ -848,9 +858,10 @@ async function handleApi(request, response, url) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw Object.assign(new Error('Host is offline'), { status: 409 });
     }
-    if (socket.managedSession) {
+    if (socket.managedSession && managedSessionInUse(socket.managedSession)) {
       throw Object.assign(new Error('Host is already in use'), { status: 409 });
     }
+    if (socket.managedSession) reclaimManagedSession(socket.managedSession);
     const sessionId = randomToken(16);
     const session = createSession(sessionId, socket);
     if (!session) throw Object.assign(new Error('Service is busy'), { status: 503 });
@@ -951,6 +962,38 @@ function removeSession(session) {
   if (session.managedHostId && session.host?.managedSession === session) {
     session.host.managedSession = null;
   }
+}
+
+/**
+ * 这场"已占用"的会话，到底还有没有客户端在用？
+ *
+ * ★ 判据刻意**不是**"`socket.managedSession` 在不在"。
+ *
+ * 客户端一旦**不干净地消失**（App 被冻结/被杀，WebSocket 来不及发出 close 帧），服务端只能靠
+ * 心跳（30 秒一轮）或空闲清扫（`sessionIdleTimeoutMs` = 2 分钟，每 30 秒扫一次）才发现 ——
+ * 最长 **~2.5 分钟**里 host 会一直被 409 `Host is already in use` 拒掉。
+ * 用户看到的现象就是"**连不回来，只有把 App 杀掉重开才能连**"：
+ * 进程一死，操作系统立刻关掉 socket，服务端这才释放。
+ *
+ * ⇒ 正确的判据是"**有没有活着的客户端**"：
+ *   - 客户端 socket 仍是 OPEN ⇒ 真的在用，照旧拒绝；
+ *   - 客户端 socket 已经不是 OPEN（半死），或压根没有客户端、且已过了宽限期 ⇒ 残局，收回；
+ *   - 没有客户端但还在宽限期内 ⇒ 可能有人刚拿到邀请正准备连，照旧拒绝。
+ */
+function managedSessionInUse(session) {
+  const client = session.client;
+  if (client && client.readyState === WebSocket.OPEN) return true;
+  return Date.now() - session.lastActivity <= staleConnectGraceMs;
+}
+
+/** 收回残局：把上面那份会话撤掉（`removeSession` 会顺手清掉 `host.managedSession`）。 */
+function reclaimManagedSession(session) {
+  const idleSeconds = Math.round((Date.now() - session.lastActivity) / 1000);
+  console.log(
+    `reclaiming stale signaling session ${session.id} (idle ${idleSeconds}s) for host ${session.managedHostId ?? 'unknown'}`,
+  );
+  session.client?.close(4001, 'Reclaimed by a newer connection');
+  removeSession(session);
 }
 
 function offeredProtocol(request) {
