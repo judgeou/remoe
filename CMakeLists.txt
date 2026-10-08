@@ -237,6 +237,23 @@ target_link_libraries(remoe_host PRIVATE
     ws2_32)
 install(TARGETS remoe_host RUNTIME DESTINATION bin)
 
+# Standalone AV1 recorder; FFmpeg only remuxes the encoded stream into MP4.
+add_executable(remoe_recorder WIN32 src/recorder_main.cpp src/desktop_capture.cpp src/remoe.rc
+    src/video_encoder.cpp src/nvenc_encoder.cpp src/nvenc_api_loader.cpp
+    "${NVENC_SAMPLE_DIR}/NvEncoder/NvEncoder.cpp"
+    "${NVENC_SAMPLE_DIR}/NvEncoder/NvEncoderD3D11.cpp")
+target_include_directories(remoe_recorder PRIVATE src "${NVENC_INTERFACE_DIR}"
+    "${NVENC_SAMPLE_DIR}" "${NVENC_SDK_ROOT}/Samples/Utils")
+if(TARGET remoe_vpl_dispatcher)
+    target_sources(remoe_recorder PRIVATE src/vpl_encoder.cpp)
+    target_compile_definitions(remoe_recorder PRIVATE REMOE_HAS_VPL_ENCODER=1 ONEVPL_EXPERIMENTAL)
+    target_link_libraries(remoe_recorder PRIVATE remoe_vpl_dispatcher)
+endif()
+target_compile_definitions(remoe_recorder PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_compile_options(remoe_recorder PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+target_link_libraries(remoe_recorder PRIVATE d3d11 dxgi ole32 shell32 user32 gdi32 winmm)
+install(TARGETS remoe_recorder RUNTIME DESTINATION bin)
+
 if(REMOE_BUILD_X264_HOST)
     set(LIBYUV_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libyuv"
         CACHE PATH "Path to libyuv source")

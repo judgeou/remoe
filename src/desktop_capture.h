@@ -27,6 +27,9 @@ public:
     // belonging to the same output adapter (used by oneVPL's internal device).
     void use_device(ID3D11Device* device);
 
+    // Copy a cached desktop image into an encoder surface (BGRA or NV12).
+    void copy_frame(ID3D11Texture2D* source, ID3D11Texture2D* destination);
+
     // Returns true when a new desktop image was acquired, false on timeout.
     bool acquire(ID3D11Texture2D* destination, std::uint32_t content_width,
                  std::uint32_t content_height, std::chrono::milliseconds timeout);

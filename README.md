@@ -575,3 +575,24 @@ STUN 服务不接触 DataChannel 或视频内容。完整服务器配置、更�
 
 Android 原生客户端的架构、扫码绑定 Passkey、Digital Asset Links、WebRTC、输入、测试与分阶段
 实施方案见 [`docs/android-client-design.md`](docs/android-client-design.md)。
+# 全屏录制工具
+
+运行 `build-recorder\Release\remoe_recorder.exe`，点击「开始录制」，完成后点击「停止并保存」。
+默认录制主屏幕全屏，保留原生分辨率（奇数尺寸补齐为偶数），包含鼠标指针，无声音。
+固定 **AV1 / 60 fps / 固定质量 30**，复用现有硬件编码器：Intel oneVPL ICQ 30，失败时回退 NVIDIA NVENC CQP 30。
+静止桌面重复最近画面以保持 60 fps，每两秒插入关键帧。录制过程中隐藏录屏控制窗口的捕获内容。
+
+- 快捷键：`Ctrl+Alt+R` 开始/停止；被占用时自动尝试 `Ctrl+Shift+F9`，以窗口提示为准。
+- 保存到 Windows「视频」文件夹下的 `remoe 录屏`，按时间命名；关闭窗口会先停止并保存。
+- 点击「打开保存文件夹」查看文件。每段视频附带 `.mp4.log`，记录编码器、质量、帧数与实际处理速度。
+- 需要支持 AV1 编码的 Intel/NVIDIA GPU，以及 PATH 中或 exe 同目录的 `ffmpeg.exe`。FFmpeg 仅以 `-c:v copy` 封装 MP4，不重新编码。
+- 录制先写同目录 `.ivf`，停止后封装 MP4，成功才清除临时文件；封装失败时保留 IVF 供恢复。保存阶段需留出两份视频的磁盘空间。
+- 若机器负载导致编码持续低于 60 帧，实际录制时长可能长于视频时长；可通过日志中的 `processing_fps` 判断。
+
+编译：`powershell -ExecutionPolicy Bypass -File .\build-recorder.ps1`。仅构建录制工具，不替换运行中的远程桌面服务。
+
+定时录制验证（输出路径不能已存在）：
+```powershell
+.\build-recorder\Release\remoe_recorder.exe --record-seconds 8 G:\capture-test.mp4
+ffprobe -v error -show_streams G:\capture-test.mp4
+```

@@ -1,5 +1,8 @@
 /build/
 /build-local/
+/build-recorder/
+/recorder-build.log
+/remoe-recorder-error.log
 /.vs/
 *.user
 *.suo
