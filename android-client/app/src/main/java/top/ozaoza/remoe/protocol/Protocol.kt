@@ -9,6 +9,7 @@ object Protocol {
     const val CLOCK_SYNC_MAGIC = 0x4b4c4343
     const val INPUT_MAGIC = 0x54504e49
     const val CLIPBOARD_MAGIC = 0x50494c43
+    const val TEXT_INPUT_MAGIC = 0x54584554
     const val SIGNAL_MAGIC = 0x534d5257
     const val CODEC_AV1 = 0x31305641
     const val CODEC_H264 = 0x34363248
@@ -20,12 +21,15 @@ object Protocol {
     const val CLOCK_SYNC_RESPONSE_SIZE = 40
     const val INPUT_EVENT_SIZE = 24
     const val CLIPBOARD_HEADER_SIZE = 16
+    const val TEXT_INPUT_HEADER_SIZE = 16
     const val SIGNAL_HEADER_SIZE = 20
 
     const val CLIENT_FLAG_CLIPBOARD_TEXT = 1
+    const val CLIENT_FLAG_TEXT_INPUT = 16
     const val INPUT_FLAG_RELEASE = 1
     const val INPUT_FLAG_EXTENDED_KEY = 2
     const val MAX_CLIPBOARD_TEXT_SIZE = 1024 * 1024
+    const val MAX_TEXT_INPUT_SIZE = 4096
     const val MAX_SIGNAL_VALUE_SIZE = 1024 * 1024
     const val MAX_SIGNAL_CANDIDATE_SIZE = 16 * 1024
     const val MAX_SIGNAL_METADATA_SIZE = 256
@@ -134,6 +138,11 @@ data class RemoteInputEvent(
 )
 
 data class ClipboardText(
+    val text: String,
+    val sequence: UInt,
+)
+
+data class TextInput(
     val text: String,
     val sequence: UInt,
 )

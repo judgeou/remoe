@@ -14,17 +14,22 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.WindowCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import org.webrtc.RendererCommon
@@ -40,6 +45,8 @@ import top.ozaoza.remoe.binding.BindingState
 import top.ozaoza.remoe.binding.QrScannerActivity
 import top.ozaoza.remoe.input.RemoteCursorView
 import top.ozaoza.remoe.input.RemoteTouchController
+import top.ozaoza.remoe.input.RemoteKeyboardController
+import top.ozaoza.remoe.input.RemoteKeyboardView
 import top.ozaoza.remoe.rtc.RtcCodecProbe
 import top.ozaoza.remoe.rtc.RtcPerformanceStats
 import top.ozaoza.remoe.rtc.RtcRuntime
@@ -57,7 +64,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     private val probeExecutor = Executors.newSingleThreadExecutor()
     private lateinit var app: RemoeApplication
     private lateinit var remoteRoot: FrameLayout
-    private lateinit var remoteTouchLayer: View
+    private lateinit var remoteTouchLayer: RemoteKeyboardView
+    private val keyboardController = RemoteKeyboardController { session?.sendInput(it) == true }
+    private lateinit var keyboardButton: Button
+    private lateinit var keyboardBar: HorizontalScrollView
+    private val modifierButtons = mutableMapOf<Int, Button>()
+    private var keyboardVisible = false
     private var renderer: TextureViewVideoRenderer? = null
     private lateinit var remoteCursor: RemoteCursorView
     private var touchController: RemoteTouchController? = null
@@ -125,21 +137,43 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         videoSettingsStore = VideoSettingsStore(this)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
 
-        remoteTouchLayer = View(this)
+        remoteTouchLayer = RemoteKeyboardView(this).apply {
+            sendText = { text ->
+                val sent = runCatching {
+                    keyboardController.shortcutText(text) ?: (session?.sendText(text) == true)
+                }.getOrDefault(false)
+                if (!sent) Toast.makeText(this@MainActivity, "文字发送失败，请检查连接", Toast.LENGTH_SHORT).show()
+                sent
+            }
+            sendKey = ::sendRemoteKey
+            tapKey = keyboardController::tap
+            isFocusable = false
+        }
+        keyboardBar = createKeyboardBar()
         remoteCursor = RemoteCursorView(this).apply { visibility = View.GONE }
 
         controlPanel = createControlPanel()
         remoteStopButton = secondaryButton("断开").apply {
+            isFocusable = false
             setOnClickListener { disconnect("用户断开") }
         }
         performanceButton = secondaryButton("性能").apply {
+            isFocusable = false
             setOnClickListener { setPerformanceStatsVisible(!showPerformanceStats) }
         }
-        remoteMenuButton = circularIconButton("⋮", "展开远程操作")
+        keyboardButton = secondaryButton("键盘").apply {
+            isFocusable = false
+            setOnClickListener {
+                setRemoteMenuExpanded(false)
+                if (keyboardVisible) hideRemoteKeyboard() else showRemoteKeyboard()
+            }
+        }
+        remoteMenuButton = circularIconButton("⋮", "展开远程操作").apply { isFocusable = false }
         remoteActionsPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
+        addRemoteAction(keyboardButton)
         addRemoteAction(performanceButton)
         addRemoteAction(remoteStopButton)
         remoteToolbar = LinearLayout(this).apply {
@@ -184,6 +218,32 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP or Gravity.START,
             ).apply { setMargins(dp(12), dp(12), dp(12), dp(12)) })
+            addView(keyboardBar, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(48),
+                Gravity.BOTTOM,
+            ))
+        }
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+        ViewCompat.setOnApplyWindowInsetsListener(remoteRoot) { _, insets ->
+            val imeVisible = remoteModeActive && insets.isVisible(WindowInsetsCompat.Type.ime())
+            if (keyboardVisible && !imeVisible) releaseKeyboardInput()
+            keyboardVisible = imeVisible
+            keyboardButton.text = if (imeVisible) "隐藏键盘" else "键盘"
+            keyboardBar.visibility = if (imeVisible) View.VISIBLE else View.GONE
+            remoteRoot.setPadding(0, 0, 0, if (imeVisible) {
+                insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            } else 0)
+            val bottomMargin = if (imeVisible) dp(48) else 0
+            listOfNotNull(renderer, remoteTouchLayer).forEach { view ->
+                val params = view.layoutParams as FrameLayout.LayoutParams
+                if (params.bottomMargin != bottomMargin) {
+                    params.bottomMargin = bottomMargin
+                    view.layoutParams = params
+                }
+            }
+            insets
         }
         setContentView(remoteRoot)
         showStatus("登录后选择一台在线电脑")
@@ -686,6 +746,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     private fun disconnect(reason: String) {
         connectionPreparing = false
+        hideRemoteKeyboard()
         touchController?.cancel()
         detachRemoteTrack()
         setPerformanceStatsVisible(false)
@@ -791,6 +852,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onError(message: String) = postUi {
         connectionPreparing = false
+        hideRemoteKeyboard()
         touchController?.cancel()
         detachRemoteTrack()
         session = null
@@ -822,6 +884,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         super.onStop()
     }
 
+    override fun onPause() {
+        hideRemoteKeyboard()
+        touchController?.cancel()
+        super.onPause()
+    }
+
     override fun onStart() {
         super.onStart()
         bindingForeground = true
@@ -833,6 +901,7 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onDestroy() {
         connectionPreparing = false
+        releaseKeyboardInput()
         session?.close("界面已销毁，连接已断开")
         session = null
         RemoteSessionService.stop(this)
@@ -845,7 +914,12 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (!hasFocus) touchController?.cancel()
+        if (!hasFocus) {
+            touchController?.cancel()
+            releaseKeyboardInput()
+        } else if (remoteModeActive && keyboardVisible) {
+            getSystemService(InputMethodManager::class.java).restartInput(remoteTouchLayer)
+        }
     }
 
     private fun detachRemoteTrack() {
@@ -870,6 +944,8 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         setRemoteMenuExpanded(false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         controlPanel.visibility = View.GONE
+        remoteTouchLayer.isFocusableInTouchMode = true
+        remoteTouchLayer.requestFocus()
         remoteToolbar.visibility = View.VISIBLE
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -880,7 +956,10 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
     }
 
     private fun leaveRemoteMode() {
+        hideRemoteKeyboard()
         remoteModeActive = false
+        remoteTouchLayer.clearFocus()
+        remoteTouchLayer.isFocusable = false
         remoteCursor.visibility = View.GONE
         touchController?.resetViewport()
         setRemoteMenuExpanded(false)
@@ -891,6 +970,104 @@ class MainActivity : ComponentActivity(), RtcSession.Observer, RendererCommon.Re
         WindowCompat.getInsetsController(window, window.decorView)
             .show(WindowInsetsCompat.Type.systemBars())
         WindowCompat.setDecorFitsSystemWindows(window, true)
+    }
+
+    private fun sendRemoteKey(event: KeyEvent): Boolean {
+        if (!remoteModeActive) return false
+        val handled = when (event.action) {
+            KeyEvent.ACTION_DOWN -> keyboardController.keyDown(event.keyCode, event.repeatCount)
+            KeyEvent.ACTION_UP -> keyboardController.keyUp(event.keyCode)
+            else -> false
+        }
+        if (handled) renderModifierButtons()
+        return handled
+    }
+
+    private fun showRemoteKeyboard() {
+        if (!remoteModeActive || session == null) return
+        remoteTouchLayer.requestFocus()
+        remoteTouchLayer.post {
+            if (remoteModeActive && remoteTouchLayer.hasWindowFocus()) {
+                getSystemService(InputMethodManager::class.java)
+                    .apply {
+                        restartInput(remoteTouchLayer)
+                        showSoftInput(remoteTouchLayer, InputMethodManager.SHOW_IMPLICIT)
+                    }
+            }
+        }
+    }
+
+    private fun hideRemoteKeyboard() {
+        if (!::remoteTouchLayer.isInitialized) return
+        releaseKeyboardInput()
+        getSystemService(InputMethodManager::class.java)
+            .hideSoftInputFromWindow(remoteTouchLayer.windowToken, 0)
+        keyboardVisible = false
+        if (::keyboardBar.isInitialized) keyboardBar.visibility = View.GONE
+        if (::keyboardButton.isInitialized) keyboardButton.text = "键盘"
+    }
+
+    private fun releaseKeyboardInput() {
+        keyboardController.releaseAll()
+        if (::remoteTouchLayer.isInitialized) remoteTouchLayer.discardComposition()
+        renderModifierButtons()
+    }
+
+    private fun renderModifierButtons() {
+        modifierButtons.forEach { (key, button) ->
+            button.setTextColor(if (keyboardController.isPressed(key)) Color.rgb(73, 220, 175) else Color.WHITE)
+            button.isSelected = keyboardController.isPressed(key)
+        }
+    }
+
+    private fun createKeyboardBar(): HorizontalScrollView {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun addKey(label: String, keyCode: Int, modifier: Boolean = false) {
+            val button = secondaryButton(label).apply {
+                isFocusable = false
+                minHeight = 0
+                minimumHeight = 0
+                setOnClickListener {
+                    remoteTouchLayer.finishComposition()
+                    if (modifier) {
+                        if (keyboardController.isPressed(keyCode)) keyboardController.keyUp(keyCode)
+                        else keyboardController.keyDown(keyCode)
+                    } else {
+                        keyboardController.tap(keyCode)
+                    }
+                    renderModifierButtons()
+                }
+            }
+            if (modifier) modifierButtons[keyCode] = button
+            row.addView(button, LinearLayout.LayoutParams(dp(64), dp(48)))
+        }
+        row.addView(secondaryButton("收起").apply {
+            isFocusable = false
+            minHeight = 0
+            minimumHeight = 0
+            setOnClickListener { hideRemoteKeyboard() }
+        }, LinearLayout.LayoutParams(dp(64), dp(48)))
+        addKey("Esc", KeyEvent.KEYCODE_ESCAPE)
+        addKey("Tab", KeyEvent.KEYCODE_TAB)
+        addKey("Ctrl", KeyEvent.KEYCODE_CTRL_LEFT, modifier = true)
+        addKey("Alt", KeyEvent.KEYCODE_ALT_LEFT, modifier = true)
+        addKey("Shift", KeyEvent.KEYCODE_SHIFT_LEFT, modifier = true)
+        addKey("Win", KeyEvent.KEYCODE_META_LEFT, modifier = true)
+        addKey("←", KeyEvent.KEYCODE_DPAD_LEFT)
+        addKey("↑", KeyEvent.KEYCODE_DPAD_UP)
+        addKey("↓", KeyEvent.KEYCODE_DPAD_DOWN)
+        addKey("→", KeyEvent.KEYCODE_DPAD_RIGHT)
+        addKey("退格", KeyEvent.KEYCODE_DEL)
+        addKey("Del", KeyEvent.KEYCODE_FORWARD_DEL)
+        addKey("Enter", KeyEvent.KEYCODE_ENTER)
+        for (index in 0..11) addKey("F${index + 1}", KeyEvent.KEYCODE_F1 + index)
+        return HorizontalScrollView(this).apply {
+            isFocusable = false
+            visibility = View.GONE
+            isHorizontalScrollBarEnabled = false
+            setBackgroundColor(Color.rgb(8, 11, 16))
+            addView(row)
+        }
     }
 
     private fun primaryButton(label: String): Button = Button(this).apply {

@@ -377,7 +377,7 @@ NVENC、oneVPL 和 x264 均支持运行时更新 CBR。固定质量模式不改�
 | 12 | u32 | fps_den | 帧率分母，当前必须为 1 |
 | 16 | u32 | bitrate_bps | 网络媒体上限；CBR 时由 host 在该上限内动态选择工作码率 |
 | 20 | u32 | scale_percent | client 请求的编码分辨率百分比，10–100 |
-| 24 | u32 | flags | bit 0 = 文本剪贴板；bit 1 = Host 工作码率状态；bit 2 = WebCodecs 低延迟视频通道；bit 3 = Host 系统光标状态 |
+| 24 | u32 | flags | bit 0 = 文本剪贴板；bit 1 = Host 工作码率状态；bit 2 = WebCodecs 低延迟视频通道；bit 3 = Host 系统光标状态；bit 4 = UTF-8 实时文本输入 |
 | 28 | u32 | rate_control | 0=CBR；1=固定质量 |
 | 32 | u32 | quality | 固定质量为 1–51（小=高质量）；CBR 为 0 |
 
@@ -486,6 +486,25 @@ WebCodecs；标准 VideoTrack 仍保留给 Android 和 Windows 原生 client。
 | 12 | i32 | value1 | 绝对 X（0–65535）、相对 X（-32768–32767）、滚轮 delta 或 Windows 扫描码 |
 | 16 | i32 | value2 | 绝对 Y（0–65535）或相对 Y（-32768–32767），其余类型为 0 |
 | 20 | u32 | sequence | client 递增事件编号 |
+
+### TextInputHeader（16 bytes + UTF-8 text，可选）
+
+Android 通过 `ClientConfig.flags` bit 4 请求实时文本输入，手机输入法确认的文字通过可靠有序的
+`remoe-control` 通道发送。中文候选和组合输入保留在手机，确认后发送一次；Host 使用
+`KEYEVENTF_UNICODE` 注入 UTF-16（包括 Emoji 代理对），不修改剪贴板。换行和制表符分别映射为
+Enter / Tab，CRLF 只产生一次 Enter。外接键盘和功能键继续使用 scan code `InputEvent`。
+
+| 偏移 | 类型 | 字段 | 值/说明 |
+|---:|---|---|---|
+| 0 | u32 | magic | `TEXT` |
+| 4 | u16 | version | `11` |
+| 6 | u16 | header_size | `16` |
+| 8 | u32 | payload_size | 随后的 UTF-8 文本字节数，最大 4096 |
+| 12 | u32 | sequence | client 递增文本消息编号 |
+
+长文本按 UTF-8 字符边界分片；单次输入最多 1 MiB。Host 在注入前检查完整消息、UTF-8 和 NUL。
+该扩展需要同步更新 Android APK 与 Host；旧 Host 会拒绝新的 bit 4，旧 Web/Windows client
+仍可连接更新后的 Host。
 
 ### ClipboardHeader（16 bytes + UTF-8 text）
 

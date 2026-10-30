@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import top.ozaoza.remoe.protocol.VideoRateControl
+import top.ozaoza.remoe.protocol.Protocol
 
 class VideoConnectionSettingsTest {
     @Test
@@ -22,6 +23,10 @@ class VideoConnectionSettingsTest {
         assertEquals(75, config.scalePercent)
         assertEquals(VideoRateControl.CBR, config.rateControl)
         assertEquals(0, config.quality)
+        assertEquals(
+            Protocol.CLIENT_FLAG_CLIPBOARD_TEXT or Protocol.CLIENT_FLAG_TEXT_INPUT,
+            config.flags,
+        )
         assertEquals(24, settings.quality)
     }
 

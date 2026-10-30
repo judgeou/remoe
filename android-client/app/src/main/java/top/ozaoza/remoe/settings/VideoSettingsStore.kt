@@ -2,6 +2,7 @@ package top.ozaoza.remoe.settings
 
 import android.content.Context
 import top.ozaoza.remoe.protocol.ClientConfig
+import top.ozaoza.remoe.protocol.Protocol
 import top.ozaoza.remoe.protocol.VideoRateControl
 
 data class VideoConnectionSettings(
@@ -19,6 +20,7 @@ data class VideoConnectionSettings(
     }
 
     fun toClientConfig(): ClientConfig = ClientConfig(
+        flags = Protocol.CLIENT_FLAG_CLIPBOARD_TEXT or Protocol.CLIENT_FLAG_TEXT_INPUT,
         fpsNum = fps,
         bitrateBps = bitrateMbps * 1_000_000,
         scalePercent = scalePercent,

@@ -175,6 +175,8 @@ foreach(required_file
 endforeach()
 
 add_executable(remoe_host
+    src/text_input.cpp
+    src/text_input.h
     src/remoe.rc
     src/remoe_host.manifest
     src/clipboard.cpp
@@ -288,6 +290,8 @@ if(REMOE_BUILD_X264_HOST)
         INTERFACE_INCLUDE_DIRECTORIES "${X264_ROOT};${X264_BUILD_ROOT}")
 
     add_executable(remoe_host_x264
+        src/text_input.cpp
+        src/text_input.h
         src/remoe.rc
         src/remoe_host.manifest
         src/clipboard.cpp
@@ -382,6 +386,14 @@ elseif(REMOE_BUILD_CLIENT)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(remoe_text_input_test tests/text_input_test.cpp src/text_input.cpp)
+    target_include_directories(remoe_text_input_test PRIVATE src)
+    target_compile_definitions(remoe_text_input_test PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(remoe_text_input_test PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /EHsc /utf-8>)
+    target_link_libraries(remoe_text_input_test PRIVATE user32)
+    add_test(NAME text_input COMMAND remoe_text_input_test)
+
     add_executable(remoe_frame_age_test
         tests/frame_age_test.cpp)
     target_include_directories(remoe_frame_age_test PRIVATE src)

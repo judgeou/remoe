@@ -10,6 +10,7 @@
 #include "encoded_video_frame.h"
 #include "host_identity.h"
 #include "protocol.h"
+#include "text_input.h"
 #include "webrtc_websocket_signaling.h"
 #include "windows_service.h"
 
@@ -619,7 +620,8 @@ bool validate_client_settings(const remoe::protocol::ClientConfig& request,
         (request.flags & ~(remoe::protocol::kClientClipboardText |
                            remoe::protocol::kClientStreamStatus |
                            remoe::protocol::kClientLowLatencyVideo |
-                           remoe::protocol::kClientCursorState)) != 0 ||
+                           remoe::protocol::kClientCursorState |
+                           remoe::protocol::kClientTextInput)) != 0 ||
         request.fps_num == 0 || request.fps_num > 240 ||
         request.scale_percent < 10 || request.scale_percent > 100 ||
         (options.max_fps != 0 && request.fps_num > options.max_fps) ||
@@ -877,6 +879,7 @@ int run(const Options& options) {
         std::atomic_bool key_frame_requested{false};
         std::atomic_bool cursor_state_refresh_requested{false};
         std::atomic_bool clipboard_enabled{false};
+        std::atomic_bool text_input_enabled{false};
         std::atomic<DWORD> clipboard_sequence{GetClipboardSequenceNumber()};
         std::atomic_uint32_t outbound_clipboard_sequence{0};
         std::mutex input_mutex;
@@ -965,6 +968,28 @@ int run(const Options& options) {
                             reinterpret_cast<const std::uint8_t*>(&response), sizeof(response)))) {
                         session_running = false;
                         handshake.changed.notify_all();
+                    }
+                    return;
+                }
+            }
+            if (message.size() >= sizeof(std::uint32_t)) {
+                std::uint32_t magic;
+                std::memcpy(&magic, message.data(), sizeof(magic));
+                if (magic == remoe::protocol::kTextInputMagic) {
+                    auto inputs = remoe::text_input_events(message);
+                    if (!text_input_enabled.load() || !inputs) {
+                        std::cerr << "Invalid text input message over WebRTC\n";
+                        session_running = false;
+                        handshake.changed.notify_all();
+                        return;
+                    }
+                    if (!inputs->empty() &&
+                        SendInput(static_cast<UINT>(inputs->size()),
+                                  inputs->data(), sizeof(INPUT)) != inputs->size() &&
+                        !injection_warning_shown) {
+                        std::cerr << "Warning: Windows rejected remote text injection; run the host "
+                                     "with --admin when controlling elevated applications\n";
+                        injection_warning_shown = true;
                     }
                     return;
                 }
@@ -1159,6 +1184,7 @@ int run(const Options& options) {
             }
         }
         clipboard_enabled = (request.flags & remoe::protocol::kClientClipboardText) != 0;
+        text_input_enabled = (request.flags & remoe::protocol::kClientTextInput) != 0;
         const bool stream_status_enabled =
             (request.flags & remoe::protocol::kClientStreamStatus) != 0;
         const bool cursor_state_enabled =

@@ -6,7 +6,7 @@
 > Android 工程：`android-client/`
 
 > 实施进度：阶段 A–F 已完成实现、生产部署和真机端到端验收；阶段 E 使用 Android Keystore
-> 设备密钥。阶段 G 已完成触摸鼠标控制、Web 对等视频参数和按需性能浮层，物理键盘、剪贴板和
+> 设备密钥。阶段 G 已完成触摸鼠标控制、Web 对等视频参数、按需性能浮层及软/物理键盘输入，剪贴板和
 > 其余体验完善仍待继续。阶段 C 的完整
 > 10 分钟长稳测试延后至阶段 H。
 
@@ -315,12 +315,13 @@ ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
 | 消息 | 大小 | 方向 | 用途 |
 |---|---:|---|---|
 | `WebRtcSignalHeader` | 20 | 双向 WSS | SDP/ICE/ready/ack framing |
-| `ClientConfig` | 36 | client → host | FPS、网络码率、缩放、码控、剪贴板能力 |
+| `ClientConfig` | 36 | client → host | FPS、网络码率、缩放、码控、剪贴板/文本输入能力 |
 | `StreamHeader` | 44 | host → client | codec、分辨率、FPS、码率、profile、码控 |
 | `StreamReady` | 8 | client → host | client 解码/显示准备完成 |
 | `ClockSyncRequest` | 24 | client → host | 时钟同步请求 |
 | `ClockSyncResponse` | 40 | host → client | host 接收/发送时间 |
 | `InputEvent` | 24 | client → host | 鼠标和 Windows scan code 键盘 |
+| `TextInputHeader` | 16 + text | client → host | 实时 UTF-8 文本，单帧最大 4096 bytes |
 | `ClipboardHeader` | 16 + text | 双向 | 最大 1 MiB UTF-8 文本剪贴板 |
 
 所有协议 codec 都要使用与 Web/C++ 相同的 golden byte fixtures。至少测试：
@@ -538,18 +539,26 @@ Android 当前通过覆盖远程区域的透明触摸层接收手势；100% 视�
 避免缩放、滚轮和单击互相误触。缩放回 100% 时自动归中；断开、`ACTION_CANCEL` 和窗口失焦都会
 立即释放尚未抬起的左键并在离开远程模式时重置视口。
 
-### 13.1 软键盘与文本输入缺口
+### 12.1 软键盘与实时文本输入
 
 Android IME 输出的是 Unicode 文本/组合输入，不应强行映射为 Windows scan code。中文、日文、Emoji
 等无法靠当前 Keyboard InputEvent 正确表达。
 
-可选方案：
+当前采用 protocol v11 可选扩展：Android 在 `ClientConfig.flags` bit 4 请求 `TEXT` 消息，
+16 字节 header 包含 magic/version/header_size/payload_size/sequence，随后为不含 NUL 的 UTF-8。
+单个 payload 最大 4096 bytes，较长输入按字符边界分片；Host 在验证完整消息后使用
+`KEYEVENTF_UNICODE` 注入，换行和 Tab 使用功能键。不修改剪贴板。Android 与 Host 需要同步更新，
+旧 Host 会拒绝新 flag；未请求扩展的旧 Web/Windows client 仍兼容。
 
-1. 第一版通过现有 UTF-8 剪贴板发送文本并提示用户粘贴；
-2. protocol 后续增加明确的 UTF-8 text input 消息，由 host 使用合适的 Windows 文本注入路径；
-3. 物理键盘继续使用 scan code。
+`RemoteKeyboardView` 提供 `BaseInputConnection`，仅保留本地组合文字，`commitText` 和
+`finishComposingText` 把已确认文字发送一次后清空。退格优先修改本地组合文字，无本地文字时
+发送远程 Backspace/Delete；支持按 Unicode code point 删除。连接替换、键盘收起或生命周期
+取消后拒绝旧 InputConnection 的后续回调。文本内容不写入诊断日志。
 
-不要把软键盘字符逐个伪装成美式键盘 scan code。
+右上角“更多”→“键盘”调起输入法；键盘上方功能条提供常用修饰键、方向键、编辑键和 F1–F12。
+Ctrl/Alt/Win 锁定后的字母/数字通过明确的快捷键路径发送 scan code。物理键盘通过
+Android keyCode 映射 Windows scan code，保留 extended 标志和长按重复；不直接使用 Linux
+scanCode。收起键盘、窗口失焦、Activity pause 和断开时释放所有按下键。
 
 Android 触控参考：
 
@@ -738,8 +747,8 @@ Android 触控参考：
 
 当前已完成触控板式相对指针、轻点左击、双击拖拽、双指右击与滚轮、100%–400% 本地缩放和平移；连接前可设置与
 Web 端相同的 FPS、网络码率、编码缩放、CBR / 固定质量及质量值。远程画面性能浮层按需采集并显示
-解码 FPS、接收码率、实际网速和本周期丢帧事件，隐藏时停止每秒 `getStats()` 轮询。物理键盘、
-剪贴板仍未完成。视频连接参数已在每次通过校验并发起连接时保存，下次启动恢复；持久化范围不包含
+解码 FPS、接收码率、实际网速和本周期丢帧事件，隐藏时停止每秒 `getStats()` 轮询。软键盘与
+物理键盘已实现并覆盖自动化测试，等待真机端到端验收；剪贴板仍未完成。视频连接参数已在每次通过校验并发起连接时保存，下次启动恢复；持久化范围不包含
 invite、access token 或其他连接凭据。
 
 ### 阶段 H：稳定性、安全和发布
@@ -771,7 +780,6 @@ invite、access token 或其他连接凭据。
 - 最终 libwebrtc AAR 版本及供应链固定方式；
 - Release signing/Play App Signing 方案；
 - QR scanner 采用 CameraX + ML Kit 还是 ZXing；
-- 是否扩展 protocol 支持 UTF-8 text input；
 - 后台/画中画/平板/折叠屏支持范围；
 - STUN server 最终配置来源和多地址策略；
 - 网络切换是否在后续加入 ICE restart；

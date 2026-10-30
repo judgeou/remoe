@@ -114,6 +114,22 @@ DataChannel 明确失败时才清理会话并返回主界面。
 参数，下次启动自动恢复；invite 和连接令牌不会写入该设置。指标计算有 JVM 单元测试，真机显示
 等待用户验收。
 
+## 实时键盘输入
+
+远程画面打开右上角“更多”→“键盘”即可调起手机输入法，中文、英文、Emoji 在输入法确认后
+立即发送到 Windows 当前焦点控件。组合输入和候选词保留在手机，避免拼音中间态或候选确认重复
+输入。键盘上方的横向工具条提供 Esc、Tab、Ctrl、Alt、Shift、Win、方向键、退格、Del、Enter
+和 F1–F12；修饰键点按后保持，再次点按释放，例如 Ctrl → c 可复制，Ctrl → v 可粘贴。
+
+外接物理键盘直接映射 Windows scan code，保留左右修饰键、方向键与数字小键盘的区别，并支持
+长按重复。Android 系统返回键仍用于收起本地键盘，远端 Escape 使用工具条的 Esc 或物理 Esc。
+收起键盘、窗口失焦、切后台及断开连接时释放远端按键并丢弃尚未确认的组合文字。
+
+文本使用 protocol v11 新增的 `TEXT` 消息和 `ClientConfig.flags` bit 4；Host 通过 Unicode
+事件注入文字，支持 UTF-8 分片，不依赖剪贴板。需要同时使用本次更新后的 Windows Host，旧 Host
+不支持该扩展并会拒绝连接。旧 Web/Windows 客户端继续兼容更新后的 Host。协议、按键控制与 IME
+组合输入有自动化测试；各厂商输入法和真实远程应用的端到端体验仍需真机验收。
+
 ## 自行管理 Release 签名
 
 项目不使用 Google Play / Play App Signing。Release APK 必须始终使用同一枚自行保管的密钥；密钥

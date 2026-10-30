@@ -9,6 +9,7 @@ constexpr std::uint32_t kStreamMagic = 0x454F4D52; // "RMOE" on the wire (little
 constexpr std::uint32_t kClientConfigMagic = 0x46434D52; // "RMCF"
 constexpr std::uint32_t kInputMagic = 0x54504E49; // "INPT"
 constexpr std::uint32_t kClipboardMagic = 0x50494C43; // "CLIP"
+constexpr std::uint32_t kTextInputMagic = 0x54584554; // "TEXT"
 constexpr std::uint32_t kWebRtcSignalMagic = 0x534D5257; // "WRMS"
 constexpr std::uint32_t kStreamReadyMagic = 0x59445253; // "SRDY"
 constexpr std::uint32_t kStreamStatusMagic = 0x54534D52; // "RMST"
@@ -19,6 +20,7 @@ constexpr std::uint16_t kVersion = 11;
 constexpr std::uint32_t kCodecAv1 = 0x31305641;   // "AV01"
 constexpr std::uint32_t kCodecH264 = 0x34363248;  // "H264"
 constexpr std::size_t kMaxClipboardTextSize = 1024 * 1024;
+constexpr std::size_t kMaxTextInputSize = 4096;
 constexpr std::size_t kVideoChunkPayloadSize = 16 * 1024;
 // Identifies Windows input synthesized by a remoe host. A client connected to
 // a host on the same machine must not send that input back to the host.
@@ -30,6 +32,7 @@ enum ClientFlags : std::uint32_t {
     kClientStreamStatus = 1u << 1,
     kClientLowLatencyVideo = 1u << 2,
     kClientCursorState = 1u << 3,
+    kClientTextInput = 1u << 4,
 };
 
 enum CursorFlags : std::uint32_t {
@@ -195,6 +198,16 @@ struct ClipboardHeader {
     std::uint32_t sequence = 0;
 };
 
+// Optional client-to-host committed UTF-8 text, enabled by kClientTextInput.
+// Does not read or modify the clipboard. The payload follows this header.
+struct TextInputHeader {
+    std::uint32_t magic = kTextInputMagic;
+    std::uint16_t version = kVersion;
+    std::uint16_t header_size = sizeof(TextInputHeader);
+    std::uint32_t payload_size = 0;
+    std::uint32_t sequence = 0;
+};
+
 // Framing used only during the TCP bootstrap that precedes the video stream.
 // value/metadata contain SDP+type or candidate+mid respectively.
 struct WebRtcSignalHeader {
@@ -218,6 +231,7 @@ static_assert(sizeof(ClockSyncRequest) == 24);
 static_assert(sizeof(ClockSyncResponse) == 40);
 static_assert(sizeof(InputEvent) == 24);
 static_assert(sizeof(ClipboardHeader) == 16);
+static_assert(sizeof(TextInputHeader) == 16);
 static_assert(sizeof(WebRtcSignalHeader) == 20);
 
 } // namespace remoe::protocol

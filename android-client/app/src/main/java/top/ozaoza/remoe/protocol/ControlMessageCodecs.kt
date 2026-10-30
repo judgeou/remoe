@@ -42,7 +42,8 @@ object ClientConfigCodec {
             throw ProtocolException("invalid ClientConfig bitrate")
         }
         if (value.scalePercent !in 10..100 ||
-            value.flags and Protocol.CLIENT_FLAG_CLIPBOARD_TEXT.inv() != 0
+            value.flags and (Protocol.CLIENT_FLAG_CLIPBOARD_TEXT or
+                Protocol.CLIENT_FLAG_TEXT_INPUT).inv() != 0
         ) {
             throw ProtocolException("invalid ClientConfig scale or flags")
         }

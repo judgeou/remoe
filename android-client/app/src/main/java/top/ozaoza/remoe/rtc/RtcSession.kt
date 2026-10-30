@@ -32,6 +32,7 @@ import top.ozaoza.remoe.protocol.SignalType
 import top.ozaoza.remoe.protocol.StreamHeader
 import top.ozaoza.remoe.protocol.StreamHeaderCodec
 import top.ozaoza.remoe.protocol.StreamReadyCodec
+import top.ozaoza.remoe.protocol.TextInputCodec
 import top.ozaoza.remoe.signaling.ConnectionInvite
 import top.ozaoza.remoe.signaling.SignalWebSocket
 import java.nio.ByteBuffer
@@ -88,6 +89,7 @@ class RtcSession(
     private val receivedSignalCounts = mutableMapOf<SignalType, Int>()
     private var remoteSdpObserver: SdpObserver? = null
     private var inputSequence = 0u
+    private var textSequence = 0u
     private val inputChoreographer = Choreographer.getInstance()
     private val inputFrameCallback = Choreographer.FrameCallback { flushPendingMove() }
     private var pendingMove: RemoteInputEvent? = null
@@ -116,6 +118,20 @@ class RtcSession(
         // Preserve ordering for button and wheel input, especially drag release.
         if (!flushPendingMove(force = true)) return false
         return sendInputNow(event)
+    }
+
+    @Synchronized
+    fun sendText(text: String): Boolean {
+        if (stopped || !bootstrapComplete || streamHeader == null ||
+            clientConfig.flags and Protocol.CLIENT_FLAG_TEXT_INPUT == 0
+        ) return false
+        val messages = TextInputCodec.encodeMessages(text, textSequence)
+        if (!flushPendingMove(force = true)) return false
+        for (message in messages) {
+            if (!sendControl(message)) return false
+            textSequence++
+        }
+        return true
     }
 
     @Synchronized
